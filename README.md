@@ -31,29 +31,35 @@ Build a domain-specific foundation model for financial transaction data. This de
      -v $(pwd):/workspace \
      --shm-size=8g \
      -p 8888:8888 \
+     -p 6006:6006 \
      --ulimit memlock=-1 \
      nvcr.io/nvidia/nemo:25.09.01
    ```
    - `--shm-size=8g` — increases shared memory to prevent DataLoader crashes under PyTorch multi-process loading
    - `-p 8888:8888` — publishes the Jupyter port to the host browser
+   - `-p 6006:6006` — publishes the TensorBoard port for training monitoring (notebook 03)
    - `--ulimit memlock=-1` — removes the locked-memory limit required by some CUDA operations
-2. Inside the container, install Git LFS, fetch the checkpoint artifacts, install dependencies, and start Jupyter:
+2. Inside the container, install Git LFS, fetch the checkpoint artifacts, and start Jupyter:
    ```bash
+   git config --global --add safe.directory /workspace
    apt-get update && apt-get install -y git-lfs
    git lfs install
    git lfs pull
-   pip install -r requirements.txt
    jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
    ```
+   > **Note:** The `safe.directory` line is required because the repository is bind-mounted from the host, which causes a Git ownership mismatch inside the container. Without it, `git lfs pull` will fail.
+
+   Each notebook installs its own dependencies (e.g. `%pip install xgboost ...`) so a separate `requirements.txt` is not needed.
+
    Open `http://localhost:8888/?token=...` in your browser.
 3. Run `01_dataset_baseline.ipynb` to download the dataset and establish an XGBoost baseline.
-4. Continue through notebooks 02–05 sequentially, or skip training (notebook 03) by using the pre-trained checkpoint below.
+4. Continue through notebooks 02–05 sequentially.
 
-**Pre-trained Model Checkpoint**
+**Pre-trained Model Checkpoint (required for notebooks 04–05)**
 
-A pre-trained checkpoint (~56 MB) is tracked with Git LFS so you can skip training and go directly to inference.
+Notebooks 04 and 05 load the pre-trained checkpoint from `models/decoder-foundation-model/`. This checkpoint (~56 MB) is tracked with Git LFS and was trained for ~3,000 steps on 8× A100 GPUs. You **must** run `git lfs pull` (step 2 above) to download it.
 
-After cloning the repository, install Git LFS and run `git lfs pull` so `models/decoder-foundation-model/` contains the checkpoint files expected by notebooks 04 and 05.
+Notebook 03 runs a short 30-step demo to illustrate the training pipeline; its output is saved to a separate directory (`models/decoder-demo/`) and is **not** used by notebooks 04–05. Whether you run notebook 03 or skip it, the pre-trained checkpoint from Git LFS is what notebooks 04 and 05 expect.
 
 ---
 
@@ -106,29 +112,33 @@ After cloning the repository, install Git LFS and run `git lfs pull` so `models/
    ```bash
    docker pull nvcr.io/nvidia/nemo:25.09.01
    ```
-2. Launch with GPU access, mount this repository, and publish the Jupyter port:
+2. Launch with GPU access, mount this repository, and publish the Jupyter and TensorBoard ports:
    ```bash
    docker run --gpus all --rm -it \
      -v $(pwd):/workspace \
      --shm-size=8g \
      -p 8888:8888 \
+     -p 6006:6006 \
      --ulimit memlock=-1 \
      nvcr.io/nvidia/nemo:25.09.01
    ```
-   > **Remote host**: If running on a remote machine, add SSH port forwarding (`ssh -L 8888:localhost:8888 user@host`) so the Jupyter server is reachable from your local browser.
-3. Install Git LFS and additional dependencies:
+   > **Remote host**: If running on a remote machine, add SSH port forwarding (`ssh -L 8888:localhost:8888 -L 6006:localhost:6006 user@host`) so Jupyter and TensorBoard are reachable from your local browser.
+3. Install Git LFS and pull the pre-trained checkpoint:
    ```bash
+   git config --global --add safe.directory /workspace
    apt-get update && apt-get install -y git-lfs
    git lfs install
    git lfs pull
-   pip install -r requirements.txt
    ```
+   > **Note:** The `safe.directory` line is needed because bind-mounting the repo causes a Git ownership mismatch inside the container.
+
+   Each notebook installs its own dependencies inline, so no separate `requirements.txt` is needed.
 4. Start Jupyter inside the container:
    ```bash
    jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
    ```
    Open the URL printed in the terminal (e.g. `http://localhost:8888/?token=...`) in your browser.
-5. Run notebooks sequentially or use the pre-trained checkpoint for notebooks 04–05.
+5. Run notebooks 01–05 sequentially. Notebooks 04 and 05 require the pre-trained checkpoint downloaded by `git lfs pull` in step 3 (see [Pre-trained Model Checkpoint](#quickstart) above).
 
 ---
 
