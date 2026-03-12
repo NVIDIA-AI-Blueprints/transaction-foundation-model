@@ -53,13 +53,11 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
      -v $(pwd):/workspace \
      --shm-size=8g \
      -p 8888:8888 \
-     -p 6006:6006 \
      --ulimit memlock=-1 \
      nvcr.io/nvidia/nemo:25.09.01
    ```
    - `--shm-size=8g` — increases shared memory to prevent DataLoader crashes under PyTorch multi-process loading
    - `-p 8888:8888` — publishes the Jupyter port to the host browser
-   - `-p 6006:6006` — publishes the TensorBoard port for training monitoring (notebook 03)
    - `--ulimit memlock=-1` — removes the locked-memory limit required by some CUDA operations
 2. Inside the container, install Git LFS, fetch the checkpoint artifacts, and start Jupyter:
    ```bash
@@ -103,17 +101,16 @@ Notebook 03 runs a short 30-step demo to illustrate the training pipeline; its o
    ```bash
    docker pull nvcr.io/nvidia/nemo:25.09.01
    ```
-2. Launch with GPU access, mount this repository, and publish the Jupyter and TensorBoard ports:
+2. Launch with GPU access, mount this repository, and publish the Jupyter port:
    ```bash
    docker run --gpus all --rm -it \
      -v $(pwd):/workspace \
      --shm-size=8g \
      -p 8888:8888 \
-     -p 6006:6006 \
      --ulimit memlock=-1 \
      nvcr.io/nvidia/nemo:25.09.01
    ```
-   > **Remote host**: If running on a remote machine, add SSH port forwarding (`ssh -L 8888:localhost:8888 -L 6006:localhost:6006 user@host`) so Jupyter and TensorBoard are reachable from your local browser.
+   > **Remote host**: If running on a remote machine, add SSH port forwarding (`ssh -L 8888:localhost:8888 user@host`) so Jupyter is reachable from your local browser.
 3. Install Git LFS and pull the pre-trained checkpoint:
    ```bash
    git config --global --add safe.directory /workspace
