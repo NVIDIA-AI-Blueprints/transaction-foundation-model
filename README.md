@@ -135,7 +135,7 @@ Notebook 03 runs a short 30-step demo to illustrate the training pipeline; its o
 The developer example is designed for extensibility:
 
 - **Tokenizer** — The modular tokenizer pipeline (`src/tokenizer/`) can be adapted to different transaction schemas by adding or replacing individual tokenizer components.
-- **Model Architecture** — Training hyperparameters and model configuration are in `configs/pretrain_financial_llama.yaml`. Swap in any HuggingFace-compatible decoder architecture by updating this config.
+- **Model Architecture** — Training hyperparameters and model configuration are in `configs/pretrain_financial_decoder.yaml`. Swap in any HuggingFace-compatible decoder architecture by updating this config.
 - **Downstream Tasks** — Replace XGBoost with any classifier that accepts fixed-length feature vectors.
 
 ---

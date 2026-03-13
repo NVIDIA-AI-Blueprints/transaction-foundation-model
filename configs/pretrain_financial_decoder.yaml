@@ -1,14 +1,17 @@
-# Financial Foundation Model Pretraining — Decoder-Only (Llama Architecture)
+# Financial Foundation Model Pretraining — Decoder-Only
 #
-# NeMo AutoModel configuration for pretraining a small Llama on
+# NeMo AutoModel configuration for pretraining a decoder foundation model on
 # financial transaction sequences using causal language modeling.
+# Swap in any HuggingFace-compatible decoder architecture by updating the
+# model._target_ and model.config._target_ fields below.
 #
+# This example uses a Llama config, but the pipeline is architecture-agnostic.
 # Key architectural choices (vs GPT-2):
 #   - RoPE (Rotary Position Embeddings) instead of learned absolute
 #   - GQA (Grouped Query Attention): 8 query heads, 2 KV heads
 #   - SwiGLU activation instead of GELU
 #   - RMSNorm instead of LayerNorm
-#   - No dropout (standard for Llama-family architectures)
+#   - No dropout
 #   - 8192 max context (RoPE allows extrapolation beyond training length)
 #
 # Parameter count: ~29M
@@ -17,13 +20,13 @@
 #
 #   1. Multi-GPU (recommended):
 #      torchrun --nproc-per-node=8 scripts/train_decoder_model.py \
-#          -c configs/pretrain_financial_llama.yaml \
+#          -c configs/pretrain_financial_decoder.yaml \
 #          --dataset.data_path data/decoder_corpus/train_corpus.txt \
 #          --validation_dataset.data_path data/decoder_corpus/val_corpus.txt
 #
 #   2. Single GPU (testing):
 #      python scripts/train_decoder_model.py \
-#          -c configs/pretrain_financial_llama.yaml \
+#          -c configs/pretrain_financial_decoder.yaml \
 #          --dataset.data_path data/decoder_corpus/train_corpus.txt
 #
 # NOTE: Use torchrun directly (not automodel CLI) for multi-GPU.
@@ -31,13 +34,13 @@
 # override instead of passing it to torchrun.
 #
 # Key design choices:
-#   - Llama architecture with custom config (~29M params)
+#   - Decoder architecture with custom config (~29M params)
 #   - 4096-token context window (~315 transactions per sequence)
 #   - Vocab size ~6,251 (domain-specific financial tokenizer)
 #   - Next-token prediction (every token is a training signal)
 
 # -- Model ----------------------------------------------------------------
-# Randomly initialized Llama with custom dimensions to match our data regime.
+# Randomly initialized decoder model with custom dimensions to match our data regime.
 # vocab_size must match FinancialTabularTokenizer output.
 model:
   _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
@@ -50,10 +53,10 @@ model:
     num_key_value_heads: 2        # GQA: 4:1 ratio (8 Q heads, 2 KV heads)
     intermediate_size: 1408       # SwiGLU FFN; ~same param count as GPT-2's 2048 GELU
     max_position_embeddings: 8192 # RoPE allows extrapolation beyond this
-    rope_theta: 500000.0          # High base for long-context (Llama 3.x convention)
+    rope_theta: 500000.0          # High base for long-context
     hidden_act: silu
     rms_norm_eps: 1.0e-5
-    attention_dropout: 0.0        # Llama convention: no dropout
+    attention_dropout: 0.0
     tie_word_embeddings: false
     bos_token_id: 1
     eos_token_id: 2
@@ -136,4 +139,4 @@ checkpoint:
   checkpoint_dir: models/decoder-demo/checkpoints/
   model_save_format: safetensors
   save_consolidated: true
-  model_repo_id: custom-financial-llama
+  model_repo_id: custom-financial-decoder

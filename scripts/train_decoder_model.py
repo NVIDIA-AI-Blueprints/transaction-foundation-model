@@ -1,7 +1,7 @@
 """
 Financial Foundation Model Pre-training — Decoder-Only (NeMo AutoModel)
 
-Pretrains a Llama-based causal language model on financial transaction
+Pretrains a decoder causal language model on financial transaction
 sequences using NeMo AutoModel's TrainFinetuneRecipeForNextTokenPrediction.
 
 Custom components:
@@ -12,13 +12,13 @@ Launch methods
 --------------
 Multi-GPU (recommended):
     torchrun --nproc-per-node=8 scripts/train_decoder_model.py \
-        -c configs/pretrain_financial_llama.yaml \
+        -c configs/pretrain_financial_decoder.yaml \
         --dataset.data_path data/decoder_corpus/train_corpus.txt \
         --validation_dataset.data_path data/decoder_corpus/val_corpus.txt
 
 Single GPU (testing):
     python scripts/train_decoder_model.py \
-        -c configs/pretrain_financial_llama.yaml \
+        -c configs/pretrain_financial_decoder.yaml \
         --dataset.data_path data/decoder_corpus/train_corpus.txt
 """
 
