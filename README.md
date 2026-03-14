@@ -47,6 +47,7 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
 - [Customization](#customization)
 - [Model Architecture](#model-architecture)
 - [License](#license)
+- [Terms of Use](#terms-of-use)
 
 ---
 
@@ -176,10 +177,12 @@ The included example uses a Llama decoder architecture, but NeMo AutoModel suppo
 
 ### License
 
-By using this software, you are agreeing to the terms and conditions of the license and acceptable use policy.
+Unless otherwise noted, the contents of this repository are licensed under the [Apache License, Version 2.0](LICENSE).
 
-**GOVERNING TERMS**: This developer example is governed by the [NVIDIA Software License Agreement](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/) and [Product Specific Terms for AI Products](https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/).
+This project downloads and uses additional third-party open source software and datasets. Those third-party components are governed by their respective licenses and terms.
 
-This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.
+### Terms of Use
+
+This project is currently not accepting contributions.
 
 Please report security vulnerabilities or NVIDIA AI concerns [here](https://www.nvidia.com/en-us/support/submit-security-vulnerability/).
