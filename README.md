@@ -8,8 +8,7 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
 - **Scalable pretraining with NeMo AutoModel** — A decoder-only foundation model is trained with causal language modeling through NVIDIA NeMo AutoModel. NeMo AutoModel handles distributed training out of the box, scaling seamlessly from a single GPU to multi-node clusters, and can incorporate essentially any HuggingFace-compatible decoder architecture. This example uses Llama, but the framework is architecture-agnostic.
 - **Embedding extraction and downstream evaluation** — Learned embeddings are extracted via last-token pooling and evaluated on fraud detection with XGBoost, demonstrating clear lift over hand-crafted feature baselines.
 
-![Architecture Diagram](https://github.com/NVIDIA-AI-Blueprints/transaction-foundation-model/blob/main/assets/architecture_diagram.png)
-
+![Architecture Diagram](https://raw.githubusercontent.com/NVIDIA-AI-Blueprints/transaction-foundation-model/main/assets/architecture_diagram.png)
 
 #### Software Components
 
