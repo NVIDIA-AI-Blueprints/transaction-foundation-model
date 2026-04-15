@@ -33,7 +33,7 @@ concurrency:
 
 env:
   CONTAINER_NAME: tfm-nemo-backend
-  NEMO_IMAGE: nvcr.io/nvidia/nemo:25.09.01
+  NEMO_IMAGE: nvcr.io/nvidia/nemo:26.02.nemotron_3_super
   # Space-separated paths relative to repo root (under /notebooks in the container). Order matters.
   PAPERMILL_NOTEBOOKS: 01_dataset_baseline.ipynb 02_seq_preproc_tokenization.ipynb 03_foundation_model_training.ipynb 04_inference_embedding_extraction.ipynb 05_xgboost_fraud_detection.ipynb
   BLUEPRINT_TEST_IMAGE: nvcr.io/rw983xdqtcdp/auto_test_team/blueprint-github-test-image:latest
