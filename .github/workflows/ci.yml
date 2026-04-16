@@ -301,27 +301,30 @@ jobs:
           uv --version
 
           cd /notebooks
-          if [ -f requirements.txt ]; then
-            uv pip install --python "$(which python)" -r requirements.txt
-          else
-            echo "WARNING: requirements.txt not found under /notebooks; skipping uv pip install"
-          fi
 
           if command -v mamba >/dev/null 2>&1; then
             mamba install -c conda-forge -c rapidsai cupy==14.0.1 numpy==2.2.6 -y
           elif command -v conda >/dev/null 2>&1; then
             conda install -c conda-forge -c rapidsai cupy==14.0.1 numpy==2.2.6 -y
           else
-            echo "No mamba/conda — installing RAPIDS for CUDA 12 via pip into active venv (cudf/cuml for notebooks)..."
-            uv pip install --python "$(which python)" \
+            echo "No mamba/conda — RAPIDS via pip first (must run BEFORE requirements.txt: xgboost/deps can pull nvidia-nccl and libucx versions that conflict with cuml/raft)."
+            PY="$(which python)"
+            ${PY} -m pip install -q --upgrade pip
+            # pip + NVIDIA index resolves ucx-py / libucx / raft more reliably than uv here.
+            ${PY} -m pip install \
               --extra-index-url https://pypi.nvidia.com \
               "cudf-cu12==${{ env.RAPIDS_PIP_VERSION }}" \
               "cuml-cu12==${{ env.RAPIDS_PIP_VERSION }}"
-            # CUDA math libs shipped as pip wheels (fixes libcusolver.so.* not found at cuml import).
-            uv pip install --python "$(which python)" \
+            ${PY} -m pip install \
               nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-cusolver-cu12 \
-              nvidia-cusparse-cu12 nvidia-cufft-cu12 nvidia-nccl-cu12 nvidia-curand-cu12 \
+              nvidia-cusparse-cu12 nvidia-cufft-cu12 nvidia-curand-cu12 \
               nvidia-nvjitlink-cu12 || true
+          fi
+
+          if [ -f requirements.txt ]; then
+            uv pip install --python "$(which python)" -r requirements.txt
+          else
+            echo "WARNING: requirements.txt not found under /notebooks; skipping uv pip install"
           fi
 
           cat >/tmp/tfm-cuda-ldpath.sh <<'LDPATH'
@@ -595,6 +598,7 @@ jobs:
       - name: Send mail
         uses: dawidd6/action-send-mail@6e71c855c9a091d80a519621b9fd3e8d252ca40c
         if: always()
+        continue-on-error: true
         with:
           server_address: smtp.gmail.com
           server_port: 587
