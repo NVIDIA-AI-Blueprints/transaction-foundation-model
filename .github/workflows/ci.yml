@@ -11,14 +11,14 @@
 #   3. docker exec: uv install, requirements.txt, mamba cupy/numpy (same pattern as blueprint setup)
 #   4. docker exec: for each notebook in PAPERMILL_NOTEBOOKS (space-separated), strip kernel-shutdown
 #      cells into /tmp (inline Python on runner → docker cp), then papermill. Repo .ipynb unchanged.
-#   Optional: blueprint-github-test via actions/checkout — use secret BLUEPRINT_TEST_REPO_PAT for private repos;
+#   Optional: blueprint-github-test via actions/checkout — use secret BLUEPRINT_GITHUB_TEST (PAT) for private repos;
 #   if unset, github.token is used (public repos). Copy result_*.ipynb → input/, run pytest.
 #
 # Required secret: NGC_API_KEY — NVIDIA NGC API key for docker login to nvcr.io
 #   (NeMo image is not anonymously pullable; login as user '$oauthtoken', password = key)
 # Optional: HUGGING_FACE_HUB_TOKEN — passed into papermill container as HF_TOKEN if notebooks need HF.
 # Optional: SMTP_USERNAME, SMTP_PASSWORD — Gmail SMTP for Send mail (dawidd6/action-send-mail).
-# Optional: BLUEPRINT_TEST_REPO_PAT — fine-grained/classic PAT with contents:read on bp-cicd-org/blueprint-github-test (private).
+# Optional: BLUEPRINT_GITHUB_TEST — PAT with contents:read on bp-cicd-org/blueprint-github-test (private cross-org pull).
 # =============================================================================
 
 name: Transaction Foundation Model Launchable + Papermill notebooks
@@ -39,7 +39,7 @@ env:
   NEMO_IMAGE: nvcr.io/nvidia/nemo:26.02.nemotron_3_super
   # Space-separated paths relative to repo root (under /notebooks in the container). Order matters.
   PAPERMILL_NOTEBOOKS: 01_dataset_baseline.ipynb 02_seq_preproc_tokenization.ipynb 03_foundation_model_training.ipynb 04_inference_embedding_extraction.ipynb 05_xgboost_fraud_detection.ipynb
-  # blueprint-github-test (owner/repo for actions/checkout; private repo needs secrets.BLUEPRINT_TEST_REPO_PAT).
+  # blueprint-github-test (owner/repo for actions/checkout; private repo needs secrets.BLUEPRINT_GITHUB_TEST).
   BLUEPRINT_TEST_REPOSITORY: bp-cicd-org/blueprint-github-test
   BLUEPRINT_TEST_BRANCH: transaction-foundation-model-automation
   QA_PYTEST_MARK: transaction_foundation_model
@@ -512,7 +512,7 @@ jobs:
           repository: ${{ env.BLUEPRINT_TEST_REPOSITORY }}
           ref: ${{ env.BLUEPRINT_TEST_BRANCH }}
           path: blueprint-github-test
-          token: ${{ secrets.BLUEPRINT_TEST_REPO_PAT }}
+          token: ${{ secrets.BLUEPRINT_GITHUB_TEST || github.token }}
           persist-credentials: false
 
       - name: Run Test Code (blueprint-github-test pytest)
