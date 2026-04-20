@@ -504,13 +504,14 @@ jobs:
           ls -la "${DEST}/notebook_output" || true
           find "${DEST}/notebook_output" -type f 2>/dev/null | head -50 || true
 
+      # actions/checkout only allows path under GITHUB_WORKSPACE, not under /tmp DEST (docker host copy).
       - name: Checkout blueprint-github-test
         if: always()
         uses: actions/checkout@v4
         with:
           repository: ${{ env.BLUEPRINT_TEST_REPOSITORY }}
           ref: ${{ env.BLUEPRINT_TEST_BRANCH }}
-          path: ${{ env.DEST }}/blueprint-github-test
+          path: blueprint-github-test
           token: ${{ secrets.BLUEPRINT_TEST_REPO_PAT }}
           persist-credentials: false
 
@@ -528,7 +529,7 @@ jobs:
             exit 0
           fi
 
-          CLONE="${DEST}/blueprint-github-test"
+          CLONE="${GITHUB_WORKSPACE}/blueprint-github-test"
           if [ ! -f "${CLONE}/testcases/test_transaction_foundation_model_notebook.py" ]; then
             echo "::error::Checkout missing at ${CLONE}; ensure Checkout blueprint-github-test succeeded."
             exit 1
@@ -538,11 +539,11 @@ jobs:
           if [ -f "${CLONE}/conftest.py" ]; then
             mv "${CLONE}/conftest.py" "${CLONE}/conftest.py.bak"
           fi
-          DEST="${DEST}" python3 <<'PY'
+          python3 <<'PY'
           import os
           from pathlib import Path
 
-          p = Path(os.environ["DEST"]) / "blueprint-github-test" / "conftest.py"
+          p = Path(os.environ["GITHUB_WORKSPACE"]) / "blueprint-github-test" / "conftest.py"
           p.write_text(
               "def pytest_addoption(parser):\n"
               "    parser.addoption(\n"
