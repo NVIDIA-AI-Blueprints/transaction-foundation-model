@@ -11,7 +11,7 @@
 # - HUGGING_FACE_HUB_TOKEN: forwarded as HF_TOKEN for notebook downloads.
 # - SMTP_USERNAME / SMTP_PASSWORD: email notification.
 
-name: Transaction Foundation Model Launchable + Papermill notebooks
+name: Transaction Foundation Model CI
 
 on:
   workflow_dispatch:
