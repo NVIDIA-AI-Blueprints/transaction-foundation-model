@@ -45,7 +45,8 @@ env:
   QA_PYTEST_MARK: transaction_foundation_model
   QA_PYTEST_FILE: testcases/test_transaction_foundation_model_notebook.py
   # When the NeMo image has no conda/mamba (venv-only): pip RAPIDS cu12 wheels (notebooks import cudf, cuml).
-  RAPIDS_PIP_VERSION: "24.12.*"
+  # Pin newer than 24.12 so timedelta Series API matches typical local RAPIDS (avoids .dt.total_seconds issues on 24.12 pip wheels).
+  RAPIDS_PIP_VERSION: "25.06.*"
   # Host copy of repo for docker mount/cp. Uses github.* only — runner context is invalid in workflow env on some GHE/validators.
   DEST: /tmp/tfm-workflow-${{ github.run_id }}-${{ github.run_attempt }}
 
