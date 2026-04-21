@@ -11,14 +11,15 @@
 #   3. docker exec: uv install, requirements.txt, mamba cupy/numpy (same pattern as blueprint setup)
 #   4. docker exec: for each notebook in PAPERMILL_NOTEBOOKS (space-separated), strip kernel-shutdown
 #      cells into /tmp (inline Python on runner → docker cp), then papermill. Repo .ipynb unchanged.
-#   Optional: blueprint-github-test via actions/checkout — use secret BLUEPRINT_GITHUB_TEST (PAT) for private repos;
-#   if unset, github.token is used (public repos). Copy result_*.ipynb → input/, run pytest.
+#   Optional: blueprint QA — pull BLUEPRINT_TEST_IMAGE, stage result_*.html → /app/input/transaction_foundation_model/
+#   (must match data/notebook/test_data_transaction_foundation_model.yaml html_file), pytest in container.
+#   Docker auth: secrets.TEST_DOCKER_PULL_KEY or secrets.NGC_API_KEY (same nvcr.io login pattern as NeMo pull).
 #
 # Required secret: NGC_API_KEY — NVIDIA NGC API key for docker login to nvcr.io
 #   (NeMo image is not anonymously pullable; login as user '$oauthtoken', password = key)
 # Optional: HUGGING_FACE_HUB_TOKEN — passed into papermill container as HF_TOKEN if notebooks need HF.
 # Optional: SMTP_USERNAME, SMTP_PASSWORD — Gmail SMTP for Send mail (dawidd6/action-send-mail).
-# Optional: BLUEPRINT_GITHUB_TEST — PAT with contents:read on bp-cicd-org/blueprint-github-test (private cross-org pull).
+# Optional: TEST_DOCKER_PULL_KEY — nvcr.io token for blueprint-github-test-image (else NGC_API_KEY used if set).
 # =============================================================================
 
 name: Transaction Foundation Model Launchable + Papermill notebooks
@@ -39,9 +40,8 @@ env:
   NEMO_IMAGE: nvcr.io/nvidia/nemo:26.02.nemotron_3_super
   # Space-separated paths relative to repo root (under /notebooks in the container). Order matters.
   PAPERMILL_NOTEBOOKS: 01_dataset_baseline.ipynb 02_seq_preproc_tokenization.ipynb 03_foundation_model_training.ipynb 04_inference_embedding_extraction.ipynb 05_xgboost_fraud_detection.ipynb
-  # blueprint-github-test (owner/repo for actions/checkout; private repo needs secrets.BLUEPRINT_GITHUB_TEST).
-  BLUEPRINT_TEST_REPOSITORY: bp-cicd-org/blueprint-github-test
-  BLUEPRINT_TEST_BRANCH: transaction-foundation-model-automation
+  # Prebuilt image with blueprint-github-test test suite (pytest inside /app).
+  BLUEPRINT_TEST_IMAGE: nvcr.io/rw983xdqtcdp/auto_test_team/blueprint-github-test-image:latest
   QA_PYTEST_MARK: transaction_foundation_model
   QA_PYTEST_FILE: testcases/test_transaction_foundation_model_notebook.py
   # When the NeMo image has no conda/mamba (venv-only): pip RAPIDS cu12 wheels (notebooks import cudf, cuml).
@@ -504,47 +504,77 @@ jobs:
           ls -la "${DEST}/notebook_output" || true
           find "${DEST}/notebook_output" -type f 2>/dev/null | head -50 || true
 
-      # actions/checkout only allows path under GITHUB_WORKSPACE, not under /tmp DEST (docker host copy).
-      - name: Checkout blueprint-github-test
-        if: always()
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.BLUEPRINT_TEST_REPOSITORY }}
-          ref: ${{ env.BLUEPRINT_TEST_BRANCH }}
-          path: blueprint-github-test
-          token: ${{ secrets.BLUEPRINT_GITHUB_TEST || github.token }}
-          persist-credentials: false
-
-      - name: Run Test Code (blueprint-github-test pytest)
+      - name: Run Test Code (blueprint-github-test-image)
         if: always()
         env:
           DEST: ${{ env.DEST }}
+          BLUEPRINT_TEST_IMAGE: ${{ env.BLUEPRINT_TEST_IMAGE }}
           QA_PYTEST_MARK: ${{ env.QA_PYTEST_MARK }}
           QA_PYTEST_FILE: ${{ env.QA_PYTEST_FILE }}
+          TEST_DOCKER_PULL_KEY: ${{ secrets.TEST_DOCKER_PULL_KEY }}
+          NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
         run: |
           set -euo pipefail
+          PULL_KEY="${TEST_DOCKER_PULL_KEY:-${NGC_API_KEY:-}}"
+          if [ -z "${PULL_KEY}" ]; then
+            echo "Skipping Run Test Code: set TEST_DOCKER_PULL_KEY or NGC_API_KEY for nvcr.io pull."
+            exit 0
+          fi
+          echo "::group::docker login nvcr.io (blueprint test image)"
+          echo "${PULL_KEY}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+          echo "::endgroup::"
+
           SRC="${DEST}/notebook_output"
           if [ ! -d "${SRC}" ] || [ -z "$(ls -A "${SRC}" 2>/dev/null)" ]; then
             echo "::warning::No notebook_output under ${SRC}; skipping blueprint tests."
             exit 0
           fi
 
-          CLONE="${GITHUB_WORKSPACE}/blueprint-github-test"
-          if [ ! -f "${CLONE}/testcases/test_transaction_foundation_model_notebook.py" ]; then
-            echo "::error::Checkout missing at ${CLONE}; ensure Checkout blueprint-github-test succeeded."
-            exit 1
-          fi
+          STAGING="${DEST}/blueprint_test_mount/input/transaction_foundation_model"
+          mkdir -p "${STAGING}"
 
-          # Upstream conftest imports cloudia/playwright; CI only runs notebook JSON tests.
-          if [ -f "${CLONE}/conftest.py" ]; then
-            mv "${CLONE}/conftest.py" "${CLONE}/conftest.py.bak"
-          fi
-          python3 <<'PY'
+          # Test resolves: WORKSPACE_PATH/input/transaction_foundation_model/<html_file> (see test_transaction_foundation_model_notebook.py).
+          # Papermill writes result_<stem>.ipynb; nbconvert writes result_<stem>.html with same stem.
+          stage_html() {
+            local from="$1" to="$2"
+            if [ -f "${SRC}/${from}" ]; then
+              cp "${SRC}/${from}" "${STAGING}/${to}"
+              echo "Staged transaction_foundation_model/${to}"
+            else
+              echo "::warning::Missing ${SRC}/${from} — expected ${to}"
+            fi
+          }
+          stage_html "result_01_dataset_baseline.html" "01_dataset_baseline.html"
+          stage_html "result_02_seq_preproc_tokenization.html" "02_seq_preproc_tokenization.html"
+          stage_html "result_03_foundation_model_training.html" "03_foundation_model_training.html"
+          stage_html "result_04_inference_embedding_extraction.html" "04_inference_embedding_extraction.html"
+          stage_html "result_05_xgboost_fraud_detection.html" "05_xgboost_fraud_detection.html"
+
+          echo "::group::Staged HTML for blueprint test image (transaction_foundation_model)"
+          ls -la "${STAGING}" || true
+          echo "::endgroup::"
+
+          echo "::group::docker pull ${BLUEPRINT_TEST_IMAGE}"
+          docker pull "${BLUEPRINT_TEST_IMAGE}"
+          echo "::endgroup::"
+
+          QA_NAME="tfm-blueprint-qa-${{ github.run_id }}-${{ github.run_attempt }}"
+          docker rm -f "${QA_NAME}" 2>/dev/null || true
+          docker create \
+            --name "${QA_NAME}" \
+            --entrypoint /bin/sh \
+            "${BLUEPRINT_TEST_IMAGE}" \
+            -c "sleep 86400"
+          docker start "${QA_NAME}"
+          docker exec "${QA_NAME}" mkdir -p /app/input/transaction_foundation_model
+          docker cp "${STAGING}/." "${QA_NAME}:/app/input/transaction_foundation_model/"
+          # Upstream image conftest may import cloudia/playwright; replace with minimal options only.
+          docker exec "${QA_NAME}" /bin/sh -c 'if [ -f /app/conftest.py ]; then mv /app/conftest.py /app/conftest.py.bak; fi'
+          DEST="${DEST}" python3 <<'PY'
           import os
           from pathlib import Path
 
-          p = Path(os.environ["GITHUB_WORKSPACE"]) / "blueprint-github-test" / "conftest.py"
-          p.write_text(
+          Path(os.environ["DEST"], "ci_blueprint_conftest.py").write_text(
               "def pytest_addoption(parser):\n"
               "    parser.addoption(\n"
               '        "--notebook-dir",\n'
@@ -552,76 +582,28 @@ jobs:
               "        default=None,\n"
               "        help='Path to blueprint repo with source notebooks (optional).',\n"
               "    )\n",
-              encoding='utf-8',
+              encoding="utf-8",
           )
           PY
+          docker cp "${DEST}/ci_blueprint_conftest.py" "${QA_NAME}:/app/conftest.py"
 
-          VENV_DIR="${CLONE}/.venv-pytest"
-          PIP_TARGET="${CLONE}/.pytest-site-packages"
-
-          echo "::group::Ensure Python venv / test deps (PEP 668 / Debian)"
-          if ! python3 -m venv /tmp/tfm-venv-probe 2>/dev/null; then
-            rm -rf /tmp/tfm-venv-probe
-            if command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
-              pyv="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-              sudo apt-get update -qq
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "python${pyv}-venv" \
-                || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv
-            fi
-          else
-            rm -rf /tmp/tfm-venv-probe
-          fi
-
-          if python3 -m venv "${VENV_DIR}"; then
-            PY_RUN="${VENV_DIR}/bin/python"
-            PYTEST_PYTHONPATH="."
-            "${PY_RUN}" -m pip install -q --upgrade pip
-            "${PY_RUN}" -m pip install -q pytest pyyaml nbformat beautifulsoup4 pytest-html
-          else
-            echo "::warning::venv unavailable; installing deps with pip --target (no system site-packages)."
-            mkdir -p "${PIP_TARGET}"
-            python3 -m pip install -q --upgrade pip --target "${PIP_TARGET}" \
-              --break-system-packages 2>/dev/null \
-              || python3 -m pip install -q --upgrade pip --target "${PIP_TARGET}"
-            python3 -m pip install -q --target "${PIP_TARGET}" pytest pyyaml nbformat beautifulsoup4 pytest-html \
-              --break-system-packages 2>/dev/null \
-              || python3 -m pip install -q --target "${PIP_TARGET}" pytest pyyaml nbformat beautifulsoup4 pytest-html
-            PY_RUN="python3"
-            PYTEST_PYTHONPATH="${PIP_TARGET}:."
-          fi
+          echo "::group::input/transaction_foundation_model in QA container"
+          docker exec "${QA_NAME}" ls -la /app/input/transaction_foundation_model || true
           echo "::endgroup::"
 
-          mkdir -p "${CLONE}/input" "${CLONE}/reports"
-
-          stage_ipynb() {
-            local from="$1" to="$2"
-            if [ -f "${SRC}/${from}" ]; then
-              cp "${SRC}/${from}" "${CLONE}/input/${to}"
-              echo "Copied to input/${to}"
-            else
-              echo "::warning::Missing ${SRC}/${from}"
-            fi
-          }
-          stage_ipynb "result_01_dataset_baseline.ipynb" "01_dataset_baseline.ipynb"
-          stage_ipynb "result_02_seq_preproc_tokenization.ipynb" "02_seq_preproc_tokenization.ipynb"
-          stage_ipynb "result_03_foundation_model_training.ipynb" "03_foundation_model_training.ipynb"
-          stage_ipynb "result_04_inference_embedding_extraction.ipynb" "04_inference_embedding_extraction.ipynb"
-          stage_ipynb "result_05_xgboost_fraud_detection.ipynb" "05_xgboost_fraud_detection.ipynb"
-
-          echo "::group::input/ (executed .ipynb for pytest)"
-          ls -la "${CLONE}/input" || true
-          echo "::endgroup::"
-
-          cd "${CLONE}"
           set +e
-          PYTHONPATH="${PYTEST_PYTHONPATH}" "${PY_RUN}" -m pytest "${QA_PYTEST_FILE}" \
+          docker exec -w /app "${QA_NAME}" \
+            pytest "${QA_PYTEST_FILE}" \
             -m "${QA_PYTEST_MARK}" \
             --disable-warnings \
             --override-ini addopts= \
-            --html="${DEST}/tfm_qa_test.html" \
+            --html=/tmp/tfm_qa_test.html \
             --self-contained-html
           PY_RC=$?
           set -e
+          docker cp "${QA_NAME}:/tmp/tfm_qa_test.html" "${DEST}/tfm_qa_test.html" 2>/dev/null || \
+            echo "::warning::Could not docker cp pytest HTML report."
+          docker rm -f "${QA_NAME}"
           exit "${PY_RC}"
 
       - name: Upload papermill output
