@@ -1,0 +1,681 @@
+# CI flow:
+# 1) Launch NeMo container and run notebooks via papermill in order.
+# 2) Export notebook HTML outputs.
+# 3) Optionally run blueprint QA tests inside BLUEPRINT_TEST_IMAGE.
+#
+# Required secret:
+# - NGC_API_KEY: nvcr.io login for NeMo image pull.
+#
+# Optional secrets:
+# - TEST_DOCKER_PULL_KEY: nvcr.io login for blueprint QA image.
+# - HUGGING_FACE_HUB_TOKEN: forwarded as HF_TOKEN for notebook downloads.
+# - SMTP_USERNAME / SMTP_PASSWORD: email notification.
+
+name: Transaction Foundation Model CI
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CONTAINER_NAME: tfm-nemo-backend
+  NEMO_IMAGE: nvcr.io/nvidia/nemo:26.02.nemotron_3_super
+  # Space-separated paths relative to repo root (under /notebooks in the container). Order matters.
+  PAPERMILL_NOTEBOOKS: 01_dataset_baseline.ipynb 02_seq_preproc_tokenization.ipynb 03_foundation_model_training.ipynb 04_inference_embedding_extraction.ipynb 05_xgboost_fraud_detection.ipynb
+  # Prebuilt image with blueprint-github-test test suite (pytest inside /app).
+  BLUEPRINT_TEST_IMAGE: nvcr.io/rw983xdqtcdp/auto_test_team/blueprint-github-test-image:latest
+  QA_PYTEST_MARK: transaction_foundation_model
+  QA_PYTEST_FILE: testcases/test_transaction_foundation_model_notebook.py
+  # When the NeMo image has no conda/mamba (venv-only): pip RAPIDS cu12 wheels (notebooks import cudf, cuml).
+  # Pin newer than 24.12 so timedelta Series API matches typical local RAPIDS (avoids .dt.total_seconds issues on 24.12 pip wheels).
+  RAPIDS_PIP_VERSION: "25.06.*"
+  # Host copy of repo for docker mount/cp. Uses github.* only — runner context is invalid in workflow env on some GHE/validators.
+  DEST: /tmp/tfm-workflow-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  nemo-papermill-pipeline:
+    name: Start NeMo + Papermill pipeline
+    runs-on: arc-runners-org-nvidia-ai-bp-2-gpu
+    timeout-minutes: 120
+
+    steps:
+      # actions/checkout lfs:true invokes git-lfs; ARC/self-hosted images may not ship it.
+      - name: Install Git LFS on runner
+        run: |
+          set -euo pipefail
+          if command -v git-lfs >/dev/null 2>&1; then
+            git lfs install
+            exit 0
+          fi
+          if command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git-lfs
+          elif command -v yum >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+            sudo yum install -y git-lfs
+          elif command -v dnf >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+            sudo dnf install -y git-lfs
+          else
+            echo "::error::git-lfs is required for LFS checkout but could not be installed (no apt/yum/dnf+sudo). Install git-lfs on the runner image."
+            exit 1
+          fi
+          git lfs install
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: true
+
+      - name: Sync code to DEST
+        run: |
+          set -euo pipefail
+          rm -rf "${DEST}"
+          mkdir -p "${DEST}"
+          cp -a "${GITHUB_WORKSPACE}/." "${DEST}/"
+          echo "Synced repo to ${DEST}"
+          ls -la "${DEST}"
+
+          echo "::group::Debug: Papermill notebook paths after sync (host DEST)"
+          echo "PAPERMILL_NOTEBOOKS=${{ env.PAPERMILL_NOTEBOOKS }}"
+          for nb in ${{ env.PAPERMILL_NOTEBOOKS }}; do
+            echo "  expect: ${DEST}/${nb}"
+            if [ -f "${DEST}/${nb}" ]; then
+              ls -la "${DEST}/${nb}"
+            else
+              echo "  MISSING on host"
+            fi
+          done
+          echo "::endgroup::"
+
+      - name: Pull Git LFS (backup if checkout missed blobs)
+        continue-on-error: true
+        run: |
+          cd "${{ env.DEST }}"
+          if command -v git-lfs >/dev/null 2>&1; then
+            git lfs install
+            git lfs pull
+          else
+            echo "git-lfs not on runner; relying on actions/checkout lfs:true"
+          fi
+
+      - name: Docker login to NGC (required for nvcr.io)
+        env:
+          NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NGC_API_KEY:-}" ]; then
+            echo "::error::nvcr.io requires NGC login. Add repository secret NGC_API_KEY."
+            echo "Create a key: https://org.ngc.nvidia.com/setup/api-keys — Docker username is literally: \$oauthtoken"
+            exit 1
+          fi
+          echo "${NGC_API_KEY}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+          echo "NGC docker login OK"
+
+      - name: Stop any previous container
+        if: always()
+        run: docker rm -f "${{ env.CONTAINER_NAME }}" 2>/dev/null || true
+
+      # NeMo NGC images ship ENTRYPOINT=/opt/nvidia/nvidia_entrypoint.sh (CUDA/driver env).
+      # Do not replace with plain bash — that skips NVIDIA init. CMD "sleep infinity" keeps PID1 up for docker exec.
+      - name: Start NeMo backend (PID 1 keeps container alive)
+        run: |
+          set -euo pipefail
+          DEST="${{ env.DEST }}"
+          NAME="${{ env.CONTAINER_NAME }}"
+          IMG="${{ env.NEMO_IMAGE }}"
+
+          COMMON_ARGS=(
+            -d
+            --name "${NAME}"
+            --pull always
+            --ulimit memlock=-1
+            --ulimit stack=67108864
+            --shm-size=1g
+            --gpus all
+            -p 0.0.0.0:8888:8888
+            -p 0.0.0.0:8787:8787
+            -p 0.0.0.0:8786:8786
+            -v "${DEST}:/notebooks"
+            -u root
+            -w /notebooks
+          )
+
+          docker run "${COMMON_ARGS[@]}" "${IMG}" sleep infinity
+
+          sleep 5
+          docker ps -a --filter "name=${NAME}"
+
+      - name: Wait for container stable (running, not restarting)
+        run: |
+          set -euo pipefail
+          NAME="${{ env.CONTAINER_NAME }}"
+          for i in $(seq 1 90); do
+            STATUS=$(docker inspect -f '{{.State.Status}}' "${NAME}" 2>/dev/null || echo missing)
+            RC=$(docker inspect -f '{{.State.ExitCode}}' "${NAME}" 2>/dev/null || echo -1)
+
+            if [ "${STATUS}" = "exited" ] || [ "${STATUS}" = "dead" ]; then
+              echo "::error::Container stopped with status=${STATUS} exit_code=${RC}"
+              docker logs "${NAME}" 2>&1 | tail -300 || true
+              exit 1
+            fi
+
+            if [ "${STATUS}" = "running" ]; then
+              sleep 4
+              STATUS2=$(docker inspect -f '{{.State.Status}}' "${NAME}")
+              if [ "${STATUS2}" = "running" ]; then
+                echo "Container is stable (running)"
+                exit 0
+              fi
+            fi
+
+            echo "[$i] status=${STATUS} (waiting for stable running...)"
+            sleep 2
+          done
+
+          echo "::error::Container did not become stable in time"
+          docker ps -a --filter "name=${NAME}"
+          docker logs "${NAME}" 2>&1 | tail -300 || true
+          exit 1
+
+      # Bind mounts are resolved on the Docker *daemon* host. On some ARC / remote-socket
+      # setups that is not the runner, so /home/runner/... on the daemon can be empty while
+      # the runner has files. docker cp streams from the runner into the container.
+      - name: Copy synced workspace into container (docker cp)
+        run: |
+          set -euo pipefail
+          NAME="${{ env.CONTAINER_NAME }}"
+          DEST="${{ env.DEST }}"
+          echo "docker cp ${DEST} -> ${NAME}:/notebooks/"
+          docker cp "${DEST}/." "${NAME}:/notebooks/"
+          docker exec -w /notebooks "${NAME}" bash -c 'echo "Sample under /notebooks:"; ls -la | head -25'
+
+      - name: Debug — locate Papermill notebooks (host + container)
+        run: |
+          set -euo pipefail
+          NAME="${{ env.CONTAINER_NAME }}"
+          DEST="${{ env.DEST }}"
+          echo "::group::Debug: notebooks after docker cp (host + /notebooks)"
+          for nb in ${{ env.PAPERMILL_NOTEBOOKS }}; do
+            echo "=== ${nb} (host) ==="
+            if [ -f "${DEST}/${nb}" ]; then ls -la "${DEST}/${nb}"; else echo "MISSING"; fi
+          done
+          echo "=== .ipynb under DEST (maxdepth 4, first 30) ==="
+          find "${DEST}" -maxdepth 4 -type f -name '*.ipynb' 2>/dev/null | head -30 || true
+          echo "=== Inside container ==="
+          docker exec -w /notebooks "${NAME}" bash -c '
+            for nb in '"${{ env.PAPERMILL_NOTEBOOKS }}"'; do
+              echo "container: /notebooks/${nb}"
+              if [ -f "/notebooks/${nb}" ]; then ls -la "/notebooks/${nb}"; else echo "MISSING"; fi
+            done
+          '
+          echo "::endgroup::"
+
+      # NeMo tags differ: 25.x often has /opt/conda; 26 / Nemotron may use /opt/venv or micromamba.
+      - name: Copy Python env activator into container
+        run: |
+          set -euo pipefail
+          NAME="${{ env.CONTAINER_NAME }}"
+          act="${RUNNER_TEMP:-/tmp}/tfm-activate-env.sh"
+          cat <<'ACTIVATE_EOF' > "${act}"
+          # Sourced by install + papermill (bash). Do not run with bash -e before successful source.
+          if [ -n "${TFM_CI_ENV_ACTIVATED:-}" ]; then
+            return 0 2>/dev/null || true
+          fi
+
+          if [ -n "${CONDA_PREFIX:-}" ] && [ -f "${CONDA_PREFIX}/etc/profile.d/conda.sh" ]; then
+            # shellcheck source=/dev/null
+            . "${CONDA_PREFIX}/etc/profile.d/conda.sh"
+            conda activate base 2>/dev/null || conda activate root 2>/dev/null || true
+            export TFM_CI_ENV_ACTIVATED=1
+            return 0 2>/dev/null || exit 0
+          fi
+
+          for _conda_sh in \
+            /opt/conda/etc/profile.d/conda.sh \
+            /usr/local/etc/profile.d/conda.sh \
+            /usr/local/miniforge3/etc/profile.d/conda.sh \
+            /opt/miniforge3/etc/profile.d/conda.sh \
+            /miniforge3/etc/profile.d/conda.sh \
+            "${HOME}/miniconda3/etc/profile.d/conda.sh" \
+            "${HOME}/mambaforge/etc/profile.d/conda.sh"
+          do
+            if [ -f "${_conda_sh}" ]; then
+              # shellcheck source=/dev/null
+              . "${_conda_sh}"
+              if command -v conda >/dev/null 2>&1; then
+                conda activate base 2>/dev/null || conda activate root 2>/dev/null || true
+              fi
+              export TFM_CI_ENV_ACTIVATED=1
+              return 0 2>/dev/null || exit 0
+            fi
+          done
+
+          if command -v conda >/dev/null 2>&1; then
+            _root="$(conda info --base 2>/dev/null || true)"
+            if [ -n "${_root}" ] && [ -f "${_root}/etc/profile.d/conda.sh" ]; then
+              # shellcheck source=/dev/null
+              . "${_root}/etc/profile.d/conda.sh"
+              conda activate base 2>/dev/null || conda activate root 2>/dev/null || true
+              export TFM_CI_ENV_ACTIVATED=1
+              return 0 2>/dev/null || exit 0
+            fi
+          fi
+
+          if [ -f /opt/venv/bin/activate ]; then
+            # shellcheck source=/dev/null
+            . /opt/venv/bin/activate
+            export TFM_CI_ENV_ACTIVATED=1
+            return 0 2>/dev/null || exit 0
+          fi
+
+          if [ -f /opt/venv/env.sh ]; then
+            # shellcheck source=/dev/null
+            . /opt/venv/env.sh
+            export TFM_CI_ENV_ACTIVATED=1
+            return 0 2>/dev/null || exit 0
+          fi
+
+          if command -v micromamba >/dev/null 2>&1; then
+            eval "$(micromamba shell hook -s bash)"
+            micromamba activate root 2>/dev/null || micromamba activate base 2>/dev/null || true
+            export TFM_CI_ENV_ACTIVATED=1
+            return 0 2>/dev/null || exit 0
+          fi
+
+          echo "::error::Could not activate Python env (no conda.sh, /opt/venv, or micromamba)." >&2
+          echo "Debug: ls /opt; which python3" >&2
+          ls -la /opt 2>/dev/null || true
+          command -v python3 && type python3 || true
+          return 1 2>/dev/null || exit 1
+          ACTIVATE_EOF
+          docker cp "${act}" "${NAME}:/tmp/tfm-activate-env.sh"
+
+      # Inline same pattern as blueprint: uv, requirements.txt, mamba cupy/numpy
+      - name: Install uv, requirements, and mamba packages (inside container)
+        run: |
+          set -euo pipefail
+          NAME="${{ env.CONTAINER_NAME }}"
+          install_script="${RUNNER_TEMP:-/tmp}/tfm-inline-setup.sh"
+          cat <<'SETUP_EOF' > "${install_script}"
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /tmp/tfm-activate-env.sh
+
+          # NeMo image: /usr/bin/python3 is PEP 668 "externally managed" — do not use uv --system there.
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv --version
+
+          cd /notebooks
+
+          if command -v mamba >/dev/null 2>&1; then
+            mamba install -c conda-forge -c rapidsai cupy==14.0.1 numpy==2.2.6 -y
+          elif command -v conda >/dev/null 2>&1; then
+            conda install -c conda-forge -c rapidsai cupy==14.0.1 numpy==2.2.6 -y
+          else
+            echo "No mamba/conda — RAPIDS via pip first (must run BEFORE requirements.txt: xgboost/deps can pull nvidia-nccl and libucx versions that conflict with cuml/raft)."
+            PY="$(which python)"
+            ${PY} -m pip install -q --upgrade pip
+            # pip + NVIDIA index resolves ucx-py / libucx / raft more reliably than uv here.
+            ${PY} -m pip install \
+              --extra-index-url https://pypi.nvidia.com \
+              "cudf-cu12==${{ env.RAPIDS_PIP_VERSION }}" \
+              "cuml-cu12==${{ env.RAPIDS_PIP_VERSION }}"
+            ${PY} -m pip install \
+              nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-cusolver-cu12 \
+              nvidia-cusparse-cu12 nvidia-cufft-cu12 nvidia-curand-cu12 \
+              nvidia-nvjitlink-cu12 || true
+          fi
+
+          if [ -f requirements.txt ]; then
+            uv pip install --python "$(which python)" -r requirements.txt
+          else
+            echo "WARNING: requirements.txt not found under /notebooks; skipping uv pip install"
+          fi
+
+          # Notebook 03 calls scripts/train_decoder_model.py with /opt/venv/bin/python — that venv often lacks nemo_automodel.
+          if [ -x /opt/venv/bin/python ]; then
+            /opt/venv/bin/python -m pip install -q "nemo-automodel>=0.3.0"
+          else
+            "$(command -v python)" -m pip install -q "nemo-automodel>=0.3.0"
+          fi
+
+          cat >/tmp/tfm-cuda-ldpath.sh <<'LDPATH'
+          _site="$(python -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null)" || _site=""
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+          for d in /usr/local/cuda/lib64 /usr/local/cuda-12/lib64 /usr/local/cuda-12.4/lib64 /usr/local/cuda-12.6/lib64 /usr/lib/x86_64-linux-gnu; do
+            [ -d "$d" ] && export LD_LIBRARY_PATH="$d:${LD_LIBRARY_PATH:-}"
+          done
+          if [ -n "${_site}" ]; then
+            shopt -s nullglob
+            for _lib in "${_site}"/nvidia/*/lib; do
+              [ -d "$_lib" ] && export LD_LIBRARY_PATH="${_lib}:${LD_LIBRARY_PATH:-}"
+            done
+            shopt -u nullglob
+          fi
+          LDPATH
+          # shellcheck source=/dev/null
+          . /tmp/tfm-cuda-ldpath.sh
+          # Some cuML builds dlopen libcusolver.so.11; pip wheels ship .12 — symlink if missing.
+          _sp="$(python -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null)" || _sp=""
+          if [ -n "${_sp}" ]; then
+            _cs="${_sp}/nvidia/cusolver/lib"
+            if [ -f "${_cs}/libcusolver.so.12" ] && [ ! -e "${_cs}/libcusolver.so.11" ]; then
+              ln -sf libcusolver.so.12 "${_cs}/libcusolver.so.11" || true
+            fi
+          fi
+
+          SETUP_EOF
+          chmod +x "${install_script}"
+          docker cp "${install_script}" "${NAME}:/tmp/tfm-inline-setup.sh"
+          docker exec -w /notebooks "${NAME}" bash -e /tmp/tfm-inline-setup.sh
+
+      - name: Papermill notebooks inside container (sequential, same kernel strip)
+        env:
+          HF_TOKEN: ${{ secrets.HUGGING_FACE_HUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NAME="${{ env.CONTAINER_NAME }}"
+          DEST="${{ env.DEST }}"
+          STATUS=$(docker inspect -f '{{.State.Status}}' "${NAME}")
+          if [ "${STATUS}" != "running" ]; then
+            echo "::error::Refusing docker exec: status=${STATUS}"
+            docker logs "${NAME}" 2>&1 | tail -200 || true
+            exit 1
+          fi
+
+          STRIP_HOST="${RUNNER_TEMP:-/tmp}/ci_strip_kernel_shutdown.py"
+          cat <<'CI_STRIP_KERNEL_SHUTDOWN_PY' > "${STRIP_HOST}"
+          import json
+          import sys
+          from pathlib import Path
+
+          MARKERS = ("do_shutdown(True)", "IPython.Application.instance()")
+
+          def main() -> int:
+              if len(sys.argv) != 3:
+                  print(
+                      "usage: ci_strip_kernel_shutdown.py <input.ipynb> <output.ipynb>",
+                      file=sys.stderr,
+                  )
+                  return 2
+              inp, outp = Path(sys.argv[1]), Path(sys.argv[2])
+              nb = json.loads(inp.read_text(encoding="utf-8"))
+              cells = nb.get("cells", [])
+              kept = []
+              removed = 0
+              for c in cells:
+                  if c.get("cell_type") != "code":
+                      kept.append(c)
+                      continue
+                  src = "".join(c.get("source", []))
+                  if all(m in src for m in MARKERS):
+                      removed += 1
+                      continue
+                  kept.append(c)
+              nb["cells"] = kept
+              outp.parent.mkdir(parents=True, exist_ok=True)
+              with outp.open("w", encoding="utf-8") as f:
+                  json.dump(nb, f, ensure_ascii=False)
+                  f.write("\n")
+              print(f"ci_strip_kernel_shutdown: removed {removed} shutdown cell(s) -> {outp}")
+              return 0
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          CI_STRIP_KERNEL_SHUTDOWN_PY
+          docker cp "${STRIP_HOST}" "${NAME}:/tmp/ci_strip_kernel_shutdown.py"
+
+          docker exec -i -w /notebooks "${NAME}" \
+            env PAPERMILL_LIST="${{ env.PAPERMILL_NOTEBOOKS }}" \
+            HF_TOKEN="${HF_TOKEN:-}" \
+            bash -s <<'CI_PAPERMILL_INNER'
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /tmp/tfm-activate-env.sh
+          if [ -f /tmp/tfm-cuda-ldpath.sh ]; then
+            # shellcheck source=/dev/null
+            . /tmp/tfm-cuda-ldpath.sh
+          fi
+          mkdir -p /notebooks/notebook_output /tmp/papermill_stripped
+          STRIP=/tmp/ci_strip_kernel_shutdown.py
+          python -m pip install -q --upgrade pip
+          python -m pip install -q papermill nbclient nbformat ipykernel jupyter nbconvert
+          python -m ipykernel install --user --name python3 --display-name "Python 3"
+          for NB_REL in ${PAPERMILL_LIST}; do
+            NB_IN="/notebooks/${NB_REL}"
+            if [ ! -f "${NB_IN}" ]; then
+              echo "::error::Notebook not found at ${NB_IN}. Adjust env PAPERMILL_NOTEBOOKS."
+              find /notebooks -maxdepth 5 -name "*.ipynb" -print | head -80 || true
+              exit 1
+            fi
+            BASENAME=$(basename "${NB_REL}" .ipynb)
+            OUT_IN="/notebooks/notebook_output/result_${BASENAME}.ipynb"
+            STRIPPED="/tmp/papermill_stripped/${BASENAME}.ipynb"
+            case "${BASENAME}" in
+              05_*)
+                echo "::group::nvidia-smi before ${NB_REL}"
+                nvidia-smi
+                echo "::endgroup::"
+                ;;
+            esac
+            echo "::group::Papermill ${NB_REL}"
+            python3 "${STRIP}" "${NB_IN}" "${STRIPPED}"
+            NB_DIR=$(dirname "${NB_IN}")
+            set +e
+            python -m papermill "${STRIPPED}" "${OUT_IN}" \
+              --cwd "${NB_DIR}" \
+              --log-output \
+              --progress-bar \
+              --kernel python3
+            PM_RC=$?
+            set -e
+            if [ -f "${OUT_IN}" ]; then
+              python -m nbconvert --to html "${OUT_IN}" \
+                || echo "::warning::nbconvert failed for ${OUT_IN} (papermill rc=${PM_RC})"
+            fi
+            if [ "${PM_RC}" -ne 0 ]; then
+              echo "::endgroup::"
+              exit "${PM_RC}"
+            fi
+            echo "::endgroup::"
+            echo "::group::Between-notebook GPU cleanup"
+            pkill -f '[d]istributed.worker' 2>/dev/null || true
+            pkill -f '[d]ask.worker' 2>/dev/null || true
+            pkill -f '[d]ask-cuda-worker' 2>/dev/null || true
+            pkill -f '[d]ask worker' 2>/dev/null || true
+            sleep 2
+            nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader 2>/dev/null || true
+            echo "::endgroup::"
+          done
+          CI_PAPERMILL_INNER
+
+      - name: Copy notebook_output from container to runner
+        if: always()
+        run: |
+          set -euo pipefail
+          NAME="${{ env.CONTAINER_NAME }}"
+          DEST="${{ env.DEST }}"
+          mkdir -p "${DEST}/notebook_output"
+          if ! docker inspect "${NAME}" >/dev/null 2>&1; then
+            echo "::warning::No container ${NAME}; nothing to copy."
+            exit 0
+          fi
+          STATUS=$(docker inspect -f '{{.State.Status}}' "${NAME}" 2>/dev/null || echo missing)
+          echo "Container ${NAME} status=${STATUS} (docker cp works while container exists, including exited)."
+          set +e
+          docker cp "${NAME}:/notebooks/notebook_output/." "${DEST}/notebook_output/"
+          CP_RC=$?
+          set -e
+          if [ "${CP_RC}" != 0 ]; then
+            echo "::warning::docker cp notebook_output failed (rc=${CP_RC})."
+          fi
+          echo "Runner notebook_output listing:"
+          ls -la "${DEST}/notebook_output" || true
+          find "${DEST}/notebook_output" -type f 2>/dev/null | head -50 || true
+
+      - name: Run blueprint QA tests
+        if: always()
+        env:
+          DEST: ${{ env.DEST }}
+          BLUEPRINT_TEST_IMAGE: ${{ env.BLUEPRINT_TEST_IMAGE }}
+          QA_PYTEST_MARK: ${{ env.QA_PYTEST_MARK }}
+          QA_PYTEST_FILE: ${{ env.QA_PYTEST_FILE }}
+          TEST_DOCKER_PULL_KEY: ${{ secrets.TEST_DOCKER_PULL_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_DOCKER_PULL_KEY:-}" ]; then
+            echo "Skipping Run Test Code: repository secret TEST_DOCKER_PULL_KEY is not set."
+            exit 0
+          fi
+          echo "::group::docker login nvcr.io (blueprint test image)"
+          echo "${TEST_DOCKER_PULL_KEY}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+          echo "::endgroup::"
+
+          echo "Waiting 5 minutes for services to fully stabilize..."
+          sleep 600
+          echo "Wait completed"
+
+          SRC="${DEST}/notebook_output"
+          if [ ! -d "${SRC}" ] || [ -z "$(ls -A "${SRC}" 2>/dev/null)" ]; then
+            echo "::warning::No notebook_output under ${SRC}; skipping blueprint tests."
+            exit 0
+          fi
+
+          STAGING="${DEST}/blueprint_test_mount/input/transaction_foundation_model"
+          mkdir -p "${STAGING}"
+
+          # Test resolves: WORKSPACE_PATH/input/transaction_foundation_model/<html_file> (see test_transaction_foundation_model_notebook.py).
+          # Papermill writes result_<stem>.ipynb; nbconvert writes result_<stem>.html with same stem.
+          stage_html() {
+            local from="$1" to="$2"
+            if [ -f "${SRC}/${from}" ]; then
+              cp "${SRC}/${from}" "${STAGING}/${to}"
+              echo "Staged transaction_foundation_model/${to}"
+            else
+              echo "::warning::Missing ${SRC}/${from} — expected ${to}"
+            fi
+          }
+          stage_html "result_01_dataset_baseline.html" "01_dataset_baseline.html"
+          stage_html "result_02_seq_preproc_tokenization.html" "02_seq_preproc_tokenization.html"
+          stage_html "result_03_foundation_model_training.html" "03_foundation_model_training.html"
+          stage_html "result_04_inference_embedding_extraction.html" "04_inference_embedding_extraction.html"
+          stage_html "result_05_xgboost_fraud_detection.html" "05_xgboost_fraud_detection.html"
+
+          echo "::group::Staged HTML for blueprint test image (transaction_foundation_model)"
+          ls -la "${STAGING}" || true
+          echo "::endgroup::"
+
+          echo "::group::docker pull ${BLUEPRINT_TEST_IMAGE}"
+          docker pull "${BLUEPRINT_TEST_IMAGE}"
+          echo "::endgroup::"
+
+          QA_NAME="tfm-blueprint-qa-${{ github.run_id }}-${{ github.run_attempt }}"
+          docker rm -f "${QA_NAME}" 2>/dev/null || true
+          docker create \
+            --name "${QA_NAME}" \
+            --entrypoint /bin/sh \
+            "${BLUEPRINT_TEST_IMAGE}" \
+            -c "sleep 86400"
+          docker start "${QA_NAME}"
+          docker exec "${QA_NAME}" mkdir -p /app/input/transaction_foundation_model
+          docker cp "${STAGING}/." "${QA_NAME}:/app/input/transaction_foundation_model/"
+          # Upstream image conftest may import cloudia/playwright; replace with minimal options only.
+          docker exec "${QA_NAME}" /bin/sh -c 'if [ -f /app/conftest.py ]; then mv /app/conftest.py /app/conftest.py.bak; fi'
+          DEST="${DEST}" python3 <<'PY'
+          import os
+          from pathlib import Path
+
+          Path(os.environ["DEST"], "ci_blueprint_conftest.py").write_text(
+              "def pytest_addoption(parser):\n"
+              "    parser.addoption(\n"
+              '        "--notebook-dir",\n'
+              "        action='store',\n"
+              "        default=None,\n"
+              "        help='Path to blueprint repo with source notebooks (optional).',\n"
+              "    )\n",
+              encoding="utf-8",
+          )
+          PY
+          docker cp "${DEST}/ci_blueprint_conftest.py" "${QA_NAME}:/app/conftest.py"
+
+          echo "::group::input/transaction_foundation_model in QA container"
+          docker exec "${QA_NAME}" ls -la /app/input/transaction_foundation_model || true
+          echo "::endgroup::"
+
+          set +e
+          docker exec -w /app "${QA_NAME}" \
+            pytest "${QA_PYTEST_FILE}" \
+            -m "${QA_PYTEST_MARK}" \
+            --disable-warnings \
+            --override-ini addopts= \
+            --html=/tmp/tfm_qa_test.html \
+            --self-contained-html
+          PY_RC=$?
+          set -e
+          docker cp "${QA_NAME}:/tmp/tfm_qa_test.html" "${DEST}/tfm_qa_test.html" 2>/dev/null || \
+            echo "::warning::Could not docker cp pytest HTML report."
+          docker rm -f "${QA_NAME}"
+          exit "${PY_RC}"
+
+      - name: Upload papermill output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: transaction-foundation-papermill-output
+          path: ${{ env.DEST }}/notebook_output
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload blueprint pytest report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: transaction-foundation-pytest-html
+          path: ${{ env.DEST }}/tfm_qa_test.html
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Cleanup container
+        if: always()
+        run: docker rm -f "${{ env.CONTAINER_NAME }}" 2>/dev/null || true
+
+      - name: Set result for email
+        id: set_result
+        if: always()
+        run: |
+          case "${{ job.status }}" in
+            success) echo "RESULT=Success" >> "$GITHUB_OUTPUT" ;;
+            failure) echo "RESULT=Failure" >> "$GITHUB_OUTPUT" ;;
+            cancelled) echo "RESULT=Cancelled" >> "$GITHUB_OUTPUT" ;;
+            *) echo "RESULT=${{ job.status }}" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Send mail
+        uses: dawidd6/action-send-mail@6e71c855c9a091d80a519621b9fd3e8d252ca40c
+        if: always()
+        continue-on-error: true
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "QA Test Workflow Result for ${{ github.repository }}"
+          to: Github-Action-Blueprint-QA@nvidia.com
+          from: github-workflow-notification@gmail.com
+          html_body: |
+            <p>Hello,</p>
+
+            <p>The workflow for repository: <strong>${{ github.repository }}</strong> has completed.<br>
+            <strong>Result:</strong> ${{ steps.set_result.outputs.RESULT }}</p>
+
+            <p>You can review the details on GitHub:<br>
+            <a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}</a></p>
+
+            <p>Thanks!</p>
