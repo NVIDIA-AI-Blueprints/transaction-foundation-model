@@ -57,6 +57,27 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      # actions/checkout lfs:true invokes git-lfs; ARC/self-hosted images may not ship it.
+      - name: Install Git LFS on runner
+        run: |
+          set -euo pipefail
+          if command -v git-lfs >/dev/null 2>&1; then
+            git lfs install
+            exit 0
+          fi
+          if command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git-lfs
+          elif command -v yum >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+            sudo yum install -y git-lfs
+          elif command -v dnf >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+            sudo dnf install -y git-lfs
+          else
+            echo "::error::git-lfs is required for LFS checkout but could not be installed (no apt/yum/dnf+sudo). Install git-lfs on the runner image."
+            exit 1
+          fi
+          git lfs install
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
