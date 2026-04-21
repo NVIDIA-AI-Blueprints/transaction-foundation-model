@@ -61,6 +61,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          lfs: true
 
       - name: Sync code to DEST
         run: |
@@ -83,7 +84,7 @@ jobs:
           done
           echo "::endgroup::"
 
-      - name: Pull Git LFS (if configured)
+      - name: Pull Git LFS (backup if checkout missed blobs)
         continue-on-error: true
         run: |
           cd "${{ env.DEST }}"
@@ -91,7 +92,7 @@ jobs:
             git lfs install
             git lfs pull
           else
-            echo "git-lfs not on runner; skipping"
+            echo "git-lfs not on runner; relying on actions/checkout lfs:true"
           fi
 
       # Workflow-only changes belong here (runner, secrets, install order, RAPIDS pins). Do not patch application src in CI.
@@ -329,6 +330,13 @@ jobs:
             uv pip install --python "$(which python)" -r requirements.txt
           else
             echo "WARNING: requirements.txt not found under /notebooks; skipping uv pip install"
+          fi
+
+          # Notebook 03 calls scripts/train_decoder_model.py with /opt/venv/bin/python — that venv often lacks nemo_automodel.
+          if [ -x /opt/venv/bin/python ]; then
+            /opt/venv/bin/python -m pip install -q "nemo-automodel>=0.3.0"
+          else
+            "$(command -v python)" -m pip install -q "nemo-automodel>=0.3.0"
           fi
 
           cat >/tmp/tfm-cuda-ldpath.sh <<'LDPATH'
