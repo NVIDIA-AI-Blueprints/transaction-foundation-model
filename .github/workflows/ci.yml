@@ -41,7 +41,7 @@ env:
 jobs:
   nemo-papermill-pipeline:
     name: Start NeMo + Papermill pipeline
-    runs-on: arc-runners-org-nvidia-ai-bp-2-gpu
+    runs-on: arc-runner-set-oke-org-poc-2-gpu
     timeout-minutes: 120
 
     steps:
