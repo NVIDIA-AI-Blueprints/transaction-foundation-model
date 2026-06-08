@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loom"
+version = "0.1.0.dev0"
+description = "A general-purpose, domain-neutral automated ML engine with a ports-and-adapters provider architecture."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "ZKAI Labs" }]
+keywords = ["automl", "agents", "mlops", "ports-and-adapters", "search"]
+
+# Runtime dependencies.
+#
+# AIDE is pinned by commit SHA (NOT a tag/branch) so the search "brain" is
+# reproducible: ExecutionResult field-parity and the agent/journal API Loom
+# drives are both anchored to this exact revision.
+dependencies = [
+    "aideml @ git+https://github.com/ZKAI-Network/aideml@40dcf28",
+    "metaflow",
+    "pandas",
+    "scikit-learn",
+    "omegaconf",
+    "python-dotenv",
+]
+
+[project.scripts]
+loom = "loom.cli:main"
+
+[tool.setuptools.packages.find]
+# Ship both the engine package and the static Metaflow flow package: the
+# metaflow execution provider imports ``flows`` at run time
+# (``from flows import EVAL_CANDIDATE_FLOW_PATH``), so a non-editable wheel must
+# include it too, not only ``loom*``.
+include = ["loom*", "flows*"]

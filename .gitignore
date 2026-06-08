@@ -1,0 +1,18 @@
+# Secrets / local environment
+.env
+
+# Python build / cache artifacts
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
+.venv/
+
+# Metaflow local metadata/datastore
+.metaflow/
+
+# Runtime data, run outputs, and corpus records (kept out of version control)
+data/
+runs/
+corpus/*.jsonl
