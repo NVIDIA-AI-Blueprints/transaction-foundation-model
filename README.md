@@ -112,6 +112,14 @@ loom ingest --source ./your_task --name my-dataset
 #   ...
 #   dataset_ref : IngestDataset/123
 
+# 1b. See what's ingested — lists data objects via the Client API
+#     (pathspec · name · nrows/schema). Read-only.
+loom datasets
+
+# 1c. Profile the data object (read-only) — schema, missingness, target balance,
+#     correlations, and leakage flags, emitted as a Metaflow run + an @card.
+loom eda --dataset IngestDataset/123 --target target
+
 # 2. Run against the data object by pathspec (the metaflow provider reads it via
 #    the Client API; your data stays wherever your Metaflow datastore keeps it).
 loom run \
@@ -120,6 +128,12 @@ loom run \
   --metric "<one sentence: how it's scored, with direction>" \
   --steps 10 --mlops metaflow
 ```
+
+`loom datasets` and `loom eda` are **lifecycle commands** that run *through Loom's
+MLOps interface* (`ExecutionProvider.run_flow`) rather than the candidate-search
+path — every lifecycle command's output is a **Metaflow run + an `@card`**. EDA is
+**read-only**, so it never prompts. Lifecycle flows need the `metaflow` MLOps
+provider (the `local` dev path runs candidate code only, not lifecycle flows).
 
 ---
 
@@ -400,7 +414,7 @@ and registering it, no core changes.
 
 ```
 loom/
-  types.py        ExecutionResult · Task (data_dir + dataset_ref) · SearchResult · NodeRecord  (the locked contract)
+  types.py        ExecutionResult · RunResult · Task (data_dir + dataset_ref) · SearchResult · NodeRecord  (the locked contract)
   config.py       LoomConfig (env / .env / YAML)
   registry.py     name → provider class
   dataio.py       materialize_dataset / dataset_schema — the Client-API data door (never touches S3)
@@ -408,10 +422,11 @@ loom/
   controller.py   run_loom(task, config) — wires it together
   corpus.py       append-only JSONL of every node (multi-tenant IP boundary)
   proxy/          the Loom gateway — Anthropic passthrough that logs every call (the moat capture)
-  cli.py          the `loom` command (`loom ingest`, `loom run`, `loom proxy serve`)
+  cli.py          the `loom` command (`loom ingest`, `loom datasets`, `loom eda`, `loom run`, `loom proxy serve`)
 flows/ingest_dataset.py   the external→Metaflow boundary (dir/CSV → data object)
+flows/eda.py              read-only EDA/profiling flow (lifecycle command → run + @card)
 flows/eval_candidate.py   the one static evaluation flow (candidate = data)
-skills/           Claude Code skill-pack (loom-optimize, loom-eda)
+skills/           Claude Code skill-pack (loom-connect, loom-eda, loom-optimize)
 tasks/generic_demo/       the bundled smoke-test task
 ```
 

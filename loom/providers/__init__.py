@@ -28,7 +28,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
-from loom.types import ExecutionResult, NodeRecord, SearchResult, Task
+from loom.types import ExecutionResult, NodeRecord, RunResult, SearchResult, Task
 
 # The exec-callback seam, matching AIDE's ``ExecCallbackType``
 # (aide/agent.py): ``Callable[[str, bool], ExecutionResult]`` i.e.
@@ -78,6 +78,43 @@ class ExecutionProvider(ABC):
         and can be passed directly to a :class:`SearchProvider`.
         """
         return self.execute(code, reset_session)
+
+    def run_flow(
+        self,
+        flow_path: str,
+        parameters: dict,
+        tags: list[str] | None = None,
+    ) -> RunResult:
+        """Run a Loom **lifecycle flow** through the MLOps interface.
+
+        Where :meth:`execute` runs a single *candidate snippet* (the AIDE search
+        "muscle"), ``run_flow`` runs a whole lifecycle command's static
+        ``FlowSpec`` (EDA, connect, validate, ...) and returns a
+        :class:`~loom.types.RunResult` describing the produced Metaflow run +
+        ``@card`` -- the mandated artifact of every ``/loom-*`` command
+        (design-spec §3). This is the seam the lifecycle skills speak to so they
+        run flows through Loom's *interface* rather than touching Metaflow
+        directly; the default MLOps implementation is Metaflow and is swappable.
+
+        Args:
+            flow_path: Filesystem path to the static flow file to run (e.g.
+                ``flows.EDA_FLOW_PATH``), resolved by the provider's runner.
+            parameters: Flow ``Parameter`` values to pass to the run (e.g.
+                ``{"dataset_ref": "IngestDataset/1", "target": "label"}``).
+            tags: Optional run tags for Client-API filtering/leaderboards (e.g.
+                ``["loom_command:eda", "loom_tenant:default"]``).
+
+        Returns:
+            The :class:`~loom.types.RunResult` for the produced run.
+
+        Raises:
+            NotImplementedError: For providers that do not run lifecycle flows
+                (the default). Only an MLOps provider that can run a Metaflow
+                ``FlowSpec`` (e.g. ``"metaflow"``) implements this.
+        """
+        raise NotImplementedError(
+            "this MLOps provider does not run lifecycle flows"
+        )
 
     def setup(self, task: Task) -> None:
         """Prepare the workspace for ``task``.

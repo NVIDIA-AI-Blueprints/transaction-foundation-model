@@ -52,6 +52,43 @@ class ExecutionResult:
 
 
 @dataclass
+class RunResult:
+    """Outcome of running a Loom **lifecycle flow** through the MLOps interface.
+
+    Where :class:`ExecutionResult` is the AIDE-shaped result of executing one
+    *candidate snippet* (the search "muscle"), :class:`RunResult` is the result
+    of running a whole **lifecycle command's flow** (EDA, connect, validate, ...)
+    through :meth:`loom.providers.ExecutionProvider.run_flow`. Every lifecycle
+    command's mandated artifact is a **Metaflow run + an ``@card``** (design-spec
+    §3), so this type carries the run's pathspec, whether it succeeded, the
+    located ``@card`` reference, a small JSON-able summary of the run's output
+    artifacts (large output stays in Metaflow, never inlined), and an error
+    string when the run could not be started or read.
+
+    Attributes:
+        pathspec: The Metaflow run pathspec (e.g. ``"EdaFlow/123"``) identifying
+            the produced run, or ``None`` if no run was created (e.g. the flow
+            failed to start).
+        successful: Whether the flow run completed successfully.
+        card_path: Reference to the run's ``@card`` (its datastore card path), or
+            ``None`` if the run produced no card / it could not be located. The
+            shareable, versioned render the command hands back.
+        summary: A small, JSON-able dict summarizing the run's output artifacts
+            (e.g. the profile dict an EDA flow produced). Kept small by contract;
+            bulk output stays in Metaflow as artifacts referenced by pathspec.
+        error: Human-readable description of why the run failed or could not be
+            read, or ``None`` on success. Mirrors the degraded-result style the
+            execution provider uses for its candidate runs.
+    """
+
+    pathspec: str | None
+    successful: bool
+    card_path: str | None = None
+    summary: dict = field(default_factory=dict)
+    error: str | None = None
+
+
+@dataclass
 class Task:
     """A single experiment to run through Loom.
 
@@ -161,6 +198,7 @@ class NodeRecord:
 
 __all__ = [
     "ExecutionResult",
+    "RunResult",
     "Task",
     "SearchResult",
     "NodeRecord",

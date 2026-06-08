@@ -11,6 +11,8 @@ as a subprocess via ``metaflow.Runner``:
 * :class:`flows.eval_candidate.EvalCandidate` -- the per-candidate evaluation
   flow run by the Metaflow execution provider (see
   :mod:`loom.providers.metaflow_exec`).
+* :class:`flows.eda.EdaFlow` -- the read-only EDA/profiling flow the ``loom eda``
+  lifecycle command runs through the MLOps interface's ``run_flow`` seam.
 
 Design invariant (mirrors the repo CLAUDE.md): a *candidate* solution is never
 turned into a new flow. ``EvalCandidate`` is ONE static flow class, and each
@@ -39,4 +41,12 @@ EVAL_CANDIDATE_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "eval_candidate.py")
 #: ``metaflow.Runner`` to produce the data object referenced by pathspec.
 INGEST_DATASET_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "ingest_dataset.py")
 
-__all__ = ["EVAL_CANDIDATE_FLOW_PATH", "INGEST_DATASET_FLOW_PATH"]
+#: Absolute path to the read-only EDA/profiling flow file. ``loom eda`` runs this
+#: through the MLOps interface's ``run_flow`` seam to profile a data object.
+EDA_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "eda.py")
+
+__all__ = [
+    "EVAL_CANDIDATE_FLOW_PATH",
+    "INGEST_DATASET_FLOW_PATH",
+    "EDA_FLOW_PATH",
+]

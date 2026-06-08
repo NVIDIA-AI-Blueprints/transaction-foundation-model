@@ -32,7 +32,7 @@ from loom.config import LoomConfig
 from loom.providers import ExecutionProvider
 from loom.providers import _interpreter
 from loom.registry import register_execution
-from loom.types import ExecutionResult, Task
+from loom.types import ExecutionResult, RunResult, Task
 
 
 @register_execution("local")
@@ -129,6 +129,35 @@ class LocalExecutionProvider(ExecutionProvider):
             code,
             working_dir=self.workspace_dir,
             timeout=self.timeout,
+        )
+
+    def run_flow(
+        self,
+        flow_path: str,
+        parameters: dict,
+        tags: Optional[list[str]] = None,
+    ) -> RunResult:
+        """Not supported: lifecycle flows need the Metaflow MLOps provider.
+
+        The ``local`` provider is the Metaflow-free dev path for AIDE
+        *candidate* execution (:meth:`execute`); it has no Metaflow run store, so
+        it cannot produce the **Metaflow run + @card** every lifecycle command
+        mandates. Lifecycle commands (EDA, connect, validate, ...) must run on the
+        ``metaflow`` MLOps provider.
+
+        Args:
+            flow_path: Ignored (the local provider runs no flows).
+            parameters: Ignored.
+            tags: Ignored.
+
+        Raises:
+            NotImplementedError: Always, with guidance to use ``--mlops metaflow``.
+        """
+        raise NotImplementedError(
+            "the 'local' MLOps provider cannot run lifecycle flows (it is the "
+            "Metaflow-free AIDE candidate-exec dev path). Lifecycle commands "
+            "produce a Metaflow run + @card, so run them on the metaflow MLOps "
+            "provider: pass `--mlops metaflow`."
         )
 
     def teardown(self) -> None:

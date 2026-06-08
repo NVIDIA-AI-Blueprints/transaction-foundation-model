@@ -41,7 +41,7 @@ from typing import Any, Optional
 from loom.config import LoomConfig
 from loom.providers import ExecutionProvider
 from loom.registry import register_execution
-from loom.types import ExecutionResult, Task
+from loom.types import ExecutionResult, RunResult, Task
 
 #: Flow name as seen by the Metaflow Client API (matches the FlowSpec subclass
 #: name in ``flows/eval_candidate.py``).
@@ -205,6 +205,71 @@ class MetaflowExecutionProvider(ExecutionProvider):
             except OSError:
                 pass
 
+    # -- lifecycle flows ---------------------------------------------------
+
+    def run_flow(
+        self,
+        flow_path: str,
+        parameters: dict,
+        tags: Optional[list[str]] = None,
+    ) -> RunResult:
+        """Run a Loom lifecycle flow via ``metaflow.Runner`` and read back a RunResult.
+
+        Mirrors :meth:`execute` (the candidate path) but for a whole lifecycle
+        command's static ``FlowSpec``: we *write nothing*, run the named flow with
+        the given ``parameters`` and ``tags`` under ``config.metaflow_profile``,
+        block until it finishes, then reconstruct a :class:`~loom.types.RunResult`
+        from the run -- its pathspec, success, the located ``@card`` reference, a
+        small summary dict of the run's output artifacts, and an ``error`` string
+        on failure. The data the flow reads is a Metaflow data object referenced
+        by a ``dataset_ref`` parameter (read via the Client API in the flow);
+        this provider never touches the datastore directly.
+
+        Args:
+            flow_path: Filesystem path to the static flow file (e.g.
+                ``flows.EDA_FLOW_PATH``).
+            parameters: Flow ``Parameter`` values to pass (e.g.
+                ``{"dataset_ref": "IngestDataset/1", "target": "label"}``). ``None``
+                values are dropped so the flow's own defaults apply.
+            tags: Optional run tags for Client-API filtering/leaderboards.
+
+        Returns:
+            The :class:`~loom.types.RunResult` for the produced run. If the flow
+            cannot be started, a degraded result with ``successful=False`` and an
+            actionable ``error`` is returned rather than raising, so a calling
+            command surfaces the failure cleanly.
+        """
+        # Lazy import: keeps the module importable without Metaflow installed.
+        from metaflow import Runner
+
+        runner_kwargs: dict[str, Any] = {}
+        # Profile from config (BYO endpoint); None -> Metaflow default.
+        if self.config.metaflow_profile:
+            runner_kwargs["profile"] = self.config.metaflow_profile
+
+        # Drop None-valued parameters so the flow's declared defaults apply, and
+        # pass tags through under Metaflow's run() ``tags`` kwarg.
+        run_kwargs: dict[str, Any] = {
+            k: v for k, v in (parameters or {}).items() if v is not None
+        }
+        if tags:
+            run_kwargs["tags"] = list(tags)
+
+        try:
+            with Runner(
+                flow_path,
+                show_output=False,
+                **runner_kwargs,
+            ) as runner:
+                executing = runner.run(**run_kwargs)
+                run = executing.run
+        except Exception as exc:  # pragma: no cover - infra failure path
+            return self._run_error_result(
+                f"failed to run flow {flow_path!r}: {type(exc).__name__}: {exc}"
+            )
+
+        return self._run_result_from_run(run)
+
     # -- leaderboard -------------------------------------------------------
 
     def runs(self, experiment_id: str) -> list[dict]:
@@ -312,6 +377,147 @@ class MetaflowExecutionProvider(ExecutionProvider):
             exc_type=exc_type,
             exc_info=exc_info,
             exc_stack=exc_stack,
+        )
+
+    def _run_result_from_run(self, run: Any) -> RunResult:
+        """Reconstruct a :class:`RunResult` from a finished lifecycle-flow ``Run``.
+
+        Reads the run's ``successful`` flag and ``pathspec``, locates the
+        ``@card`` rendered by the flow (best-effort, via the Client API), and
+        builds a small JSON-able summary of the run's output artifacts from
+        ``Run.data`` -- preferring a ``profile``/``summary`` artifact when the
+        flow carries one. Bulk output stays in Metaflow; only a small summary is
+        inlined.
+
+        Args:
+            run: A ``metaflow.Run`` (or ``ExecutingRun.run``) that has finished.
+
+        Returns:
+            The reconstructed :class:`RunResult`.
+        """
+        pathspec = getattr(run, "pathspec", None)
+        try:
+            successful = bool(run.successful)
+        except Exception:  # pragma: no cover - metadata read edge case
+            successful = False
+
+        if not successful:
+            return RunResult(
+                pathspec=pathspec,
+                successful=False,
+                card_path=None,
+                summary={},
+                error=f"flow run {pathspec or '<unknown>'} did not complete successfully",
+            )
+
+        try:
+            data = run.data
+        except Exception as exc:  # pragma: no cover - datastore read failure
+            return RunResult(
+                pathspec=pathspec,
+                successful=True,
+                card_path=None,
+                summary={},
+                error=f"could not read Run.data: {exc}",
+            )
+
+        summary = self._build_summary(data)
+        card_path = self._locate_card_path(run)
+
+        return RunResult(
+            pathspec=pathspec,
+            successful=True,
+            card_path=card_path,
+            summary=summary,
+            error=None,
+        )
+
+    @staticmethod
+    def _build_summary(data: Any) -> dict:
+        """Build a small, JSON-able summary dict from a finished run's ``data``.
+
+        Prefers a flow-provided ``profile`` (the EDA flow's profile dict) or a
+        ``summary`` artifact; otherwise returns an empty dict. The summary is the
+        small derived context a command narrates -- bulk artifacts stay in
+        Metaflow and are referenced by pathspec, never inlined here.
+
+        Args:
+            data: The run's ``Run.data`` artifact proxy (or ``None``).
+
+        Returns:
+            A JSON-able dict (empty when the run carries no summary artifact).
+        """
+        if data is None:  # pragma: no cover - a successful run has data
+            return {}
+        for name in ("profile", "summary"):
+            value = getattr(data, name, None)
+            if isinstance(value, dict):
+                return dict(value)
+        return {}
+
+    @staticmethod
+    def _locate_card_path(run: Any) -> Optional[str]:
+        """Locate the ``@card`` rendered by the run, via the Client API.
+
+        Walks the run's steps for the first task carrying a ``@card`` and returns
+        that card's datastore ``path`` (the canonical card reference). Best-effort:
+        any failure (no card, Metaflow card plugin unavailable) yields ``None`` so
+        a missing card never fails the command.
+
+        Args:
+            run: A finished ``metaflow.Run``.
+
+        Returns:
+            The first located card's ``path``, or ``None``.
+        """
+        try:
+            from metaflow.cards import get_cards
+        except Exception:  # pragma: no cover - card plugin unavailable
+            return None
+
+        try:
+            steps = list(run)
+        except Exception:  # pragma: no cover - metadata read edge case
+            return None
+
+        for step in steps:
+            try:
+                task = step.task
+            except Exception:  # pragma: no cover - empty/foreach step
+                continue
+            if task is None:
+                continue
+            try:
+                cards = get_cards(task)
+            except Exception:  # pragma: no cover - no cards for this task
+                continue
+            for card in cards:
+                path = getattr(card, "path", None)
+                if path:
+                    return str(path)
+        return None
+
+    @staticmethod
+    def _run_error_result(message: str) -> RunResult:
+        """Build a degraded :class:`RunResult` describing a flow-run failure.
+
+        Used when a lifecycle flow cannot be started, so a calling command sees a
+        clean failed result (with an actionable ``error``) rather than an
+        exception bubbling out of the MLOps interface. Mirrors
+        :meth:`_error_result` for the candidate path.
+
+        Args:
+            message: Human-readable description of what went wrong.
+
+        Returns:
+            A :class:`RunResult` with ``successful=False`` and ``error`` set.
+        """
+        return RunResult(
+            pathspec=None,
+            successful=False,
+            card_path=None,
+            summary={},
+            error=message,
         )
 
     @staticmethod

@@ -22,6 +22,20 @@ Exposes the ``loom`` console script (wired in ``pyproject.toml`` as
     ``--dataset`` (a data-object pathspec); the ``local`` dev provider consumes
     ``--data`` (a local dir).
 
+``loom datasets``
+    List the ingested **Metaflow data objects** (``IngestDataset`` runs tagged
+    ``loom_dataset``) via the Metaflow Client API, printing each one's pathspec,
+    name, and row/schema summary. Read-only; never touches the datastore.
+
+``loom eda --dataset PATHSPEC [--target COL]``
+    Profile a data object (read-only) by running the
+    :class:`flows.eda.EdaFlow` through Loom's MLOps **interface**
+    (``ExecutionProvider.run_flow``) -- schema, dtypes, missingness, numeric
+    summary, target balance, top correlations, and leakage flags. Output is a
+    Metaflow run + an ``@card``; the command prints a profile summary + the card
+    reference and appends a ``command="eda"`` learnings row. Read-only tier --
+    never prompts.
+
 ``loom proxy serve [--host 127.0.0.1] [--port 8088]``
     Launch the **Loom gateway** (see :mod:`loom.proxy.server`): an
     Anthropic-passthrough server that authenticates callers by a Loom-issued
@@ -200,6 +214,59 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
     ingest_parser.set_defaults(func=_cmd_ingest)
+
+    eda_parser = subparsers.add_parser(
+        "eda",
+        help="Profile an ingested data object (read-only) -> a Metaflow run + @card.",
+        description=(
+            "Run the read-only EDA flow against a Metaflow data object: schema, "
+            "dtypes, missingness, numeric summary, target balance, top feature "
+            "correlations, and simple leakage flags. The work executes as a "
+            "Metaflow run through Loom's MLOps interface and produces an @card; "
+            "Loom reads the data only via the Metaflow Client API and never "
+            "touches the datastore directly. EDA is read-only and never prompts."
+        ),
+    )
+    eda_parser.add_argument(
+        "--dataset",
+        required=True,
+        metavar="PATHSPEC",
+        help=(
+            "Metaflow pathspec of an ingested data object (e.g. IngestDataset/123 "
+            "from `loom ingest`) to profile."
+        ),
+    )
+    eda_parser.add_argument(
+        "--target",
+        default=None,
+        metavar="COL",
+        help="Optional target/label column name (inferred when omitted).",
+    )
+    eda_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    eda_parser.set_defaults(func=_cmd_eda)
+
+    datasets_parser = subparsers.add_parser(
+        "datasets",
+        help="List ingested Metaflow data objects (via the Client API).",
+        description=(
+            "List the data objects produced by `loom ingest`, read through the "
+            "Metaflow Client API (IngestDataset runs tagged loom_dataset). Prints "
+            "pathspec, name, and row count / column summary per data object. "
+            "Read-only; never touches the datastore directly."
+        ),
+    )
+    datasets_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    datasets_parser.set_defaults(func=_cmd_datasets)
 
     proxy_parser = subparsers.add_parser(
         "proxy",
@@ -559,6 +626,288 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     print("")
     print("Run a task against it with:")
     print(f"  loom run --dataset {pathspec} --mlops metaflow --goal '...' --metric '...'")
+    return 0
+
+
+def _print_eda_summary(dataset_ref: str, result: object) -> None:
+    """Print a compact EDA profile summary + the ``@card`` reference.
+
+    Args:
+        dataset_ref: The profiled data object's pathspec.
+        result: The :class:`~loom.types.RunResult` returned by the MLOps
+            interface's ``run_flow``.
+    """
+    summary = getattr(result, "summary", None) or {}
+    print("Loom EDA complete.")
+    print(f"  dataset_ref : {dataset_ref}")
+    print(f"  run         : {getattr(result, 'pathspec', None) or 'n/a'}")
+    print(f"  card        : {getattr(result, 'card_path', None) or 'n/a'}")
+
+    if summary:
+        nrows = summary.get("nrows", "?")
+        ncols = summary.get("ncols", "?")
+        target = summary.get("target")
+        inferred = " (inferred)" if summary.get("target_inferred") else ""
+        print(f"  rows x cols : {nrows} x {ncols}")
+        print(f"  target      : {target if target is not None else 'none'}{inferred}")
+
+        balance = summary.get("target_balance")
+        if balance:
+            shown = list(balance.items())[:5]
+            pretty = ", ".join(f"{k}={v}" for k, v in shown)
+            more = "" if len(balance) <= 5 else f" (+{len(balance) - 5} more)"
+            print(f"  balance     : {pretty}{more}")
+
+        flags = summary.get("leakage_flags") or []
+        if flags:
+            print(f"  LEAKAGE     : {len(flags)} flag(s) -- review before features:")
+            for flag in flags[:10]:
+                print(
+                    f"    - {flag.get('column')} [{flag.get('kind')}]: "
+                    f"{flag.get('detail')}"
+                )
+        else:
+            print("  leakage     : none detected")
+
+
+def _cmd_eda(args: argparse.Namespace) -> int:
+    """Handle ``loom eda``: profile a data object via the MLOps interface.
+
+    Resolves the configured MLOps execution provider, runs the read-only
+    :class:`flows.eda.EdaFlow` through its ``run_flow`` seam (never importing a
+    concrete backend or touching the datastore), prints a profile summary + the
+    ``@card`` reference, and appends a ``command="eda"`` learnings row. EDA is the
+    read-only tier of the approval matrix: it never prompts.
+
+    Args:
+        args: Parsed arguments for the ``eda`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on failure).
+    """
+    from flows import EDA_FLOW_PATH
+
+    config = _build_config(args)
+    dataset_ref = (args.dataset or "").strip()
+    target = (getattr(args, "target", None) or "").strip() or None
+
+    if not dataset_ref:
+        print(
+            "error: --dataset is required (a `loom ingest` pathspec, e.g. "
+            "IngestDataset/123).",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        execution = get_execution(config.mlops_provider)(config)
+    except Exception as exc:  # noqa: BLE001 - actionable hint
+        print(
+            f"error: could not load the MLOps provider "
+            f"{config.mlops_provider!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    tags = [
+        "loom_command:eda",
+        f"loom_dataset_ref:{dataset_ref}",
+        f"loom_tenant:{config.tenant}",
+        f"loom_owned_by:{config.owned_by}",
+    ]
+
+    print(f"Profiling data object {dataset_ref!r} (read-only)...")
+    try:
+        result = execution.run_flow(
+            EDA_FLOW_PATH,
+            {"dataset_ref": dataset_ref, "target": target},
+            tags=tags,
+        )
+    except NotImplementedError as exc:
+        # The 'local' provider cannot run lifecycle flows; guide to metaflow.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+        print(
+            f"error: failed to run the EDA flow: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not getattr(result, "successful", False):
+        print(
+            f"error: the EDA run did not complete successfully: "
+            f"{getattr(result, 'error', None) or 'unknown error'}",
+            file=sys.stderr,
+        )
+        # Still record the failed rollout below so the flywheel sees it.
+
+    _print_eda_summary(dataset_ref, result)
+    _record_eda_learning(config, dataset_ref, target, result)
+
+    return 0 if getattr(result, "successful", False) else 1
+
+
+def _record_eda_learning(
+    config: LoomConfig,
+    dataset_ref: str,
+    target: Optional[str],
+    result: object,
+) -> None:
+    """Append one ``command="eda"`` learnings row for this profile run.
+
+    Best-effort and sanitized: the row carries only references (the data-object
+    pathspec, the run pathspec/card) and small derived flags (leakage, target) --
+    never raw rows or secrets. A failure to record never fails the command.
+
+    Args:
+        config: The active Loom configuration.
+        dataset_ref: The profiled data object's pathspec.
+        target: The declared target column, or ``None``.
+        result: The :class:`~loom.types.RunResult` from ``run_flow``.
+    """
+    try:
+        from loom.learnings import Learnings, LearningRecord, Outcome, TaskSpec
+
+        summary = getattr(result, "summary", None) or {}
+        successful = bool(getattr(result, "successful", False))
+        leakage = bool(summary.get("leakage"))
+        flag_kinds = sorted(
+            {str(f.get("kind")) for f in (summary.get("leakage_flags") or [])}
+        )
+
+        artifacts = [
+            ref
+            for ref in (
+                getattr(result, "pathspec", None),
+                getattr(result, "card_path", None),
+            )
+            if ref
+        ]
+
+        record = LearningRecord(
+            command="eda",
+            task=TaskSpec(
+                data_ref=dataset_ref,
+                goal="profile the data object (read-only EDA)",
+                metric="n/a (read-only profiling)",
+                experiment_id=dataset_ref,
+            ),
+            inputs={
+                "target": target,
+                "mlops_provider": config.mlops_provider,
+                "leakage": leakage,
+                "leakage_flag_kinds": flag_kinds,
+                "resolved_target": summary.get("target"),
+                "nrows": summary.get("nrows"),
+                "ncols": summary.get("ncols"),
+            },
+            outcome=Outcome(
+                best_metric=None,
+                submission_ok=successful,
+                node_count=0,
+            ),
+            artifacts=artifacts,
+            success=successful,
+            model=None,
+            tenant=config.tenant,
+            owned_by=config.owned_by,
+            reflection=(
+                "leakage flags present; review before features"
+                if leakage
+                else None
+            ),
+        )
+        Learnings(config).record(record)
+    except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
+        pass
+
+
+def _cmd_datasets(args: argparse.Namespace) -> int:
+    """Handle ``loom datasets``: list ingested data objects via the Client API.
+
+    Reads :class:`flows.ingest_dataset.IngestDataset` runs tagged ``loom_dataset``
+    through the Metaflow Client API and prints, per data object, its pathspec, its
+    name, and a row-count / schema summary. Read-only: it never touches the
+    datastore directly.
+
+    Args:
+        args: Parsed arguments for the ``datasets`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on failure).
+    """
+    config = _build_config(args)
+
+    try:
+        from metaflow import Flow, namespace
+    except Exception as exc:  # noqa: BLE001 - actionable hint, no traceback
+        print(
+            f"error: Metaflow is required for `loom datasets` but could not be "
+            f"imported: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Point the Client API at the configured profile's metadata service. The
+    # Client reads METAFLOW_PROFILE from the environment.
+    if config.metaflow_profile:
+        os.environ.setdefault("METAFLOW_PROFILE", config.metaflow_profile)
+
+    # See all runs regardless of the user namespace `loom ingest` ran under.
+    try:
+        namespace(None)
+    except Exception:  # pragma: no cover - namespace API edge case
+        pass
+
+    try:
+        flow = Flow("IngestDataset")
+        runs = list(flow.runs("loom_dataset"))
+        # Fall back to all IngestDataset runs if none carry the loom_dataset tag
+        # (an unnamed ingest is not tagged).
+        if not runs:
+            runs = list(flow.runs())
+    except Exception:  # noqa: BLE001 - no such flow yet / metadata down
+        print("No ingested data objects found (run `loom ingest` first).")
+        return 0
+
+    rows: list[tuple[str, str, str]] = []
+    for run in runs:
+        # Everything below reads artifacts that load LAZILY on access (the
+        # ``successful`` flag and ``.data`` both fetch datastore blobs), so a
+        # corrupt/legacy run can raise on access (e.g. a missing blob -> a
+        # TypeError that getattr does not swallow). Guard the whole per-run body
+        # so one unreadable run is skipped gracefully and never breaks the list.
+        try:
+            if not bool(run.successful):
+                continue
+            pathspec = getattr(run, "pathspec", None) or str(run)
+            data = run.data
+            name = ""
+            schema = None
+            if data is not None:
+                name = str(getattr(data, "dataset_name", "") or "")
+                schema = getattr(data, "schema", None)
+        except Exception:  # noqa: BLE001 - skip unreadable runs gracefully
+            continue
+        if isinstance(schema, dict):
+            nrows = schema.get("nrows", "?")
+            ncols = len(schema.get("columns", []) or [])
+            target = schema.get("target")
+            detail = f"nrows={nrows} cols={ncols}" + (
+                f" target={target}" if target else ""
+            )
+        else:
+            detail = "schema n/a"
+        rows.append((pathspec, name or "-", detail))
+
+    if not rows:
+        print("No ingested data objects found (run `loom ingest` first).")
+        return 0
+
+    print(f"Ingested data objects ({len(rows)}):")
+    for pathspec, name, detail in rows:
+        print(f"  {pathspec}  ·  {name}  ·  {detail}")
     return 0
 
 
