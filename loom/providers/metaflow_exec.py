@@ -436,10 +436,11 @@ class MetaflowExecutionProvider(ExecutionProvider):
     def _build_summary(data: Any) -> dict:
         """Build a small, JSON-able summary dict from a finished run's ``data``.
 
-        Prefers a flow-provided ``profile`` (the EDA flow's profile dict) or a
-        ``summary`` artifact; otherwise returns an empty dict. The summary is the
-        small derived context a command narrates -- bulk artifacts stay in
-        Metaflow and are referenced by pathspec, never inlined here.
+        Prefers a flow-provided summary artifact, in lifecycle order: ``profile``
+        (the EDA flow), ``report`` (the validate / report flows), ``viz`` (the viz
+        flow), or a generic ``summary``; otherwise returns an empty dict. The
+        summary is the small derived context a command narrates -- bulk artifacts
+        stay in Metaflow and are referenced by pathspec, never inlined here.
 
         Args:
             data: The run's ``Run.data`` artifact proxy (or ``None``).
@@ -449,7 +450,7 @@ class MetaflowExecutionProvider(ExecutionProvider):
         """
         if data is None:  # pragma: no cover - a successful run has data
             return {}
-        for name in ("profile", "summary"):
+        for name in ("profile", "report", "viz", "summary"):
             value = getattr(data, name, None)
             if isinstance(value, dict):
                 return dict(value)

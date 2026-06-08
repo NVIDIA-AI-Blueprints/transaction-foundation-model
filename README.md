@@ -120,6 +120,10 @@ loom datasets
 #     correlations, and leakage flags, emitted as a Metaflow run + an @card.
 loom eda --dataset IngestDataset/123 --target target
 
+# 1d. Visualize the data object (read-only) — distributions, correlation heatmap,
+#     target-vs-feature — emitted as @card images.
+loom viz --dataset IngestDataset/123 --target target
+
 # 2. Run against the data object by pathspec (the metaflow provider reads it via
 #    the Client API; your data stays wherever your Metaflow datastore keeps it).
 loom run \
@@ -129,11 +133,30 @@ loom run \
   --steps 10 --mlops metaflow
 ```
 
-`loom datasets` and `loom eda` are **lifecycle commands** that run *through Loom's
-MLOps interface* (`ExecutionProvider.run_flow`) rather than the candidate-search
-path — every lifecycle command's output is a **Metaflow run + an `@card`**. EDA is
-**read-only**, so it never prompts. Lifecycle flows need the `metaflow` MLOps
-provider (the `local` dev path runs candidate code only, not lifecycle flows).
+`loom datasets`, `loom eda`, `loom validate`, `loom report`, and `loom viz` are
+**lifecycle commands** that run *through Loom's MLOps interface*
+(`ExecutionProvider.run_flow`) rather than the candidate-search path — every
+lifecycle command's output is a **Metaflow run + an `@card`**. EDA / report / viz
+are **read-only**, so they never prompt; **validate** is workspace-write (it
+trains/scores a baseline in its own workspace, read-only over the data). Lifecycle
+flows need the `metaflow` MLOps provider (the `local` dev path runs candidate code
+only, not lifecycle flows).
+
+After (or instead of) a search run, the **lifecycle verbs** evaluate, report on, and
+visualize what Loom did:
+
+```bash
+# Rigorously validate a baseline/solution (CV + a sealed holdout + calibration +
+# fairness when --sensitive is given + leakage flags) — emits a run + @card with a
+# VERDICT that gates promotion. Workspace-write (own workspace), never prompts.
+loom validate --dataset IngestDataset/123 --target target [--solution EvalCandidate/42] [--sensitive region]
+
+# Assemble an experiment's runs + metrics + lineage into a model-card (read-only).
+loom report --experiment loom-abc123          # or: --runs EvalCandidate/1,EvalCandidate/2
+
+# Plot a data object or a run's results as @card images (read-only).
+loom viz --dataset IngestDataset/123 --kind all     # or: --run EvalCandidate/42
+```
 
 ---
 
@@ -201,9 +224,10 @@ loom run --dataset IngestDataset/123 --goal "..." --metric "..." --steps 20 --ml
 
 Prefer to talk to it? The [`skills/`](skills/) pack turns Loom into a
 [Claude Code](https://claude.com/claude-code) workflow: `/loom-eda` profiles a
-dataset, then `/loom-optimize` pins down the metric, shows a plan, asks you to
-approve cost/data, runs `loom run`, and narrates the result. See
-[`skills/README.md`](skills/README.md).
+dataset, `/loom-optimize` pins down the metric, shows a plan, asks you to approve
+cost/data, runs `loom run`, and narrates the result — then `/loom-validate` checks a
+candidate against a sealed holdout, `/loom-viz` plots the data or the search, and
+`/loom-report` writes up the experiment. See [`skills/README.md`](skills/README.md).
 
 ---
 
@@ -422,11 +446,14 @@ loom/
   controller.py   run_loom(task, config) — wires it together
   corpus.py       append-only JSONL of every node (multi-tenant IP boundary)
   proxy/          the Loom gateway — Anthropic passthrough that logs every call (the moat capture)
-  cli.py          the `loom` command (`loom ingest`, `loom datasets`, `loom eda`, `loom run`, `loom proxy serve`)
+  cli.py          the `loom` command (`loom ingest`, `loom datasets`, `loom eda`, `loom validate`, `loom report`, `loom viz`, `loom run`, `loom proxy serve`)
 flows/ingest_dataset.py   the external→Metaflow boundary (dir/CSV → data object)
 flows/eda.py              read-only EDA/profiling flow (lifecycle command → run + @card)
+flows/validate.py         rigorous validation flow — CV + sealed holdout + calibration + fairness + leakage (→ run + @card)
+flows/report.py           read-only experiment-report flow — runs + metrics + lineage → model-card (→ run + @card)
+flows/viz.py              read-only visualization flow — standard plots → @card images
 flows/eval_candidate.py   the one static evaluation flow (candidate = data)
-skills/           Claude Code skill-pack (loom-connect, loom-eda, loom-optimize)
+skills/           Claude Code skill-pack (loom-connect, loom-eda, loom-validate, loom-report, loom-viz, loom-optimize)
 tasks/generic_demo/       the bundled smoke-test task
 ```
 

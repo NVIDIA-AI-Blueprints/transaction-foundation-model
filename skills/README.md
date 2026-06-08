@@ -29,9 +29,9 @@ default MLOps muscle is Metaflow.
 | `loom-features` | roadmap | Build features into a versioned feature set; gated by `loom-eda`'s leakage flags. | You want engineered features as a reusable, lineage-grounded artifact. |
 | `loom-pipeline` | roadmap | Author/run the multi-stage DS pipeline (the recipe primitive; *is* a Metaflow `FlowSpec`). | You want a reproducible ingest→clean→feature→train→eval DAG. |
 | [`loom-optimize`](loom-optimize/SKILL.md) (AIDE) | **built** | Metric-is-the-spec entry → plan → **approval gate (cost/data)** → invoke `loom run` → narrate best metric + leaderboard. | You want Loom to optimize solution code against a measurable metric. |
-| `loom-validate` | roadmap | Validate a model against held-out metric/thresholds; emits a typed report with a `VERDICT` that blocks `loom-deploy` if sub-threshold. | You want to check a candidate is good enough before promotion. |
-| `loom-viz` | roadmap | Read-only charts/plots grounded in a run's artifacts. | You want a visual of a dataset/result, source-grounded to a pathspec. |
-| `loom-report` | roadmap | Narrative report / `@card` summarizing a run, lineage-grounded. | You want a shareable write-up of what Loom did and why. |
+| [`loom-validate`](loom-validate/SKILL.md) | **built** | **Workspace-write** rigorous validation of a baseline/solution against a data object **through the MLOps interface** (`loom validate`) — sealed holdout distinct from a stratified/purged K-fold CV, probability calibration (curve + Brier), per-slice / fairness metrics, and leakage flags — emitting a Metaflow run + `@card` with a `VERDICT` that blocks `loom-deploy` if sub-threshold/leaky. | You want to check a candidate is good enough before promotion. |
+| [`loom-viz`](loom-viz/SKILL.md) | **built** | **Read-only** charts/plots **through the MLOps interface** (`loom viz`) — feature distributions, correlation heatmap, target-vs-feature from a data object, or metric-over-nodes / leaderboard from a run — emitted as `@card` images. | You want a visual of a dataset/result, source-grounded to a pathspec. |
+| [`loom-report`](loom-report/SKILL.md) | **built** | **Read-only** assembly **through the MLOps interface** (`loom report`) of an experiment's runs + metrics + lineage (Flow/Run + tags + learnings rows) into a structured analysis/model-card + `@card`; the narrative prose is the skill's job. | You want a shareable write-up of what Loom did and why. |
 | `loom-deploy` | roadmap | Promote/serve a model — **irreversible/external**, always gated, never model-auto-invoked. | You want to ship a validated model to serving. |
 | `loom-ops` | roadmap | Inspect/monitor running and past runs (jobs, status), killable; reads are free. | You want to see what's running or revisit a prior run. |
 | `loom-collab` | roadmap | Collaboration / handoff around runs and cards. | You want to share or hand off a run to a teammate. |
@@ -60,6 +60,9 @@ shell out to the project's CLI (never importing a concrete backend):
 loom ingest --source PATH [--name NAME]      # loom-connect: register a data object
 loom datasets                                # loom-connect: list ingested data objects
 loom eda --dataset PATHSPEC [--target COL]   # loom-eda: read-only profile -> run + @card
+loom validate --dataset PATHSPEC [--target COL] [--solution RUN] [--sensitive COL]  # loom-validate: CV+holdout+calibration+fairness+leakage -> run + @card
+loom report (--experiment ID | --runs PATHSPEC,...)  # loom-report: assemble runs+metrics+lineage -> run + @card
+loom viz (--dataset PATHSPEC | --run PATHSPEC) [--target COL] [--kind ...]  # loom-viz: standard plots -> run + @card images
 loom run --dataset PATHSPEC --goal STR --metric STR [--steps N] [--mlops metaflow|local] [--search aide]
 ```
 

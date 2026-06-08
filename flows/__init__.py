@@ -13,6 +13,13 @@ as a subprocess via ``metaflow.Runner``:
   :mod:`loom.providers.metaflow_exec`).
 * :class:`flows.eda.EdaFlow` -- the read-only EDA/profiling flow the ``loom eda``
   lifecycle command runs through the MLOps interface's ``run_flow`` seam.
+* :class:`flows.validate.ValidateFlow` -- the rigorous validation flow ``loom
+  validate`` runs (workspace-write: trains/scores a baseline in its own workspace,
+  read-only over the data object).
+* :class:`flows.report.ReportFlow` -- the read-only experiment-report flow ``loom
+  report`` runs (assembles an experiment's runs + metrics + lineage).
+* :class:`flows.viz.VizFlow` -- the read-only visualization flow ``loom viz`` runs
+  (standard plots of a data object or a run's results, emitted as card images).
 
 Design invariant (mirrors the repo CLAUDE.md): a *candidate* solution is never
 turned into a new flow. ``EvalCandidate`` is ONE static flow class, and each
@@ -45,8 +52,26 @@ INGEST_DATASET_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "ingest_dataset.py")
 #: through the MLOps interface's ``run_flow`` seam to profile a data object.
 EDA_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "eda.py")
 
+#: Absolute path to the rigorous validation flow file. ``loom validate`` runs this
+#: through the MLOps interface's ``run_flow`` seam to evaluate a baseline/solution
+#: (CV + sealed holdout + calibration + fairness + leakage) against a data object.
+VALIDATE_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "validate.py")
+
+#: Absolute path to the read-only experiment-report flow file. ``loom report`` runs
+#: this through the MLOps interface's ``run_flow`` seam to assemble an experiment's
+#: runs + metrics + lineage into a structured model-card.
+REPORT_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "report.py")
+
+#: Absolute path to the read-only visualization flow file. ``loom viz`` runs this
+#: through the MLOps interface's ``run_flow`` seam to plot a data object or a run's
+#: results as card images.
+VIZ_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "viz.py")
+
 __all__ = [
     "EVAL_CANDIDATE_FLOW_PATH",
     "INGEST_DATASET_FLOW_PATH",
     "EDA_FLOW_PATH",
+    "VALIDATE_FLOW_PATH",
+    "REPORT_FLOW_PATH",
+    "VIZ_FLOW_PATH",
 ]

@@ -36,6 +36,33 @@ Exposes the ``loom`` console script (wired in ``pyproject.toml`` as
     reference and appends a ``command="eda"`` learnings row. Read-only tier --
     never prompts.
 
+``loom validate --dataset PATHSPEC [--target COL] [--solution RUN] [--sensitive COL]``
+    Rigorously evaluate a baseline/solution against a data object by running the
+    :class:`flows.validate.ValidateFlow` through Loom's MLOps **interface**
+    (``ExecutionProvider.run_flow``) -- a sealed holdout distinct from a
+    stratified/purged K-fold CV, probability calibration (curve + Brier),
+    per-slice / fairness metrics when a sensitive column is given, and leakage
+    flags. With no ``--solution`` a gradient-boosted-trees baseline is fit. Output
+    is a Metaflow run + an ``@card``; the command prints a validation summary +
+    the card reference and appends a ``command="validate"`` learnings row.
+    Workspace-write tier (light; the read-only evaluation runs in its own
+    workspace and does not prompt).
+
+``loom report (--experiment ID | --runs PATHSPEC,...)``
+    Assemble an experiment's runs + metrics + lineage into a structured
+    analysis/model-card by running the read-only :class:`flows.report.ReportFlow`
+    through the MLOps interface. Output is a Metaflow run + an ``@card``; the
+    command prints a report summary + the card reference and appends a
+    ``command="report"`` learnings row. Read-only tier -- never prompts.
+
+``loom viz (--dataset PATHSPEC | --run PATHSPEC) [--target COL] [--kind KIND]``
+    Generate standard plots from a data object (distributions, correlation
+    heatmap, target-vs-feature) or a run's results (metric-over-nodes,
+    leaderboard) by running the read-only :class:`flows.viz.VizFlow` through the
+    MLOps interface; the figures are emitted as ``@card`` images. The command
+    prints a plot summary + the card reference and appends a ``command="viz"``
+    learnings row. Read-only tier -- never prompts.
+
 ``loom proxy serve [--host 127.0.0.1] [--port 8088]``
     Launch the **Loom gateway** (see :mod:`loom.proxy.server`): an
     Anthropic-passthrough server that authenticates callers by a Loom-issued
@@ -249,6 +276,136 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
     eda_parser.set_defaults(func=_cmd_eda)
+
+    validate_parser = subparsers.add_parser(
+        "validate",
+        help="Rigorously validate a baseline/solution against a data object -> run + @card.",
+        description=(
+            "Run the rigorous validation flow against a Metaflow data object: a "
+            "sealed holdout distinct from a stratified/purged K-fold CV, "
+            "probability calibration (curve + Brier), per-slice / fairness metrics "
+            "when a sensitive column is given, and leakage flags. With no "
+            "--solution a gradient-boosted-trees baseline is fit; with --solution a "
+            "prior optimize run's best solution is evaluated. The work executes as "
+            "a Metaflow run through Loom's MLOps interface and produces an @card; "
+            "Loom reads the data only via the Client API and never touches the "
+            "datastore. Validate is the workspace-write tier (light, no prompt for "
+            "the read-only evaluation in its own workspace)."
+        ),
+    )
+    validate_parser.add_argument(
+        "--dataset",
+        required=True,
+        metavar="PATHSPEC",
+        help=(
+            "Metaflow pathspec of an ingested data object (e.g. IngestDataset/123) "
+            "to validate against."
+        ),
+    )
+    validate_parser.add_argument(
+        "--target",
+        default=None,
+        metavar="COL",
+        help="Target/label column to evaluate against (inferred from schema when omitted).",
+    )
+    validate_parser.add_argument(
+        "--solution",
+        default=None,
+        metavar="RUN",
+        help="Optional pathspec of a prior optimize run to evaluate (else a baseline).",
+    )
+    validate_parser.add_argument(
+        "--sensitive",
+        default=None,
+        metavar="COL",
+        help="Optional sensitive column for per-slice / fairness metrics.",
+    )
+    validate_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    validate_parser.set_defaults(func=_cmd_validate)
+
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Assemble an experiment's runs + metrics + lineage (read-only) -> run + @card.",
+        description=(
+            "Run the read-only report flow to gather an experiment's runs, their "
+            "metrics, and their lineage (Flow/Run + tags + learnings rows) into a "
+            "structured analysis/model-card via the Client API. The work executes "
+            "as a Metaflow run through Loom's MLOps interface and produces an "
+            "@card; it trains nothing and writes nothing back. Read-only -- never "
+            "prompts. Give exactly one of --experiment or --runs."
+        ),
+    )
+    report_group = report_parser.add_mutually_exclusive_group(required=True)
+    report_group.add_argument(
+        "--experiment",
+        default=None,
+        metavar="ID",
+        help="Experiment id to report on (the loom_experiment tag).",
+    )
+    report_group.add_argument(
+        "--runs",
+        default=None,
+        metavar="PATHSPEC,...",
+        help="Comma-separated run pathspecs to report on (alternative to --experiment).",
+    )
+    report_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    report_parser.set_defaults(func=_cmd_report)
+
+    viz_parser = subparsers.add_parser(
+        "viz",
+        help="Plot a data object or a run (read-only) -> a Metaflow run + @card images.",
+        description=(
+            "Run the read-only visualization flow to generate standard plots from "
+            "a Metaflow data object (distributions, correlation heatmap, "
+            "target-vs-feature) or a run's results (metric-over-nodes, "
+            "leaderboard), emitted as @card images. The work executes as a "
+            "Metaflow run through Loom's MLOps interface; Loom reads the data only "
+            "via the Client API and never touches the datastore. Read-only -- "
+            "never prompts. Give exactly one of --dataset or --run."
+        ),
+    )
+    viz_group = viz_parser.add_mutually_exclusive_group(required=True)
+    viz_group.add_argument(
+        "--dataset",
+        default=None,
+        metavar="PATHSPEC",
+        help="Metaflow pathspec of a data object to plot (e.g. IngestDataset/123).",
+    )
+    viz_group.add_argument(
+        "--run",
+        default=None,
+        metavar="PATHSPEC",
+        help="Metaflow pathspec of a run to plot (e.g. EvalCandidate/42).",
+    )
+    viz_parser.add_argument(
+        "--target",
+        default=None,
+        metavar="COL",
+        help="Optional target column for target-vs-feature plots (dataset input).",
+    )
+    viz_parser.add_argument(
+        "--kind",
+        default=None,
+        metavar="KIND",
+        help="Plot family for a dataset (distributions|correlation|target|all).",
+    )
+    viz_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    viz_parser.set_defaults(func=_cmd_viz)
 
     datasets_parser = subparsers.add_parser(
         "datasets",
@@ -817,6 +974,536 @@ def _record_eda_learning(
                 if leakage
                 else None
             ),
+        )
+        Learnings(config).record(record)
+    except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
+        pass
+
+
+def _print_validate_summary(dataset_ref: str, result: object) -> None:
+    """Print a compact validation summary + the ``@card`` reference.
+
+    Args:
+        dataset_ref: The validated data object's pathspec.
+        result: The :class:`~loom.types.RunResult` returned by ``run_flow``.
+    """
+    summary = getattr(result, "summary", None) or {}
+    print("Loom validation complete.")
+    print(f"  dataset_ref : {dataset_ref}")
+    print(f"  run         : {getattr(result, 'pathspec', None) or 'n/a'}")
+    print(f"  card        : {getattr(result, 'card_path', None) or 'n/a'}")
+
+    if summary:
+        cv = summary.get("cv") or {}
+        holdout = summary.get("holdout") or {}
+        metric = summary.get("metric", "score")
+        verdict = summary.get("verdict", "?")
+        print(f"  target      : {summary.get('target')} ({summary.get('task_type')})")
+        cv_mean = cv.get("mean")
+        cv_std = cv.get("std")
+        if cv_mean is not None:
+            print(
+                f"  CV {metric:<8}: {cv_mean:.6g}"
+                + (f" +/- {cv_std:.4g}" if cv_std is not None else "")
+                + f" ({summary.get('n_folds')}-fold)"
+            )
+        if holdout.get("score") is not None:
+            print(
+                f"  holdout     : {holdout.get('score'):.6g} "
+                f"(sealed, n={holdout.get('n')})"
+            )
+        cal = summary.get("calibration")
+        if cal and cal.get("brier") is not None:
+            print(f"  calibration : Brier={cal.get('brier')}")
+        slices = summary.get("slice_metrics")
+        if slices:
+            shown = ", ".join(
+                f"{g}={m.get('score')}" for g, m in list(slices.items())[:5]
+            )
+            print(f"  fairness    : {shown}")
+        flags = summary.get("leakage_flags") or []
+        if flags:
+            print(f"  LEAKAGE     : {len(flags)} flag(s) -- explain before trusting:")
+            for flag in flags[:10]:
+                print(
+                    f"    - {flag.get('column')} [{flag.get('kind')}]: "
+                    f"{flag.get('detail')}"
+                )
+        print(f"  VERDICT     : {verdict}")
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
+    """Handle ``loom validate``: rigorously evaluate via the MLOps interface.
+
+    Resolves the configured MLOps execution provider, runs the
+    :class:`flows.validate.ValidateFlow` through its ``run_flow`` seam (never
+    importing a concrete backend or touching the datastore), prints a validation
+    summary + the ``@card`` reference, and appends a ``command="validate"``
+    learnings row. Validate is the workspace-write tier: the read-only evaluation
+    runs in its own Metaflow workspace and does not prompt.
+
+    Args:
+        args: Parsed arguments for the ``validate`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on failure).
+    """
+    from flows import VALIDATE_FLOW_PATH
+
+    config = _build_config(args)
+    dataset_ref = (args.dataset or "").strip()
+    target = (getattr(args, "target", None) or "").strip() or None
+    solution = (getattr(args, "solution", None) or "").strip() or None
+    sensitive = (getattr(args, "sensitive", None) or "").strip() or None
+
+    if not dataset_ref:
+        print(
+            "error: --dataset is required (a `loom ingest` pathspec, e.g. "
+            "IngestDataset/123).",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        execution = get_execution(config.mlops_provider)(config)
+    except Exception as exc:  # noqa: BLE001 - actionable hint
+        print(
+            f"error: could not load the MLOps provider "
+            f"{config.mlops_provider!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    tags = [
+        "loom_command:validate",
+        f"loom_dataset_ref:{dataset_ref}",
+        f"loom_tenant:{config.tenant}",
+        f"loom_owned_by:{config.owned_by}",
+    ]
+
+    print(f"Validating against data object {dataset_ref!r} (workspace-write)...")
+    try:
+        result = execution.run_flow(
+            VALIDATE_FLOW_PATH,
+            {
+                "dataset_ref": dataset_ref,
+                "target": target,
+                "solution_run": solution,
+                "sensitive": sensitive,
+            },
+            tags=tags,
+        )
+    except NotImplementedError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+        print(
+            f"error: failed to run the validate flow: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not getattr(result, "successful", False):
+        print(
+            f"error: the validate run did not complete successfully: "
+            f"{getattr(result, 'error', None) or 'unknown error'}",
+            file=sys.stderr,
+        )
+
+    _print_validate_summary(dataset_ref, result)
+    _record_validate_learning(config, dataset_ref, target, solution, result)
+
+    return 0 if getattr(result, "successful", False) else 1
+
+
+def _record_validate_learning(
+    config: LoomConfig,
+    dataset_ref: str,
+    target: Optional[str],
+    solution: Optional[str],
+    result: object,
+) -> None:
+    """Append one ``command="validate"`` learnings row for this validation run.
+
+    Best-effort and sanitized: the row carries only references (the data-object
+    pathspec, the run pathspec/card, the evaluated solution ref) and small derived
+    scalars (holdout score, verdict, leakage) -- never raw rows or secrets. A
+    failure to record never fails the command.
+    """
+    try:
+        from loom.learnings import Learnings, LearningRecord, Outcome, TaskSpec
+
+        summary = getattr(result, "summary", None) or {}
+        successful = bool(getattr(result, "successful", False))
+        holdout = summary.get("holdout") or {}
+        best_metric = holdout.get("score")
+        leakage = bool(summary.get("leakage"))
+
+        artifacts = [
+            ref
+            for ref in (
+                getattr(result, "pathspec", None),
+                getattr(result, "card_path", None),
+            )
+            if ref
+        ]
+
+        record = LearningRecord(
+            command="validate",
+            task=TaskSpec(
+                data_ref=dataset_ref,
+                goal="validate a baseline/solution (CV + sealed holdout + calibration)",
+                metric=str(summary.get("metric") or "n/a"),
+                experiment_id=solution or dataset_ref,
+            ),
+            inputs={
+                "target": target,
+                "solution_run": solution,
+                "mlops_provider": config.mlops_provider,
+                "task_type": summary.get("task_type"),
+                "n_folds": summary.get("n_folds"),
+                "holdout_fraction": summary.get("holdout_fraction"),
+                "leakage": leakage,
+                "verdict": summary.get("verdict"),
+            },
+            outcome=Outcome(
+                best_metric=float(best_metric)
+                if isinstance(best_metric, (int, float))
+                else None,
+                submission_ok=successful,
+                node_count=0,
+            ),
+            artifacts=artifacts,
+            success=successful,
+            model=None,
+            tenant=config.tenant,
+            owned_by=config.owned_by,
+            reflection=(
+                "leakage flags present; explain the score before trusting"
+                if leakage
+                else None
+            ),
+        )
+        Learnings(config).record(record)
+    except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
+        pass
+
+
+def _print_report_summary(experiment_id: Optional[str], result: object) -> None:
+    """Print a compact experiment-report summary + the ``@card`` reference."""
+    summary = getattr(result, "summary", None) or {}
+    print("Loom report complete.")
+    print(f"  experiment  : {experiment_id or '(by pathspecs)'}")
+    print(f"  run         : {getattr(result, 'pathspec', None) or 'n/a'}")
+    print(f"  card        : {getattr(result, 'card_path', None) or 'n/a'}")
+
+    if summary:
+        print(
+            f"  runs        : {summary.get('n_runs')} "
+            f"({summary.get('n_successful')} successful)"
+        )
+        best = summary.get("best_metric")
+        if best is not None:
+            print(f"  best metric : {best} ({summary.get('best_run')})")
+        spread = summary.get("metric_spread")
+        if spread:
+            print(
+                f"  spread      : min={spread.get('min')} "
+                f"mean={spread.get('mean')} max={spread.get('max')}"
+            )
+        leaderboard = summary.get("leaderboard") or []
+        if leaderboard:
+            print("  leaderboard :")
+            for rank, row in enumerate(leaderboard[:_LEADERBOARD_LIMIT], start=1):
+                metric = row.get("metric")
+                metric_s = _format_metric(metric)
+                print(f"    {rank:>2}. {row.get('pathspec', '?')}  metric={metric_s}")
+        print(f"  VERDICT     : {summary.get('verdict')}")
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    """Handle ``loom report``: assemble an experiment report via the MLOps interface.
+
+    Resolves the configured MLOps execution provider, runs the read-only
+    :class:`flows.report.ReportFlow` through its ``run_flow`` seam (never importing
+    a concrete backend or touching the datastore), prints a report summary + the
+    ``@card`` reference, and appends a ``command="report"`` learnings row.
+    Read-only: it never prompts.
+
+    Args:
+        args: Parsed arguments for the ``report`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on failure).
+    """
+    from flows import REPORT_FLOW_PATH
+
+    config = _build_config(args)
+    experiment_id = (getattr(args, "experiment", None) or "").strip() or None
+    runs = (getattr(args, "runs", None) or "").strip() or None
+
+    try:
+        execution = get_execution(config.mlops_provider)(config)
+    except Exception as exc:  # noqa: BLE001 - actionable hint
+        print(
+            f"error: could not load the MLOps provider "
+            f"{config.mlops_provider!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    tags = [
+        "loom_command:report",
+        f"loom_tenant:{config.tenant}",
+        f"loom_owned_by:{config.owned_by}",
+    ]
+    if experiment_id:
+        tags.append(f"loom_experiment:{experiment_id}")
+
+    target_desc = experiment_id or runs
+    print(f"Assembling report for {target_desc!r} (read-only)...")
+    try:
+        result = execution.run_flow(
+            REPORT_FLOW_PATH,
+            {"experiment_id": experiment_id, "run_pathspecs": runs},
+            tags=tags,
+        )
+    except NotImplementedError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+        print(
+            f"error: failed to run the report flow: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not getattr(result, "successful", False):
+        print(
+            f"error: the report run did not complete successfully: "
+            f"{getattr(result, 'error', None) or 'unknown error'}",
+            file=sys.stderr,
+        )
+
+    _print_report_summary(experiment_id, result)
+    _record_report_learning(config, experiment_id, runs, result)
+
+    return 0 if getattr(result, "successful", False) else 1
+
+
+def _record_report_learning(
+    config: LoomConfig,
+    experiment_id: Optional[str],
+    runs: Optional[str],
+    result: object,
+) -> None:
+    """Append one ``command="report"`` learnings row for this report run.
+
+    Best-effort and sanitized: references + small scalars only (n_runs, best
+    metric, verdict). A failure to record never fails the command.
+    """
+    try:
+        from loom.learnings import Learnings, LearningRecord, Outcome, TaskSpec
+
+        summary = getattr(result, "summary", None) or {}
+        successful = bool(getattr(result, "successful", False))
+        best_metric = summary.get("best_metric")
+
+        artifacts = [
+            ref
+            for ref in (
+                getattr(result, "pathspec", None),
+                getattr(result, "card_path", None),
+            )
+            if ref
+        ]
+
+        record = LearningRecord(
+            command="report",
+            task=TaskSpec(
+                data_ref=None,
+                goal="assemble an experiment report (runs + metrics + lineage)",
+                metric="n/a (read-only report)",
+                experiment_id=experiment_id or (runs or "report"),
+            ),
+            inputs={
+                "experiment_id": experiment_id,
+                "run_pathspecs": runs,
+                "mlops_provider": config.mlops_provider,
+                "n_runs": summary.get("n_runs"),
+                "n_successful": summary.get("n_successful"),
+                "verdict": summary.get("verdict"),
+            },
+            outcome=Outcome(
+                best_metric=float(best_metric)
+                if isinstance(best_metric, (int, float))
+                else None,
+                submission_ok=successful,
+                node_count=int(summary.get("n_runs") or 0),
+            ),
+            artifacts=artifacts,
+            success=successful,
+            model=None,
+            tenant=config.tenant,
+            owned_by=config.owned_by,
+            reflection=None,
+        )
+        Learnings(config).record(record)
+    except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
+        pass
+
+
+def _print_viz_summary(source_ref: str, result: object) -> None:
+    """Print a compact viz summary + the ``@card`` reference."""
+    summary = getattr(result, "summary", None) or {}
+    print("Loom viz complete.")
+    print(f"  source      : {source_ref}")
+    print(f"  run         : {getattr(result, 'pathspec', None) or 'n/a'}")
+    print(f"  card        : {getattr(result, 'card_path', None) or 'n/a'}")
+
+    if summary:
+        plots = summary.get("plots") or []
+        print(f"  kind        : {summary.get('kind')} ({summary.get('source')})")
+        if plots:
+            names = ", ".join(p.get("name", "?") for p in plots)
+            print(f"  plots       : {len(plots)} -- {names}")
+        else:
+            print("  plots       : none (no numeric columns / no scored runs)")
+
+
+def _cmd_viz(args: argparse.Namespace) -> int:
+    """Handle ``loom viz``: plot a data object or a run via the MLOps interface.
+
+    Resolves the configured MLOps execution provider, runs the read-only
+    :class:`flows.viz.VizFlow` through its ``run_flow`` seam (never importing a
+    concrete backend or touching the datastore), prints a plot summary + the
+    ``@card`` reference, and appends a ``command="viz"`` learnings row. Read-only:
+    it never prompts.
+
+    Args:
+        args: Parsed arguments for the ``viz`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on failure).
+    """
+    from flows import VIZ_FLOW_PATH
+
+    config = _build_config(args)
+    dataset_ref = (getattr(args, "dataset", None) or "").strip() or None
+    run_pathspec = (getattr(args, "run", None) or "").strip() or None
+    target = (getattr(args, "target", None) or "").strip() or None
+    kind = (getattr(args, "kind", None) or "").strip() or None
+
+    try:
+        execution = get_execution(config.mlops_provider)(config)
+    except Exception as exc:  # noqa: BLE001 - actionable hint
+        print(
+            f"error: could not load the MLOps provider "
+            f"{config.mlops_provider!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    source_ref = dataset_ref or run_pathspec or ""
+    tags = [
+        "loom_command:viz",
+        f"loom_tenant:{config.tenant}",
+        f"loom_owned_by:{config.owned_by}",
+    ]
+    if dataset_ref:
+        tags.append(f"loom_dataset_ref:{dataset_ref}")
+
+    print(f"Plotting {source_ref!r} (read-only)...")
+    try:
+        result = execution.run_flow(
+            VIZ_FLOW_PATH,
+            {
+                "dataset_ref": dataset_ref,
+                "run_pathspec": run_pathspec,
+                "target": target,
+                "kind": kind,
+            },
+            tags=tags,
+        )
+    except NotImplementedError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+        print(
+            f"error: failed to run the viz flow: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not getattr(result, "successful", False):
+        print(
+            f"error: the viz run did not complete successfully: "
+            f"{getattr(result, 'error', None) or 'unknown error'}",
+            file=sys.stderr,
+        )
+
+    _print_viz_summary(source_ref, result)
+    _record_viz_learning(config, dataset_ref, run_pathspec, kind, result)
+
+    return 0 if getattr(result, "successful", False) else 1
+
+
+def _record_viz_learning(
+    config: LoomConfig,
+    dataset_ref: Optional[str],
+    run_pathspec: Optional[str],
+    kind: Optional[str],
+    result: object,
+) -> None:
+    """Append one ``command="viz"`` learnings row for this plotting run.
+
+    Best-effort and sanitized: references + small scalars only (the source ref,
+    plot count). A failure to record never fails the command.
+    """
+    try:
+        from loom.learnings import Learnings, LearningRecord, Outcome, TaskSpec
+
+        summary = getattr(result, "summary", None) or {}
+        successful = bool(getattr(result, "successful", False))
+        source_ref = dataset_ref or run_pathspec
+        plots = summary.get("plots") or []
+
+        artifacts = [
+            ref
+            for ref in (
+                getattr(result, "pathspec", None),
+                getattr(result, "card_path", None),
+            )
+            if ref
+        ]
+
+        record = LearningRecord(
+            command="viz",
+            task=TaskSpec(
+                data_ref=source_ref,
+                goal="generate read-only plots of a data object or a run",
+                metric="n/a (read-only viz)",
+                experiment_id=source_ref or "viz",
+            ),
+            inputs={
+                "dataset_ref": dataset_ref,
+                "run_pathspec": run_pathspec,
+                "kind": kind,
+                "mlops_provider": config.mlops_provider,
+                "n_plots": len(plots),
+                "plot_kinds": [p.get("name") for p in plots],
+            },
+            outcome=Outcome(
+                best_metric=None,
+                submission_ok=successful,
+                node_count=0,
+            ),
+            artifacts=artifacts,
+            success=successful,
+            model=None,
+            tenant=config.tenant,
+            owned_by=config.owned_by,
+            reflection=None,
         )
         Learnings(config).record(record)
     except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
