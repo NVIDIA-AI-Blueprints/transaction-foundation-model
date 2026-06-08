@@ -175,3 +175,8 @@ try:  # Metaflow execution provider ("metaflow").
     from . import metaflow_exec  # noqa: F401
 except Exception:  # pragma: no cover - optional dependency guard
     pass
+
+try:  # Model providers (the LLM-backend port); each adapter self-registers.
+    from . import model  # noqa: F401
+except Exception:  # pragma: no cover - optional dependency guard
+    pass

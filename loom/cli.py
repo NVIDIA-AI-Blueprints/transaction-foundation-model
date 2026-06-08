@@ -23,10 +23,9 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import sys
 import uuid
-from typing import Sequence
+from typing import Optional, Sequence
 
 from loom.config import LoomConfig
 from loom.controller import run_loom
@@ -98,6 +97,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Search ('brain') provider name (overrides config).",
     )
     run_parser.add_argument(
+        "--code-provider",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Model ('LLM backend') provider for the code role (overrides config), "
+            "e.g. anthropic-api | openai-api | openrouter | nim | openai-compat | "
+            "claude-subscription | codex-subscription."
+        ),
+    )
+    run_parser.add_argument(
+        "--feedback-provider",
+        default=None,
+        metavar="NAME",
+        help="Model provider for the feedback/judge role (overrides config).",
+    )
+    run_parser.add_argument(
+        "--model-provider",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Shorthand setting BOTH --code-provider and --feedback-provider "
+            "(the per-role flags, if given, take precedence)."
+        ),
+    )
+    run_parser.add_argument(
         "--experiment-id",
         default=None,
         metavar="ID",
@@ -136,6 +160,16 @@ def _build_config(args: argparse.Namespace) -> LoomConfig:
     if args.steps is not None:
         overrides["budget"] = {"steps": args.steps}
 
+    # Model providers: --model-provider sets both roles; the per-role flags, when
+    # given, take precedence (so --model-provider X --feedback-provider Y works).
+    both = getattr(args, "model_provider", None)
+    code_provider = getattr(args, "code_provider", None) or both
+    feedback_provider = getattr(args, "feedback_provider", None) or both
+    if code_provider is not None:
+        overrides["code_provider"] = code_provider
+    if feedback_provider is not None:
+        overrides["feedback_provider"] = feedback_provider
+
     return LoomConfig.load(yaml_path=args.config, overrides=overrides)
 
 
@@ -150,57 +184,80 @@ _AUTH_ERROR_MARKERS = (
 )
 
 
-def _required_credential(model: str, has_base_url: bool) -> tuple[str, str]:
-    """Best-effort guess of the env var an AIDE model route needs.
-
-    Mirrors AIDE's model-name-based provider routing so the CLI can fail fast
-    with an actionable message instead of a deep backend traceback.
-
-    Args:
-        model: The configured model name (e.g. ``"claude-sonnet-4-5"``).
-        has_base_url: Whether ``OPENAI_BASE_URL`` is set (an OpenAI-compatible
-            endpoint such as an NVIDIA NIM).
-
-    Returns:
-        ``(env_var, why)`` naming the credential that route most likely needs.
-    """
-    m = (model or "").lower()
-    if m.startswith("claude") or m.startswith("anthropic"):
-        return "ANTHROPIC_API_KEY", "Claude models read ANTHROPIC_API_KEY"
-    if m.startswith("gpt-") or m.startswith("codex") or re.match(r"o\d", m):
-        return "OPENAI_API_KEY", "OpenAI models read OPENAI_API_KEY"
-    if has_base_url:
-        return (
-            "OPENAI_API_KEY",
-            "an OpenAI-compatible endpoint (OPENAI_BASE_URL) reads OPENAI_API_KEY",
-        )
-    return "OPENROUTER_API_KEY", "models routed via OpenRouter read OPENROUTER_API_KEY"
-
-
 def _llm_preflight(config: LoomConfig) -> list[str]:
-    """Return hints for any missing LLM credentials for the configured models.
+    """Return hints for any missing LLM credentials/login for the model providers.
 
-    The search brain calls an LLM to write solutions, so a run cannot succeed
-    without a credential for the configured model(s). Best-effort (mirrors
-    AIDE's routing): an empty list means no obvious problem.
+    Delegates to the resolved :class:`~loom.providers.model.ModelProvider` for
+    each role (``"code"`` and ``"feedback"``): each provider knows exactly which
+    credential or CLI login its route needs. The search brain calls an LLM to
+    write solutions, so a run cannot succeed without a working model backend.
+    Best-effort: an empty list means no obvious problem.
 
     Args:
         config: The resolved Loom configuration.
 
     Returns:
-        One hint string per missing credential (empty if all appear set).
+        Deduplicated hint strings from the providers (empty if all look ready).
     """
-    has_base_url = bool(os.environ.get("OPENAI_BASE_URL"))
+    from loom.registry import get_model
+
     hints: list[str] = []
     seen: set[str] = set()
-    for model in (config.code_model, config.feedback_model):
-        env_var, why = _required_credential(model, has_base_url)
-        if env_var in seen:
+    pairs = (
+        (config.code_provider, "code"),
+        (config.feedback_provider, "feedback"),
+    )
+    for provider_name, role in pairs:
+        try:
+            provider = get_model(provider_name)(config)
+        except Exception as exc:  # noqa: BLE001 - surface as an actionable hint
+            hints.append(f"model provider {provider_name!r} for the {role} role "
+                         f"could not be loaded: {exc}")
             continue
-        seen.add(env_var)
-        if not os.environ.get(env_var):
-            hints.append(f"{env_var} is not set ({why}; model '{model}')")
+        for hint in provider.preflight(role):
+            if hint not in seen:
+                seen.add(hint)
+                hints.append(hint)
     return hints
+
+
+def _judge_preflight(config: LoomConfig) -> Optional[str]:
+    """Return a fail-fast message if the feedback route cannot serve the judge.
+
+    AIDE's feedback judge (``submit_review``) always calls the backend with a
+    ``func_spec`` (tool/function calling). A route whose ``judge_capable`` is
+    ``False`` will crash mid-run, so fail fast with an actionable message.
+
+    Args:
+        config: The resolved Loom configuration.
+
+    Returns:
+        An error message string if the feedback route is not judge-capable, else
+        ``None``.
+    """
+    from loom.registry import get_model
+
+    try:
+        provider = get_model(config.feedback_provider)(config)
+        route = provider.resolve("feedback")
+    except Exception:  # noqa: BLE001 - the credential preflight reports load errors
+        return None
+
+    if route.judge_capable:
+        return None
+
+    hint = (
+        f"the feedback provider {config.feedback_provider!r} resolves to a route "
+        f"that cannot run the judge (model {route.model_name!r} lacks tool "
+        "calling). AIDE's feedback step (submit_review) requires function/tool "
+        "calling."
+    )
+    if config.feedback_provider == "openrouter":
+        hint += (
+            " For OpenRouter, pick a tool-capable feedback slug "
+            "(see https://openrouter.ai/models?supported_parameters=tools)."
+        )
+    return hint
 
 
 def _looks_like_auth_error(exc: BaseException) -> bool:
@@ -263,6 +320,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 2
 
     config = _build_config(args)
+
+    # Pre-flight (judge): AIDE's feedback step always uses tool calling, so a
+    # feedback route that is not judge-capable would crash mid-run. Fail fast.
+    judge_problem = _judge_preflight(config)
+    if judge_problem is not None:
+        print(f"error: {judge_problem}", file=sys.stderr)
+        return 2
 
     # Pre-flight: the search brain needs an LLM credential. Fail fast with an
     # actionable message rather than a deep backend traceback at the first call.

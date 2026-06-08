@@ -37,12 +37,13 @@ AIDE is not installed; the import error only surfaces when a run is attempted.
 from __future__ import annotations
 
 import dataclasses
+import os
 import time
 from typing import Any, Optional
 
 from loom.config import BudgetConfig, LoomConfig
 from loom.providers import ExecCallback, OnNode, SearchProvider
-from loom.registry import register_search
+from loom.registry import get_model, register_search
 from loom.types import ExecutionResult, NodeRecord, SearchResult, Task
 
 
@@ -210,10 +211,30 @@ class AideSearchProvider(SearchProvider):
         cfg.agent.search.debug_prob = budget.debug_prob
         cfg.agent.search.max_debug_depth = budget.max_debug_depth
 
-        # Model routing (names only; AIDE's backend resolves provider + reads
-        # keys/endpoints from the environment, e.g. OPENAI_BASE_URL for NIM).
-        cfg.agent.code.model = self.config.code_model
-        cfg.agent.feedback.model = self.config.feedback_model
+        # Model routing via the ModelProvider port (the third Loom seam). Each
+        # role ("code"/"feedback") resolves to a ModelProvider that yields the
+        # model NAME AIDE routes on and materializes the env knobs (OPENAI_BASE_URL
+        # / the key var AIDE's backend reads) BEFORE the first query -- AIDE
+        # memoizes its clients with funcy @once, so env must be set up front. This
+        # module still never reads or stores key material; providers only move or
+        # pass through what the user already set.
+        code_provider = get_model(self.config.code_provider)(self.config)
+        feedback_provider = get_model(self.config.feedback_provider)(self.config)
+
+        cfg.agent.code.model = code_provider.resolve("code").model_name
+        cfg.agent.feedback.model = feedback_provider.resolve("feedback").model_name
+
+        # Materialize routing env before the agent loop / first query.
+        code_provider.prepare_env(os.environ)
+        feedback_provider.prepare_env(os.environ)
+
+        # cli-bridge providers (e.g. claude/codex subscription) install a runtime
+        # dispatch override into AIDE's backend dispatch table once at run setup.
+        import aide.backend as aide_backend
+
+        for provider in (code_provider, feedback_provider):
+            if provider.resolve("code").kind == "cli-bridge":
+                provider.install_dispatch_override(aide_backend)
 
         return prep_cfg_fn(cfg)
 

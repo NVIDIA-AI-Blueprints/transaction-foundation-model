@@ -19,6 +19,7 @@ from typing import Callable, Type, TypeVar
 # Registries: provider name -> provider class.
 _SEARCH_PROVIDERS: dict[str, type] = {}
 _EXECUTION_PROVIDERS: dict[str, type] = {}
+MODEL_PROVIDERS: dict[str, type] = {}
 
 _T = TypeVar("_T", bound=type)
 
@@ -53,6 +54,27 @@ def register_execution(name: str) -> Callable[[_T], _T]:
 
     def _decorator(cls: _T) -> _T:
         _EXECUTION_PROVIDERS[name] = cls
+        return cls
+
+    return _decorator
+
+
+def register_model(name: str) -> Callable[[_T], _T]:
+    """Class decorator that registers a model provider under ``name``.
+
+    The model provider is the third Loom port: the LLM backend (which model and
+    how it is authenticated). See :mod:`loom.providers.model`.
+
+    Args:
+        name: The configuration name to bind the class to (e.g.
+            ``"anthropic-api"`` or ``"openrouter"``).
+
+    Returns:
+        A decorator that registers the class and returns it unchanged.
+    """
+
+    def _decorator(cls: _T) -> _T:
+        MODEL_PROVIDERS[name] = cls
         return cls
 
     return _decorator
@@ -114,9 +136,35 @@ def get_execution(name: str) -> type:
         ) from None
 
 
+def get_model(name: str) -> type:
+    """Resolve a registered model provider class by name.
+
+    Args:
+        name: The provider name from configuration (e.g. ``"anthropic-api"``).
+
+    Returns:
+        The registered model provider class.
+
+    Raises:
+        KeyError: If no model provider is registered under ``name`` (the error
+            message lists the names that are available).
+    """
+    _ensure_builtins_loaded()
+    try:
+        return MODEL_PROVIDERS[name]
+    except KeyError:
+        available = ", ".join(sorted(MODEL_PROVIDERS)) or "<none>"
+        raise KeyError(
+            f"No model provider registered under {name!r}. Available: {available}."
+        ) from None
+
+
 __all__ = [
     "register_search",
     "register_execution",
+    "register_model",
     "get_search",
     "get_execution",
+    "get_model",
+    "MODEL_PROVIDERS",
 ]

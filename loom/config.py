@@ -58,9 +58,19 @@ class LoomConfig:
             at their own Metaflow endpoint (BYO perimeter).
         code_model: Model used to generate solution code.
         feedback_model: Model used to review/score executed solutions.
+        code_provider: Name of the model ("LLM backend") provider for the code
+            role -- which model and how it is authenticated. Default
+            ``"anthropic-api"`` (native Claude), preserving historical behavior.
+        feedback_provider: Name of the model provider for the feedback/judge
+            role. Default ``"anthropic-api"``. The judge always uses tool calling,
+            so this provider's resolved route must be judge-capable.
         nim_base_url: OpenAI-compatible base URL for model routing (env
             ``OPENAI_BASE_URL``; e.g. an NVIDIA NIM endpoint). The matching API
             key is read from the environment at call time, never stored here.
+        model_base_url: OpenAI-compatible base URL for the generic
+            ``openai-compat`` model provider (env ``LOOM_MODEL_BASE_URL``; e.g. a
+            LiteLLM/vLLM/Ollama endpoint). The matching API key is read from the
+            environment at call time, never stored here.
         budget: Search budget knobs (see :class:`BudgetConfig`).
         corpus_path: Path to the JSONL corpus the controller appends node
             records to.
@@ -75,7 +85,10 @@ class LoomConfig:
     metaflow_profile: str | None = None
     code_model: str = _DEFAULT_CODE_MODEL
     feedback_model: str = _DEFAULT_FEEDBACK_MODEL
+    code_provider: str = "anthropic-api"
+    feedback_provider: str = "anthropic-api"
     nim_base_url: str | None = None
+    model_base_url: str | None = None
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     corpus_path: str = "corpus/nodes.jsonl"
     tenant: str = "default"
@@ -168,8 +181,14 @@ class LoomConfig:
             out["code_model"] = v
         if (v := env.get("LOOM_FEEDBACK_MODEL")) is not None:
             out["feedback_model"] = v
+        if (v := env.get("LOOM_CODE_PROVIDER")) is not None:
+            out["code_provider"] = v
+        if (v := env.get("LOOM_FEEDBACK_PROVIDER")) is not None:
+            out["feedback_provider"] = v
         if (v := env.get("OPENAI_BASE_URL")) is not None:
             out["nim_base_url"] = v
+        if (v := env.get("LOOM_MODEL_BASE_URL")) is not None:
+            out["model_base_url"] = v
         if (v := env.get("LOOM_CORPUS_PATH")) is not None:
             out["corpus_path"] = v
         if (v := env.get("LOOM_TENANT")) is not None:
