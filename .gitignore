@@ -20,3 +20,5 @@ corpus/*.jsonl
 # Generated task inputs (recreated by each task's prepare_data.py)
 tasks/*/input/
 logs/
+# AIDE per-run workspaces + Metaflow local run logs (ephemeral, created at cwd)
+workspaces/
