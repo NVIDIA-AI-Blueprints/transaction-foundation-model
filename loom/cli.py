@@ -22,6 +22,16 @@ Exposes the ``loom`` console script (wired in ``pyproject.toml`` as
     ``--dataset`` (a data-object pathspec); the ``local`` dev provider consumes
     ``--data`` (a local dir).
 
+``loom proxy serve [--host 127.0.0.1] [--port 8088]``
+    Launch the **Loom gateway** (see :mod:`loom.proxy.server`): an
+    Anthropic-passthrough server that authenticates callers by a Loom-issued
+    ``LOOM_API_KEY``, injects Loom's system prompt, forwards to the real Anthropic
+    API with a *server-side* ``ANTHROPIC_API_KEY`` the caller never sees, and logs
+    every call centrally (the moat corpus). This is the server side of the
+    opt-in ``--model-provider loom-proxy`` route. Both keys are read from the
+    environment on the server; a missing server-side ``ANTHROPIC_API_KEY`` fails
+    fast with an actionable message.
+
 This module is dependency-light at import time: it imports only the standard
 library and Loom core. The heavy optional dependencies (AIDE, Metaflow, ...)
 are pulled in only when the controller resolves a provider that needs them, at
@@ -190,6 +200,46 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
     ingest_parser.set_defaults(func=_cmd_ingest)
+
+    proxy_parser = subparsers.add_parser(
+        "proxy",
+        help="Run the Loom model gateway (the central data-collection moat path).",
+        description=(
+            "Operate Loom's LLM gateway. The 'serve' action launches an "
+            "Anthropic-passthrough server that authenticates callers by a "
+            "Loom-issued LOOM_API_KEY, injects Loom's system prompt, forwards to "
+            "the real Anthropic API with a server-side ANTHROPIC_API_KEY the "
+            "caller never sees, and logs every call centrally (the moat corpus)."
+        ),
+    )
+    proxy_sub = proxy_parser.add_subparsers(dest="proxy_action", metavar="<action>")
+    proxy_serve = proxy_sub.add_parser(
+        "serve",
+        help="Launch the Loom gateway (uvicorn).",
+        description=(
+            "Launch the Loom gateway. Reads the server-side real vendor key "
+            "(ANTHROPIC_API_KEY) and the accepted Loom key(s) (LOOM_API_KEY / "
+            "LOOM_API_KEYS) from the environment; fails fast if the vendor key is "
+            "missing. This is the server side of the opt-in '--model-provider "
+            "loom-proxy' route."
+        ),
+    )
+    proxy_serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        metavar="HOST",
+        help="Bind address (default 127.0.0.1 — loopback only until hosted).",
+    )
+    proxy_serve.add_argument(
+        "--port",
+        type=int,
+        default=8088,
+        metavar="PORT",
+        help="Bind port (default 8088, matching the loom_api_base default).",
+    )
+    proxy_serve.set_defaults(func=_cmd_proxy_serve)
+    # No action -> print the proxy help and exit non-zero (mirrors top-level).
+    proxy_parser.set_defaults(func=_cmd_proxy, _proxy_parser=proxy_parser)
 
     return parser
 
@@ -509,6 +559,67 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     print("")
     print("Run a task against it with:")
     print(f"  loom run --dataset {pathspec} --mlops metaflow --goal '...' --metric '...'")
+    return 0
+
+
+def _cmd_proxy(args: argparse.Namespace) -> int:
+    """Handle a bare ``loom proxy`` (no action): print help, return non-zero.
+
+    Mirrors the top-level no-subcommand behavior so ``loom proxy`` alone is
+    discoverable rather than a silent no-op.
+
+    Args:
+        args: Parsed arguments for the ``proxy`` subcommand.
+
+    Returns:
+        ``1`` (no action chosen).
+    """
+    parser = getattr(args, "_proxy_parser", None)
+    if parser is not None:
+        parser.print_help()
+    return 1
+
+
+def _cmd_proxy_serve(args: argparse.Namespace) -> int:
+    """Handle ``loom proxy serve``: launch the Loom gateway under uvicorn.
+
+    Delegates to :func:`loom.proxy.server.serve`, which reads the server-side
+    ``ANTHROPIC_API_KEY`` (the real vendor key) and the accepted ``LOOM_API_KEY``
+    / ``LOOM_API_KEYS`` from the environment and fails fast (via ``SystemExit``)
+    with an actionable message if the vendor key is missing. The proxy deps
+    (starlette / uvicorn / httpx) are imported lazily here so a missing optional
+    dependency only affects this command, not the rest of the CLI.
+
+    Args:
+        args: Parsed arguments for the ``proxy serve`` action (``--host`` /
+            ``--port``).
+
+    Returns:
+        Process exit code (``0`` on a clean shutdown; ``2`` on a missing-key /
+        import failure surfaced as an actionable message).
+    """
+    try:
+        from loom.proxy.server import serve
+    except Exception as exc:  # noqa: BLE001 - actionable hint, no traceback
+        print(
+            f"error: the Loom gateway needs starlette + uvicorn + httpx but they "
+            f"could not be imported: {exc}\nInstall them (they ship with Loom's "
+            "deps) and try again.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        serve(host=args.host, port=args.port)
+    except SystemExit as exc:
+        # serve() raises SystemExit with an actionable message on a missing key.
+        message = exc.code
+        if isinstance(message, str):
+            print(message, file=sys.stderr)
+            return 2
+        return int(message or 0)
+    except KeyboardInterrupt:  # pragma: no cover - interactive shutdown
+        print("\nLoom gateway stopped.", file=sys.stderr)
     return 0
 
 

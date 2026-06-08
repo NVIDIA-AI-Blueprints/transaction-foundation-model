@@ -71,6 +71,19 @@ class LoomConfig:
             ``openai-compat`` model provider (env ``LOOM_MODEL_BASE_URL``; e.g. a
             LiteLLM/vLLM/Ollama endpoint). The matching API key is read from the
             environment at call time, never stored here.
+        loom_api_base: Base URL of the Loom proxy gateway used by the
+            ``loom-proxy`` model provider (env ``LOOM_API_BASE``; default
+            ``http://127.0.0.1:8088``). The ``loom-proxy`` route points AIDE's
+            Anthropic backend at this URL so calls flow through Loom's gateway
+            (which injects Loom's prompts and logs every call for the moat). The
+            authenticating key (``LOOM_API_KEY``) is read from the environment at
+            the point of use, never stored here.
+        proxy_log_path: Path to the JSONL central call log the Loom proxy
+            gateway appends one row to per LLM call (env ``LOOM_PROXY_LOG_PATH``;
+            default ``learnings/proxy_calls.jsonl``). This is the central moat
+            corpus the gateway writes server-side; anchored absolute at load time
+            (like ``corpus_path``/``learnings_path``) so it survives a provider
+            ``chdir`` into an ephemeral workspace.
         budget: Search budget knobs (see :class:`BudgetConfig`).
         corpus_path: Path to the JSONL corpus the controller appends node
             records to.
@@ -95,6 +108,8 @@ class LoomConfig:
     feedback_provider: str = "anthropic-api"
     nim_base_url: str | None = None
     model_base_url: str | None = None
+    loom_api_base: str = "http://127.0.0.1:8088"
+    proxy_log_path: str = "learnings/proxy_calls.jsonl"
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     corpus_path: str = "corpus/nodes.jsonl"
     learnings_path: str = "learnings/rollouts.jsonl"
@@ -166,6 +181,14 @@ class LoomConfig:
         if cfg.learnings_path and not os.path.isabs(cfg.learnings_path):
             cfg = replace(cfg, learnings_path=os.path.abspath(cfg.learnings_path))
 
+        # Anchor the proxy call-log path absolute for the same reason as
+        # corpus_path/learnings_path: the gateway appends each call row from the
+        # launch cwd, but a model/execution provider may have chdir'd into an
+        # ephemeral workspace by write time, so a relative path would scatter the
+        # central moat corpus into doomed workspaces instead of one stable file.
+        if cfg.proxy_log_path and not os.path.isabs(cfg.proxy_log_path):
+            cfg = replace(cfg, proxy_log_path=os.path.abspath(cfg.proxy_log_path))
+
         return cfg
 
     @staticmethod
@@ -211,6 +234,10 @@ class LoomConfig:
             out["nim_base_url"] = v
         if (v := env.get("LOOM_MODEL_BASE_URL")) is not None:
             out["model_base_url"] = v
+        if (v := env.get("LOOM_API_BASE")) is not None:
+            out["loom_api_base"] = v
+        if (v := env.get("LOOM_PROXY_LOG_PATH")) is not None:
+            out["proxy_log_path"] = v
         if (v := env.get("LOOM_CORPUS_PATH")) is not None:
             out["corpus_path"] = v
         if (v := env.get("LOOM_LEARNINGS_PATH")) is not None:

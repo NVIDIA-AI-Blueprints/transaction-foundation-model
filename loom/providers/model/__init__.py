@@ -214,6 +214,11 @@ try:  # generic OpenAI-compatible self-host ("openai-compat").
 except Exception:  # pragma: no cover - optional dependency guard
     pass
 
+try:  # Loom proxy gateway (Anthropic passthrough), the moat path ("loom-proxy").
+    from . import loom_proxy  # noqa: F401
+except Exception:  # pragma: no cover - optional dependency guard
+    pass
+
 try:  # Claude subscription via local `claude` CLI ("claude-subscription").
     from . import claude_subscription  # noqa: F401
 except Exception:  # pragma: no cover - optional dependency guard

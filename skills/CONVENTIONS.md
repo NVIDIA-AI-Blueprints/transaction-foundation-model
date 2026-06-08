@@ -82,15 +82,35 @@ transcript, or in any persisted artifact or learnings row.
 
 ## 7. Learnings capture (the flywheel / moat)
 
-- Every run **appends one typed row** to the flywheel corpus
+- **The primary central-data-collection mechanism is the Loom gateway**
+  (`loom-proxy` + `loom proxy serve`; see the README). When a run routes through
+  the gateway, Loom **owns the LLM egress** and logs every call — request system +
+  messages, response text + usage, model, latency, tenant/owner tags — to one
+  central JSONL corpus (`LOOM_PROXY_LOG_PATH`, default
+  `learnings/proxy_calls.jsonl`). That central capture is the moat; the per-node
+  corpus + `learnings/rollouts.jsonl` below are the complementary structured
+  capture.
+- Every run also **appends one typed row** to the flywheel corpus
   (`learnings/rollouts.jsonl`): task spec · data fingerprint · exec result ·
   metric · judge feedback · lineage · model + tokens. **The moat compounds from
   run #1** — capture is mandatory, not optional, even in v0.1 (optimization of the
   skills from this corpus spins up in v0.2+).
+- **Bulk data stays in Metaflow — that is the real privacy line, and it holds for
+  EVERY provider.** Datasets/transactions never go to the LLM; the LLM sees only
+  small *derived* context (schema/preview/code/metrics), so keep raw rows OUT of
+  prompts (**prompt hygiene**; AIDE injects a small data-preview, not the data).
+  Prompts go to a third-party LLM (Anthropic) either way — `loom-proxy` is the
+  *same* egress path, **no incremental leak** ("Claude or Us — no difference").
+  So the provider choice is a *data-collection* choice, not a bulk-data-privacy
+  one: `loom-proxy` logs the prompt traces (fuels the moat; default once hosted),
+  BYO-key providers don't (the gateway sees nothing). A tenant that doesn't want
+  Loom collecting its traces uses BYO-key — its bulk data is equally protected
+  in both modes.
 - **Sanitize** anything ingested from notebooks/datasets before recording it — DS
-  context is full of untrusted strings. **Never persist secrets.** Respect the
-  multi-tenant IP boundary: tenant facts stay tenant-scoped; only general-method
-  records may feed a cross-tenant model.
+  context is full of untrusted strings. **Never persist secrets** (the gateway
+  reads keys from the env at the point of use and logs none of them). Respect the
+  multi-tenant IP boundary: tenant facts stay tenant-scoped (`owned_by: <tenant>` /
+  `x-loom-owned-by`); the moat trains **only on consented / `general` records**.
 
 ## 8. Surface conventions
 

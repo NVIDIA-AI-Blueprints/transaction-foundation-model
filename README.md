@@ -263,6 +263,7 @@ in the environment. Flags override env; env overrides the `anthropic-api` defaul
 | `openai-compat` | `OPENAI_API_KEY` (passthrough; may be a dummy local token) | `--model-provider openai-compat`; endpoint via `LOOM_MODEL_BASE_URL` (LiteLLM / vLLM / Ollama / gateway) | configurable (default yes) |
 | `claude-subscription` | none — your local `claude` CLI's own login | `--model-provider claude-subscription` | yes (CLI text coerced to the judge's JSON) |
 | `codex-subscription` | none — your local `codex` CLI's own login (`~/.codex/auth.json`) | `--model-provider codex-subscription` | yes (`codex exec --output-schema`) |
+| `loom-proxy` | `LOOM_API_KEY` (the gateway holds the real vendor key server-side) | `--model-provider loom-proxy` (opt-in; not yet the default — the gateway isn't hosted) | yes (Anthropic passthrough — native tool use) |
 
 ```bash
 # Native OpenAI for both roles
@@ -334,6 +335,55 @@ loom run --data ./task --goal "..." --metric "..." --model-provider codex-subscr
 `loom run` pre-flights both: a missing binary or login signal yields an actionable
 hint before any work starts.
 
+### The Loom gateway (`loom-proxy`) — and the privacy tiers
+
+`loom-proxy` routes your LLM calls through **Loom's own gateway** instead of
+calling the vendor directly. You authenticate with a Loom-issued `LOOM_API_KEY`;
+the gateway holds the real vendor key **server-side** (you never see it), injects
+Loom's system prompt, forwards to the real Anthropic Messages API (v0 is a 1:1
+**Anthropic passthrough**, so native tool use and the judge work with no
+translation), and **logs every call centrally** — request system + messages,
+response text + token usage, model, latency, and optional tenant/owner tags — to
+one JSONL corpus. That central capture is Loom's **data flywheel**: the fuel for
+distilling small, Loom-owned models over time.
+
+> **Status: opt-in, not the default — the gateway is not hosted yet.** Select it
+> explicitly with `--model-provider loom-proxy`. It becomes the **default once
+> hosted** — it adds no egress beyond using Claude (see below), it just lets Loom log the prompt traces that fuel the moat.
+
+**Run the gateway yourself (the server side):**
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."   # the REAL vendor key — stays on the server
+export LOOM_API_KEY="loom-..."          # the key callers must present (allowlist)
+loom proxy serve --host 127.0.0.1 --port 8088
+#   POST http://127.0.0.1:8088/v1/messages   (Anthropic Messages passthrough)
+#   GET  http://127.0.0.1:8088/healthz
+
+# point a run at it (in another shell, with only the LOOM key):
+export LOOM_API_KEY="loom-..."          # callers never need the vendor key
+loom run --data ./task --goal "..." --metric "..." --model-provider loom-proxy
+```
+
+`LOOM_API_BASE` (default `http://127.0.0.1:8088`) is where the `loom-proxy`
+provider points AIDE's Anthropic backend; `LOOM_PROXY_LOG_PATH` (default
+`learnings/proxy_calls.jsonl`) is the central call log. Set `LOOM_API_KEYS`
+(comma-separated) on the server for a multi-key allowlist.
+
+**What actually leaves your machine — the honest version:**
+
+- **Your bulk data never goes to the LLM, in *either* mode.** Datasets/transactions live as **Metaflow data objects in your own datastore/perimeter**; candidate code processes them there. The LLM only ever sees small *derived* context — a schema, a data-preview, code, metrics — never the data itself. That is the real "stays local" guarantee, and it holds for **every** provider. Keep it true with **prompt hygiene**: never stuff raw rows into a prompt (AIDE already injects a *small* data-preview, not the data).
+- **LLM prompts go to a third-party LLM either way.** Using Claude at all sends those small prompts to Anthropic. `loom-proxy` sits in that *same* path — **no incremental egress** ("Claude or Us — no difference").
+
+So picking a provider is **not** a bulk-data-privacy choice — it's a *data-collection* choice: **does Loom also log your prompt traces** (and thereby fuel the moat)?
+
+| Provider | Prompts go to | Loom logs them? |
+|---|---|---|
+| **`loom-proxy`** (default *once hosted*) | Anthropic, via Loom's gateway | **yes** — every call to the moat corpus, tagged by tenant/owner |
+| **BYO-key** (`anthropic-api`/`openai-api`/`openrouter`/`nim`/`openai-compat`/`claude-subscription`/`codex-subscription`) | straight to your vendor/endpoint | **no** — Loom's gateway sees nothing |
+
+A tenant that doesn't want Loom collecting its prompt traces uses a BYO-key provider; its **bulk data is protected the same way in both modes** (it's in Metaflow, not in the prompt). The moat trains **only on `owned_by: general` data**; tenant-tagged rows (`x-loom-owned-by: <tenant>`) are isolated from the cross-tenant set (the same IP boundary [corpus](loom/corpus.py) enforces). No keys are ever logged — the gateway records request/response content + metadata, never key material.
+
 ---
 
 ## How it's built
@@ -346,7 +396,7 @@ and registering it, no core changes.
 |---|---|---|
 | Search ("brain") | `SearchProvider` | `aide` |
 | Execution ("muscle") | `ExecutionProvider` | `metaflow`, `local` |
-| Model ("LLM backend") | `ModelProvider` | `anthropic-api`, `openai-api`, `openrouter`, `nim`, `openai-compat`, `claude-subscription`, `codex-subscription` |
+| Model ("LLM backend") | `ModelProvider` | `anthropic-api`, `openai-api`, `openrouter`, `nim`, `openai-compat`, `claude-subscription`, `codex-subscription`, `loom-proxy` |
 
 ```
 loom/
@@ -357,7 +407,8 @@ loom/
   providers/      aide_search.py · metaflow_exec.py · local_exec.py · _interpreter.py
   controller.py   run_loom(task, config) — wires it together
   corpus.py       append-only JSONL of every node (multi-tenant IP boundary)
-  cli.py          the `loom` command (`loom ingest`, `loom run`)
+  proxy/          the Loom gateway — Anthropic passthrough that logs every call (the moat capture)
+  cli.py          the `loom` command (`loom ingest`, `loom run`, `loom proxy serve`)
 flows/ingest_dataset.py   the external→Metaflow boundary (dir/CSV → data object)
 flows/eval_candidate.py   the one static evaluation flow (candidate = data)
 skills/           Claude Code skill-pack (loom-optimize, loom-eda)
