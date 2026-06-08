@@ -192,9 +192,13 @@ class EvalCandidate(FlowSpec):
         with open(self.solution_path, "r", encoding="utf-8") as fh:
             code = fh.read()
 
+        # Run at the workspace ROOT (which contains ./input and ./working), so the
+        # candidate's prompted relative paths ("./input/..." to read, and
+        # "./working/submission.csv" to write) resolve exactly as they do under the
+        # local provider. (Passing ./working here made "./input" unresolvable.)
         result = run_code(
             code,
-            working_dir=self.working_dir,
+            working_dir=self.workspace_dir,
             timeout=int(self.timeout_s),
         )
 
