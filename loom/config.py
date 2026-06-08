@@ -144,6 +144,14 @@ class LoomConfig:
         if overrides:
             cfg = cls._apply_mapping(cfg, overrides)
 
+        # Anchor the corpus path to an ABSOLUTE location at load time (the launch
+        # cwd), BEFORE any execution provider chdir's into an ephemeral workspace.
+        # Otherwise a relative corpus_path resolves against that workspace at
+        # write time and the node records are written into — and deleted with —
+        # the workspace, and the post-run leaderboard read finds nothing.
+        if cfg.corpus_path and not os.path.isabs(cfg.corpus_path):
+            cfg = replace(cfg, corpus_path=os.path.abspath(cfg.corpus_path))
+
         return cfg
 
     @staticmethod
