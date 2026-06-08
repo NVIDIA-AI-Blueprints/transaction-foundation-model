@@ -26,15 +26,15 @@ default MLOps muscle is Metaflow.
 | [`loom-setup-metaflow`](loom-setup-metaflow/) | **roadmap** (in progress) | Install the verified minikube + minio + Metaflow recipe so the MLOps interface has a backend. | You need to stand up Loom's local MLOps stack. |
 | [`loom-connect`](loom-connect/SKILL.md) | **built** | Data access — register a source as a Metaflow **data object** by pathspec (`loom ingest`) and list ingested data objects (`loom datasets`). The #1 daily DS pain and the front door to every other verb. | You need to point Loom at file data and get a `dataset_ref`, or see what's already ingested. |
 | [`loom-eda`](loom-eda/SKILL.md) | **built** | **Read-only** profile of a data object **through the MLOps interface** (`loom eda`) — shape, dtypes, missingness, target balance, top correlations, leakage flags — emitting a Metaflow run + `@card`, plus suggested goal/metric phrasing. | You point at a `dataset_ref` and ask "what's in here?" / "is this ready for Loom?" / "check for leakage". |
-| `loom-features` | roadmap | Build features into a versioned feature set; gated by `loom-eda`'s leakage flags. | You want engineered features as a reusable, lineage-grounded artifact. |
-| `loom-pipeline` | roadmap | Author/run the multi-stage DS pipeline (the recipe primitive; *is* a Metaflow `FlowSpec`). | You want a reproducible ingest→clean→feature→train→eval DAG. |
+| [`loom-features`](loom-features/SKILL.md) | **built** | **Workspace-write** feature engineering **through the MLOps interface** (`loom features`) — domain-neutral transforms (scaling/interactions, encoding, datetime parts, aggregations) built into a **NEW** versioned data object (`FeaturesFlow/<id>`) every downstream verb consumes via `--dataset`; composes with `loom-eda` via `--from` (its leakage-flagged columns are dropped). Reads the source read-only, writes only its own workspace. | You want engineered features as a reusable, lineage-grounded data object. |
+| [`loom-pipeline`](loom-pipeline/SKILL.md) | **built** | **Workspace-write → escalates to expensive** end-to-end lifecycle **through the MLOps interface** (`loom pipeline`) — profile → features → a bounded candidate/optimize step → validate chained into ONE gated Metaflow run; each stage asserts the prior stage's `VERDICT` (leakage blocks features; a sub-threshold validate marks the run FAIL). The optimize stage is the bounded EXPENSIVE step. | You want a reproducible, gated ingest→feature→train→eval run in one shot. |
 | [`loom-optimize`](loom-optimize/SKILL.md) (AIDE) | **built** | Metric-is-the-spec entry → plan → **approval gate (cost/data)** → invoke `loom run` → narrate best metric + leaderboard. | You want Loom to optimize solution code against a measurable metric. |
 | [`loom-validate`](loom-validate/SKILL.md) | **built** | **Workspace-write** rigorous validation of a baseline/solution against a data object **through the MLOps interface** (`loom validate`) — sealed holdout distinct from a stratified/purged K-fold CV, probability calibration (curve + Brier), per-slice / fairness metrics, and leakage flags — emitting a Metaflow run + `@card` with a `VERDICT` that blocks `loom-deploy` if sub-threshold/leaky. | You want to check a candidate is good enough before promotion. |
 | [`loom-viz`](loom-viz/SKILL.md) | **built** | **Read-only** charts/plots **through the MLOps interface** (`loom viz`) — feature distributions, correlation heatmap, target-vs-feature from a data object, or metric-over-nodes / leaderboard from a run — emitted as `@card` images. | You want a visual of a dataset/result, source-grounded to a pathspec. |
 | [`loom-report`](loom-report/SKILL.md) | **built** | **Read-only** assembly **through the MLOps interface** (`loom report`) of an experiment's runs + metrics + lineage (Flow/Run + tags + learnings rows) into a structured analysis/model-card + `@card`; the narrative prose is the skill's job. | You want a shareable write-up of what Loom did and why. |
-| `loom-deploy` | roadmap | Promote/serve a model — **irreversible/external**, always gated, never model-auto-invoked. | You want to ship a validated model to serving. |
-| `loom-ops` | roadmap | Inspect/monitor running and past runs (jobs, status), killable; reads are free. | You want to see what's running or revisit a prior run. |
-| `loom-collab` | roadmap | Collaboration / handoff around runs and cards. | You want to share or hand off a run to a teammate. |
+| [`loom-deploy`](loom-deploy/SKILL.md) | **built** | **Irreversible/external** gated promotion **through the MLOps interface** (`loom deploy`) — asserts the upstream `loom-validate` `VERDICT==PASS` (the cross-verb exit gate) before deploying; a sub-threshold/leaky validate **BLOCKS** it. Default = a deployment PLAN + staged registry manifest (no external mutation); the real apply is behind `--apply` (OFF by default). Always gated; `disable-model-invocation: true`. | You want to ship a validated model to serving (and gate the promotion on a trustworthy held-out number). |
+| [`loom-ops`](loom-ops/SKILL.md) | **built** | **Read-only** monitoring **through the MLOps interface** (`loom ops`) — recent run health (successes/failures, recency), the leaderboard, schedule/run health, and a simple data-object DRIFT check (vs a reference) — emitted as a Metaflow run + `@card`. Reads are free; never prompts. | You want to see what passed/failed, read the leaderboard, or check whether the data drifted. |
+| [`loom-collab`](loom-collab/SKILL.md) | **built** | **Workspace-write to build / irreversible-external to send** a sanitized shareable bundle **through the MLOps interface** (`loom collab`) — report/card + a lineage manifest (pathspecs + fingerprints + commit) as a run + `@card`. Build-only by default (no data leaves the box); the off-box SEND is behind `--send` (OFF by default), gated, to an env/config-driven sink. `disable-model-invocation: true`. | You want to share or hand off a run/report to a teammate, lineage-grounded and sanitized. |
 | `loom-auto` | roadmap | Meta-skill: the one-command happy path (EDA→features→baseline→validate), surfacing only taste decisions. | You want the standard chain without memorizing the verbs. |
 
 ## Typical flow
@@ -60,11 +60,25 @@ shell out to the project's CLI (never importing a concrete backend):
 loom ingest --source PATH [--name NAME]      # loom-connect: register a data object
 loom datasets                                # loom-connect: list ingested data objects
 loom eda --dataset PATHSPEC [--target COL]   # loom-eda: read-only profile -> run + @card
+loom features --dataset PATHSPEC [--target COL] [--from EDA-RUN] [--recipe minimal|full]  # loom-features: build a NEW feature data object -> run + @card
+loom pipeline --dataset PATHSPEC --goal STR [--target COL]  # loom-pipeline: profile->features->optimize->validate in one gated run -> run + @card
+loom optimize ...  # via `loom run` (loom-optimize: AIDE tree-search)
 loom validate --dataset PATHSPEC [--target COL] [--solution RUN] [--sensitive COL]  # loom-validate: CV+holdout+calibration+fairness+leakage -> run + @card
+loom deploy (--validate RUN | --solution RUN) [--apply]  # loom-deploy: gate on validate VERDICT==PASS -> deploy PLAN/manifest (apply OFF by default)
+loom ops (--flow NAME | --experiment ID | --dataset PATHSPEC --reference PATHSPEC)  # loom-ops: read-only run health / leaderboard / drift -> run + @card
+loom collab (--run PATHSPEC | --experiment ID) [--send]  # loom-collab: sanitized shareable bundle -> run + @card (send OFF by default)
 loom report (--experiment ID | --runs PATHSPEC,...)  # loom-report: assemble runs+metrics+lineage -> run + @card
 loom viz (--dataset PATHSPEC | --run PATHSPEC) [--target COL] [--kind ...]  # loom-viz: standard plots -> run + @card images
 loom run --dataset PATHSPEC --goal STR --metric STR [--steps N] [--mlops metaflow|local] [--search aide]
 ```
+
+**Composition edges (artifact handoff + `--from`/`--validate`/`--run`, machine-checkable exit gates):**
+`loom-eda` leakage flags → `loom-features` (via `--from`, the flagged columns are dropped); a
+`loom-features` data object → `loom-pipeline`/`loom-optimize`/`loom-validate` (via `--dataset`); a
+`loom-validate` `VERDICT==PASS` → `loom-deploy` (via `--validate`, a sub-threshold validate BLOCKS);
+a `loom-report`/`loom-validate` run → `loom-collab` (via `--run`). Each gate ships an executable
+self-test (deploy BLOCK-on-sub-threshold; pipeline stage-gate ordering; collab send-off + sanitize;
+ops drift; features leakage-drop).
 
 Providers are selected by name (search brain default `aide`; MLOps muscle default
 `metaflow`, with `local` as a Metaflow-free dev path). See the repo

@@ -63,6 +63,51 @@ Exposes the ``loom`` console script (wired in ``pyproject.toml`` as
     prints a plot summary + the card reference and appends a ``command="viz"``
     learnings row. Read-only tier -- never prompts.
 
+``loom features --dataset PATHSPEC [--target COL] [--from EDA-RUN] [--recipe NAME]``
+    Build engineered features (domain-neutral transforms) from a data object into a
+    **NEW** Metaflow data object by running the :class:`flows.features.FeaturesFlow`
+    through the MLOps interface; the produced run's pathspec (``FeaturesFlow/<id>``)
+    is the ``dataset_ref`` downstream verbs consume. Composes with ``loom eda`` via
+    ``--from`` (the EDA run's leakage-flagged columns are dropped). Output is a run +
+    an ``@card``; the command prints a feature-build summary + the card and appends a
+    ``command="features"`` learnings row. Workspace-write tier (light/auto).
+
+``loom pipeline --dataset PATHSPEC --goal STR [--target COL]``
+    Run the end-to-end lifecycle (profile -> features -> a bounded optimize step ->
+    validate) as ONE gated Metaflow run via the
+    :class:`flows.pipeline.PipelineFlow`; each stage asserts the prior stage's
+    VERDICT (leakage handled before features; a sub-threshold validate marks the run
+    FAIL). Output is a composite ``@card``; the command prints a per-stage summary +
+    the headline VERDICT and appends a ``command="pipeline"`` learnings row.
+    Workspace-write tier that escalates to EXPENSIVE at the bounded optimize stage.
+
+``loom deploy (--validate RUN | --solution RUN) [--apply]``
+    Promote a validated solution by running the :class:`flows.deploy.DeployFlow`
+    through the MLOps interface. The cross-verb exit gate asserts the upstream
+    ``loom validate`` VERDICT==PASS before deploying (a sub-threshold validate
+    BLOCKS). The real external action is OFF by default (``--apply``): the default is
+    a deployment PLAN + a staged registry manifest, no external mutation. Output is a
+    run + an ``@card``; the command prints the plan + the GATE decision + the VERDICT
+    and appends a ``command="deploy"`` learnings row. Irreversible/external tier --
+    always gated; never model-auto-invoked.
+
+``loom ops [--flow NAME | --experiment ID | --dataset PATHSPEC --reference PATHSPEC]``
+    Monitor run health + the leaderboard for a flow/experiment, plus a simple data
+    DRIFT check (a data object vs. a reference), by running the read-only
+    :class:`flows.ops.OpsFlow` through the MLOps interface. Output is a run + an
+    ``@card``; the command prints a health/drift summary + the card and appends a
+    ``command="ops"`` learnings row. Read-only tier -- never prompts.
+
+``loom collab (--run PATHSPEC | --experiment ID) [--send]``
+    Assemble a sanitized, shareable bundle (report/model-card + lineage manifest) of
+    a run by running the :class:`flows.collab.CollabFlow` through the MLOps
+    interface. The off-box SEND is OFF by default (``--send``): the default builds
+    only -- no data leaves the box; a send routes to an env/config-driven sink
+    (``LOOM_COLLAB_WEBHOOK`` / ``LOOM_COLLAB_OUTBOX``), never a hardcoded target.
+    Output is a run + an ``@card``; the command prints the bundle summary + the
+    would-send target and appends a ``command="collab"`` learnings row. Build =
+    workspace-write; send = irreversible/external (gated; never model-auto-invoked).
+
 ``loom proxy serve [--host 127.0.0.1] [--port 8088]``
     Launch the **Loom gateway** (see :mod:`loom.proxy.server`): an
     Anthropic-passthrough server that authenticates callers by a Loom-issued
@@ -406,6 +451,255 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
     viz_parser.set_defaults(func=_cmd_viz)
+
+    features_parser = subparsers.add_parser(
+        "features",
+        help="Build engineered features into a NEW data object -> a run + @card.",
+        description=(
+            "Run the feature-engineering flow against a Metaflow data object: "
+            "domain-neutral transforms (numeric scaling/interactions, categorical "
+            "encoding, datetime parts, simple aggregations) built into a brand-new "
+            "Metaflow data object whose pathspec (FeaturesFlow/<id>) every "
+            "downstream verb consumes via --dataset. Composes with `loom eda` via "
+            "--from: an upstream EDA run's leakage-flagged columns are DROPPED "
+            "before building. The work executes as a Metaflow run through Loom's "
+            "MLOps interface and produces an @card (feature list, before/after "
+            "schema, null/variance stats); Loom reads the data only via the Client "
+            "API and never touches the datastore. Workspace-write tier (light/auto, "
+            "network off): it reads the source read-only and writes only into its "
+            "own workspace."
+        ),
+    )
+    features_parser.add_argument(
+        "--dataset",
+        required=True,
+        metavar="PATHSPEC",
+        help=(
+            "Metaflow pathspec of the source data object (e.g. IngestDataset/123) "
+            "to build features from."
+        ),
+    )
+    features_parser.add_argument(
+        "--target",
+        default=None,
+        metavar="COL",
+        help="Optional target/label column to preserve untouched (inferred when omitted).",
+    )
+    features_parser.add_argument(
+        "--from",
+        dest="from_eda",
+        default=None,
+        metavar="EDA-RUN",
+        help=(
+            "Optional upstream `loom eda` run pathspec (e.g. EdaFlow/12); its "
+            "leakage-flagged columns are dropped before building (the eda->features "
+            "composition edge)."
+        ),
+    )
+    features_parser.add_argument(
+        "--recipe",
+        default=None,
+        metavar="NAME",
+        help="Optional transform recipe: minimal | full (default full).",
+    )
+    features_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    features_parser.set_defaults(func=_cmd_features)
+
+    pipeline_parser = subparsers.add_parser(
+        "pipeline",
+        help="Run the end-to-end lifecycle (profile->features->optimize->validate) -> run + @card.",
+        description=(
+            "Run the end-to-end lifecycle flow against a Metaflow data object: "
+            "profile -> features -> a bounded candidate/optimize step -> validate, "
+            "chained into ONE gated Metaflow run. Each stage asserts the prior "
+            "stage's VERDICT before running (a profile that flags leakage blocks/"
+            "handles features; a sub-threshold validate marks the run FAIL). The "
+            "optimize stage is the bounded EXPENSIVE step (held to a declared "
+            "budget). The work executes as a Metaflow run through Loom's MLOps "
+            "interface and produces a composite @card; Loom reads the data only via "
+            "the Client API. Workspace-write tier that escalates to EXPENSIVE at "
+            "the train/optimize stage."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--dataset",
+        required=True,
+        metavar="PATHSPEC",
+        help=(
+            "Metaflow pathspec of the source data object (e.g. IngestDataset/123) "
+            "to run the lifecycle against."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--goal",
+        required=True,
+        metavar="STR",
+        help="Natural-language description of what the solution should achieve.",
+    )
+    pipeline_parser.add_argument(
+        "--target",
+        default=None,
+        metavar="COL",
+        help="Optional target/label column (inferred from the data object's schema when omitted).",
+    )
+    pipeline_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    pipeline_parser.set_defaults(func=_cmd_pipeline)
+
+    deploy_parser = subparsers.add_parser(
+        "deploy",
+        help="Gate on a validate VERDICT==PASS and produce a deploy PLAN -> run + @card.",
+        description=(
+            "Run the gated deployment flow to promote a validated solution. The "
+            "centerpiece is the cross-verb exit gate: deploy asserts the upstream "
+            "`loom validate` VERDICT==PASS (and an optional holdout floor) before "
+            "it will deploy -- a sub-threshold / REVIEW / FAIL / leaky validation "
+            "BLOCKS the deploy. The real external action is OFF by default: the "
+            "default run produces a deployment PLAN + a staged registry manifest "
+            "(model ref + lineage + the validate metric) with NO external "
+            "mutation. Only --apply performs the real, env/config-driven external "
+            "action, and only when the gate ALLOWED. The work executes as a "
+            "Metaflow run through Loom's MLOps interface and produces an @card "
+            "(what would deploy, the GATE decision, lineage). Irreversible/external "
+            "tier -- always gated; never model-auto-invoked. Give exactly one of "
+            "--validate or --solution."
+        ),
+    )
+    deploy_group = deploy_parser.add_mutually_exclusive_group(required=True)
+    deploy_group.add_argument(
+        "--validate",
+        dest="validate_run",
+        default=None,
+        metavar="RUN",
+        help="Pathspec of the upstream validate run whose VERDICT gates deploy (e.g. ValidateFlow/12).",
+    )
+    deploy_group.add_argument(
+        "--solution",
+        dest="solution_run",
+        default=None,
+        metavar="RUN",
+        help="Pathspec of a solution run to promote (read for a validate report).",
+    )
+    deploy_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Perform the real external deploy (OFF by default; the gate must ALLOW "
+            "and the upstream validate VERDICT must be PASS)."
+        ),
+    )
+    deploy_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    deploy_parser.set_defaults(func=_cmd_deploy)
+
+    ops_parser = subparsers.add_parser(
+        "ops",
+        help="Monitor run health, the leaderboard, and data drift (read-only) -> run + @card.",
+        description=(
+            "Run the read-only monitoring flow: recent run health + success/"
+            "failure counts for a flow or experiment, its leaderboard, and a "
+            "simple data-object DRIFT check (compare a data object's schema / "
+            "summary stats to a reference data object). The work executes as a "
+            "Metaflow run through Loom's MLOps interface and produces an @card "
+            "(run health, leaderboard, drift table); Loom reads everything via the "
+            "Client API and never touches the datastore. Read-only tier -- trains "
+            "nothing, writes nothing back, never prompts. Give a --flow, an "
+            "--experiment, or a --dataset + --reference drift pair."
+        ),
+    )
+    ops_parser.add_argument(
+        "--flow",
+        dest="flow_name",
+        default=None,
+        metavar="NAME",
+        help="Flow name whose recent run health to read (e.g. ValidateFlow).",
+    )
+    ops_parser.add_argument(
+        "--experiment",
+        default=None,
+        metavar="ID",
+        help="Experiment id whose runs + leaderboard to read (the loom_experiment tag).",
+    )
+    ops_parser.add_argument(
+        "--dataset",
+        default=None,
+        metavar="PATHSPEC",
+        help="Data object pathspec to drift-check against --reference.",
+    )
+    ops_parser.add_argument(
+        "--reference",
+        default=None,
+        metavar="PATHSPEC",
+        help="Reference data object pathspec for the drift comparison (with --dataset).",
+    )
+    ops_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    ops_parser.set_defaults(func=_cmd_ops)
+
+    collab_parser = subparsers.add_parser(
+        "collab",
+        help="Assemble a sanitized shareable bundle of a run -> run + @card (SEND off by default).",
+        description=(
+            "Run the collaboration flow to assemble a sanitized, shareable bundle "
+            "of a run: its report/model-card + a lineage manifest (pathspecs + "
+            "fingerprints + commit) as a Metaflow run + @card. Everything is "
+            "sanitized (no secrets, no raw rows). The off-box SEND is OFF by "
+            "default: the default run builds the bundle only -- no data leaves the "
+            "box. Only --send pushes to the env/config-driven sink "
+            "(LOOM_COLLAB_WEBHOOK or LOOM_COLLAB_OUTBOX -- never a hardcoded "
+            "target), and the send is the irreversible/external action. The work "
+            "executes as a Metaflow run through Loom's MLOps interface; Loom reads "
+            "the run only via the Client API. Build = workspace-write; send = "
+            "irreversible/external (always gated; never model-auto-invoked). Give "
+            "exactly one of --run or --experiment."
+        ),
+    )
+    collab_group = collab_parser.add_mutually_exclusive_group(required=True)
+    collab_group.add_argument(
+        "--run",
+        dest="run_pathspec",
+        default=None,
+        metavar="PATHSPEC",
+        help="Pathspec of the run whose report/card to bundle (e.g. ValidateFlow/12).",
+    )
+    collab_group.add_argument(
+        "--experiment",
+        default=None,
+        metavar="ID",
+        help="Experiment id to bundle (alternative to --run).",
+    )
+    collab_parser.add_argument(
+        "--send",
+        action="store_true",
+        help=(
+            "Send the bundle off-box to the env/config-driven sink (OFF by "
+            "default; build-only otherwise)."
+        ),
+    )
+    collab_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    collab_parser.set_defaults(func=_cmd_collab)
 
     datasets_parser = subparsers.add_parser(
         "datasets",
@@ -1504,6 +1798,943 @@ def _record_viz_learning(
             tenant=config.tenant,
             owned_by=config.owned_by,
             reflection=None,
+        )
+        Learnings(config).record(record)
+    except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
+        pass
+
+
+def _print_features_summary(dataset_ref: str, result: object) -> None:
+    """Print a compact feature-build summary + the ``@card`` reference.
+
+    Args:
+        dataset_ref: The source data object's pathspec.
+        result: The :class:`~loom.types.RunResult` returned by ``run_flow``.
+    """
+    summary = getattr(result, "summary", None) or {}
+    pathspec = getattr(result, "pathspec", None)
+    print("Loom feature build complete.")
+    print(f"  source      : {dataset_ref}")
+    # The produced run's pathspec is itself the NEW dataset_ref downstream verbs use.
+    print(f"  new dataset : {pathspec or 'n/a'}")
+    print(f"  card        : {getattr(result, 'card_path', None) or 'n/a'}")
+
+    if summary:
+        before = summary.get("n_features_before", "?")
+        after = summary.get("n_features_after", "?")
+        added = summary.get("n_added", "?")
+        target = summary.get("target")
+        print(f"  target      : {target if target is not None else 'none'}")
+        print(f"  recipe      : {summary.get('recipe')}")
+        print(f"  features    : {before} -> {after} (+{added})")
+        dropped = summary.get("dropped_columns") or []
+        if dropped:
+            shown = ", ".join(str(c) for c in dropped[:10])
+            print(f"  LEAKAGE     : dropped {len(dropped)} flagged column(s): {shown}")
+        else:
+            print("  leakage     : none dropped (none flagged upstream)")
+        print(f"  fingerprint : {summary.get('fingerprint') or 'n/a'}")
+        print(f"  VERDICT     : {summary.get('verdict', '?')}")
+
+
+def _cmd_features(args: argparse.Namespace) -> int:
+    """Handle ``loom features``: build engineered features via the MLOps interface.
+
+    Resolves the configured MLOps execution provider, runs the
+    :class:`flows.features.FeaturesFlow` through its ``run_flow`` seam (never
+    importing a concrete backend or touching the datastore), prints a feature-build
+    summary + the ``@card`` reference, and appends a ``command="features"`` learnings
+    row. Features is the workspace-write tier: it reads the source read-only and
+    writes a NEW data object only into this run's own Metaflow workspace (the
+    produced run's pathspec is the ``dataset_ref`` for downstream verbs). It composes
+    with ``loom eda`` via ``--from`` (the EDA run's leakage-flagged columns are
+    dropped before building).
+
+    Args:
+        args: Parsed arguments for the ``features`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on failure).
+    """
+    from flows import FEATURES_FLOW_PATH
+
+    config = _build_config(args)
+    dataset_ref = (args.dataset or "").strip()
+    target = (getattr(args, "target", None) or "").strip() or None
+    eda_run = (getattr(args, "from_eda", None) or "").strip() or None
+    recipe = (getattr(args, "recipe", None) or "").strip() or None
+
+    if not dataset_ref:
+        print(
+            "error: --dataset is required (a `loom ingest` / `loom features` "
+            "pathspec, e.g. IngestDataset/123).",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        execution = get_execution(config.mlops_provider)(config)
+    except Exception as exc:  # noqa: BLE001 - actionable hint
+        print(
+            f"error: could not load the MLOps provider "
+            f"{config.mlops_provider!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    tags = [
+        "loom_command:features",
+        f"loom_dataset_ref:{dataset_ref}",
+        f"loom_tenant:{config.tenant}",
+        f"loom_owned_by:{config.owned_by}",
+    ]
+
+    print(f"Building features from data object {dataset_ref!r} (workspace-write)...")
+    try:
+        result = execution.run_flow(
+            FEATURES_FLOW_PATH,
+            {
+                "dataset_ref": dataset_ref,
+                "target": target,
+                "eda_run": eda_run,
+                "recipe": recipe,
+            },
+            tags=tags,
+        )
+    except NotImplementedError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+        print(
+            f"error: failed to run the features flow: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not getattr(result, "successful", False):
+        print(
+            f"error: the features run did not complete successfully: "
+            f"{getattr(result, 'error', None) or 'unknown error'}",
+            file=sys.stderr,
+        )
+
+    _print_features_summary(dataset_ref, result)
+    _record_features_learning(config, dataset_ref, target, eda_run, recipe, result)
+
+    return 0 if getattr(result, "successful", False) else 1
+
+
+def _record_features_learning(
+    config: LoomConfig,
+    dataset_ref: str,
+    target: Optional[str],
+    eda_run: Optional[str],
+    recipe: Optional[str],
+    result: object,
+) -> None:
+    """Append one ``command="features"`` learnings row for this feature build.
+
+    Best-effort and sanitized: references + small scalars only (the source ref, the
+    new data object's pathspec, feature counts, the fingerprint, the leakage-drop
+    flag) -- never raw rows or secrets. A failure to record never fails the command.
+    """
+    try:
+        from loom.learnings import Learnings, LearningRecord, Outcome, TaskSpec
+
+        summary = getattr(result, "summary", None) or {}
+        successful = bool(getattr(result, "successful", False))
+        dropped = summary.get("dropped_columns") or []
+
+        artifacts = [
+            ref
+            for ref in (
+                getattr(result, "pathspec", None),
+                getattr(result, "card_path", None),
+            )
+            if ref
+        ]
+
+        record = LearningRecord(
+            command="features",
+            task=TaskSpec(
+                data_ref=dataset_ref,
+                goal="build engineered features into a new data object",
+                metric="n/a (feature engineering)",
+                experiment_id=dataset_ref,
+            ),
+            inputs={
+                "target": target,
+                "from_eda": eda_run,
+                "recipe": recipe,
+                "mlops_provider": config.mlops_provider,
+                "n_features_before": summary.get("n_features_before"),
+                "n_features_after": summary.get("n_features_after"),
+                "n_added": summary.get("n_added"),
+                "refused_leakage": bool(summary.get("refused_leakage")),
+                "dropped_columns": list(dropped),
+                "fingerprint": summary.get("fingerprint"),
+            },
+            outcome=Outcome(
+                best_metric=None,
+                submission_ok=successful,
+                node_count=0,
+            ),
+            artifacts=artifacts,
+            success=successful,
+            model=None,
+            tenant=config.tenant,
+            owned_by=config.owned_by,
+            reflection=(
+                "leakage columns dropped before building (eda->features gate)"
+                if dropped
+                else None
+            ),
+        )
+        Learnings(config).record(record)
+    except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
+        pass
+
+
+def _print_pipeline_summary(dataset_ref: str, goal: str, result: object) -> None:
+    """Print a compact end-to-end pipeline summary + the ``@card`` reference.
+
+    Args:
+        dataset_ref: The source data object's pathspec.
+        goal: The natural-language goal driving the run.
+        result: The :class:`~loom.types.RunResult` returned by ``run_flow``.
+    """
+    summary = getattr(result, "summary", None) or {}
+    print("Loom pipeline complete.")
+    print(f"  dataset_ref : {dataset_ref}")
+    print(f"  goal        : {goal}")
+    print(f"  run         : {getattr(result, 'pathspec', None) or 'n/a'}")
+    print(f"  card        : {getattr(result, 'card_path', None) or 'n/a'}")
+
+    if summary:
+        print(f"  target      : {summary.get('target')}")
+        print(f"  leakage     : {'handled' if summary.get('leakage') else 'none'}")
+        stages = summary.get("stages") or {}
+        if stages:
+            order = ("profile", "features", "optimize", "validate")
+            shown = [s for s in order if s in stages] or list(stages.keys())
+            line = ", ".join(
+                f"{s}={stages.get(s, {}).get('status', '?')}" for s in shown
+            )
+            print(f"  stages      : {line}")
+        failed = summary.get("failed_stage")
+        if failed:
+            print(f"  failed stage: {failed}")
+        print(f"  VERDICT     : {summary.get('verdict', '?')}")
+
+
+def _cmd_pipeline(args: argparse.Namespace) -> int:
+    """Handle ``loom pipeline``: run the end-to-end lifecycle via the MLOps interface.
+
+    Resolves the configured MLOps execution provider, runs the
+    :class:`flows.pipeline.PipelineFlow` through its ``run_flow`` seam (never
+    importing a concrete backend or touching the datastore), prints a per-stage
+    summary + the headline VERDICT + the ``@card`` reference, and appends a
+    ``command="pipeline"`` learnings row. Pipeline is the workspace-write tier that
+    escalates to EXPENSIVE at its bounded optimize stage; each stage asserts the
+    prior stage's VERDICT (leakage handled before features; a sub-threshold validate
+    marks the run FAIL).
+
+    Args:
+        args: Parsed arguments for the ``pipeline`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on failure).
+    """
+    from flows import PIPELINE_FLOW_PATH
+
+    config = _build_config(args)
+    dataset_ref = (args.dataset or "").strip()
+    goal = (args.goal or "").strip()
+    target = (getattr(args, "target", None) or "").strip() or None
+
+    if not dataset_ref:
+        print(
+            "error: --dataset is required (a `loom ingest` / `loom features` "
+            "pathspec, e.g. IngestDataset/123).",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        execution = get_execution(config.mlops_provider)(config)
+    except Exception as exc:  # noqa: BLE001 - actionable hint
+        print(
+            f"error: could not load the MLOps provider "
+            f"{config.mlops_provider!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    tags = [
+        "loom_command:pipeline",
+        f"loom_dataset_ref:{dataset_ref}",
+        f"loom_tenant:{config.tenant}",
+        f"loom_owned_by:{config.owned_by}",
+    ]
+
+    print(
+        f"Running the end-to-end pipeline on {dataset_ref!r} "
+        "(workspace-write -> EXPENSIVE at optimize)..."
+    )
+    try:
+        result = execution.run_flow(
+            PIPELINE_FLOW_PATH,
+            {"dataset_ref": dataset_ref, "goal": goal, "target": target},
+            tags=tags,
+        )
+    except NotImplementedError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+        print(
+            f"error: failed to run the pipeline flow: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not getattr(result, "successful", False):
+        print(
+            f"error: the pipeline run did not complete successfully: "
+            f"{getattr(result, 'error', None) or 'unknown error'}",
+            file=sys.stderr,
+        )
+
+    _print_pipeline_summary(dataset_ref, goal, result)
+    _record_pipeline_learning(config, dataset_ref, goal, target, result)
+
+    return 0 if getattr(result, "successful", False) else 1
+
+
+def _record_pipeline_learning(
+    config: LoomConfig,
+    dataset_ref: str,
+    goal: str,
+    target: Optional[str],
+    result: object,
+) -> None:
+    """Append one ``command="pipeline"`` learnings row for this lifecycle run.
+
+    Best-effort and sanitized: references + small scalars only (the data-object ref,
+    the headline verdict, the failed stage, the validate holdout metric) -- never raw
+    rows or secrets. A failure to record never fails the command.
+    """
+    try:
+        from loom.learnings import Learnings, LearningRecord, Outcome, TaskSpec
+
+        summary = getattr(result, "summary", None) or {}
+        successful = bool(getattr(result, "successful", False))
+        stages = summary.get("stages") or {}
+        validate_summary = (stages.get("validate") or {}).get("summary") or {}
+        best_metric = validate_summary.get("metric")
+        leakage = bool(summary.get("leakage"))
+
+        artifacts = [
+            ref
+            for ref in (
+                getattr(result, "pathspec", None),
+                getattr(result, "card_path", None),
+            )
+            if ref
+        ]
+
+        record = LearningRecord(
+            command="pipeline",
+            task=TaskSpec(
+                data_ref=dataset_ref,
+                goal=goal or "run the end-to-end lifecycle",
+                metric=str(validate_summary.get("metric_name") or "n/a"),
+                experiment_id=dataset_ref,
+            ),
+            inputs={
+                "target": target,
+                "mlops_provider": config.mlops_provider,
+                "leakage": leakage,
+                "failed_stage": summary.get("failed_stage"),
+                "verdict": summary.get("verdict"),
+                "optimize_budget": summary.get("optimize_budget"),
+            },
+            outcome=Outcome(
+                best_metric=float(best_metric)
+                if isinstance(best_metric, (int, float))
+                else None,
+                submission_ok=successful and summary.get("verdict") == "PASS",
+                node_count=len(stages),
+            ),
+            artifacts=artifacts,
+            success=successful,
+            model=None,
+            tenant=config.tenant,
+            owned_by=config.owned_by,
+            reflection=(
+                f"pipeline failed at stage {summary.get('failed_stage')!r}"
+                if summary.get("failed_stage")
+                else None
+            ),
+        )
+        Learnings(config).record(record)
+    except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
+        pass
+
+
+def _print_deploy_summary(source_run: str, result: object) -> None:
+    """Print a compact deployment-plan summary + the GATE decision + the ``@card``.
+
+    Args:
+        source_run: The upstream validate/solution run pathspec being promoted.
+        result: The :class:`~loom.types.RunResult` returned by ``run_flow``.
+    """
+    summary = getattr(result, "summary", None) or {}
+    print("Loom deploy complete.")
+    print(f"  source run  : {source_run}")
+    print(f"  run         : {getattr(result, 'pathspec', None) or 'n/a'}")
+    print(f"  card        : {getattr(result, 'card_path', None) or 'n/a'}")
+
+    if summary:
+        gate = summary.get("gate") or {}
+        decision = gate.get("decision", "?")
+        print(f"  target      : {summary.get('target')}")
+        print(f"  apply       : {summary.get('apply')} "
+              f"(real external action {'ON' if summary.get('apply') else 'OFF — staged plan only'})")
+        print(f"  upstream    : validate VERDICT={gate.get('verdict')}")
+        print(f"  GATE        : {decision}")
+        reasons = gate.get("reasons") or []
+        if reasons:
+            print("  blocked by  :")
+            for reason in reasons[:10]:
+                print(f"    - {reason}")
+        applied = summary.get("applied_detail")
+        if applied and applied.get("entry"):
+            print(f"  registered  : {applied.get('entry')}")
+        print(f"  VERDICT     : {summary.get('verdict', '?')}")
+
+
+def _cmd_deploy(args: argparse.Namespace) -> int:
+    """Handle ``loom deploy``: gate on the validate VERDICT and plan a deploy.
+
+    Resolves the configured MLOps execution provider, runs the
+    :class:`flows.deploy.DeployFlow` through its ``run_flow`` seam (never importing a
+    concrete backend or touching the datastore), prints the deployment plan + the
+    GATE decision + the headline VERDICT + the ``@card`` reference, and appends a
+    ``command="deploy"`` learnings row. Deploy is the irreversible/external tier: it
+    asserts the upstream ``loom validate`` VERDICT==PASS (a sub-threshold validate
+    BLOCKS the deploy -- the cross-verb exit gate), and the real external action is
+    behind ``--apply`` (OFF by default; default is a PLAN + staged register, no
+    external mutation).
+
+    Args:
+        args: Parsed arguments for the ``deploy`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on failure). A clean run whose gate
+        BLOCKED still returns the run's success code -- the BLOCK is the correct,
+        machine-checkable outcome, surfaced in the summary's GATE/VERDICT.
+    """
+    from flows import DEPLOY_FLOW_PATH
+
+    config = _build_config(args)
+    validate_run = (getattr(args, "validate_run", None) or "").strip() or None
+    solution_run = (getattr(args, "solution_run", None) or "").strip() or None
+    apply = bool(getattr(args, "apply", False))
+
+    source_run = validate_run or solution_run or ""
+
+    try:
+        execution = get_execution(config.mlops_provider)(config)
+    except Exception as exc:  # noqa: BLE001 - actionable hint
+        print(
+            f"error: could not load the MLOps provider "
+            f"{config.mlops_provider!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    tags = [
+        "loom_command:deploy",
+        f"loom_tenant:{config.tenant}",
+        f"loom_owned_by:{config.owned_by}",
+    ]
+
+    print(
+        f"Planning deploy from {source_run!r} "
+        f"(irreversible/external; apply={'ON' if apply else 'OFF — staged plan only'})..."
+    )
+    try:
+        result = execution.run_flow(
+            DEPLOY_FLOW_PATH,
+            {
+                "validate_run": validate_run,
+                "solution_run": solution_run,
+                "apply": apply,
+            },
+            tags=tags,
+        )
+    except NotImplementedError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+        print(
+            f"error: failed to run the deploy flow: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not getattr(result, "successful", False):
+        print(
+            f"error: the deploy run did not complete successfully: "
+            f"{getattr(result, 'error', None) or 'unknown error'}",
+            file=sys.stderr,
+        )
+
+    _print_deploy_summary(source_run, result)
+    _record_deploy_learning(config, source_run, apply, result)
+
+    return 0 if getattr(result, "successful", False) else 1
+
+
+def _record_deploy_learning(
+    config: LoomConfig,
+    source_run: str,
+    apply: bool,
+    result: object,
+) -> None:
+    """Append one ``command="deploy"`` learnings row for this deploy run.
+
+    Best-effort and sanitized: references + small scalars only (the source run, the
+    gate decision, the manifest status, the validate metric the gate trusted) --
+    never raw rows or secrets. A failure to record never fails the command.
+    """
+    try:
+        from loom.learnings import Learnings, LearningRecord, Outcome, TaskSpec
+
+        summary = getattr(result, "summary", None) or {}
+        successful = bool(getattr(result, "successful", False))
+        gate = summary.get("gate") or {}
+        allowed = bool(gate.get("allow"))
+        manifest = summary.get("manifest") or {}
+        metric_block = manifest.get("validate_metric") or {}
+        holdout = metric_block.get("holdout")
+
+        artifacts = [
+            ref
+            for ref in (
+                getattr(result, "pathspec", None),
+                getattr(result, "card_path", None),
+            )
+            if ref
+        ]
+
+        record = LearningRecord(
+            command="deploy",
+            task=TaskSpec(
+                data_ref=None,
+                goal="promote a validated solution (gated on validate VERDICT==PASS)",
+                metric=str(metric_block.get("metric") or "n/a"),
+                experiment_id=source_run or "deploy",
+            ),
+            inputs={
+                "source_run": source_run,
+                "apply": apply,
+                "mlops_provider": config.mlops_provider,
+                "gate_decision": gate.get("decision"),
+                "gate_allow": allowed,
+                "upstream_verdict": gate.get("verdict"),
+                "manifest_status": summary.get("status"),
+                "target": summary.get("target"),
+            },
+            outcome=Outcome(
+                best_metric=float(holdout)
+                if isinstance(holdout, (int, float))
+                else None,
+                # A deploy "succeeds" as a rollout only when the gate ALLOWED;
+                # a clean run that BLOCKED is a correct refusal, not a submission.
+                submission_ok=successful and allowed,
+                node_count=0,
+            ),
+            artifacts=artifacts,
+            success=successful,
+            model=None,
+            tenant=config.tenant,
+            owned_by=config.owned_by,
+            reflection=(
+                "deploy BLOCKED by the exit gate: "
+                + "; ".join(gate.get("reasons") or [])
+                if not allowed
+                else None
+            ),
+        )
+        Learnings(config).record(record)
+    except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
+        pass
+
+
+def _print_ops_summary(result: object) -> None:
+    """Print a compact ops/monitoring summary + the ``@card`` reference.
+
+    Args:
+        result: The :class:`~loom.types.RunResult` returned by ``run_flow``.
+    """
+    summary = getattr(result, "summary", None) or {}
+    print("Loom ops complete.")
+    print(f"  run         : {getattr(result, 'pathspec', None) or 'n/a'}")
+    print(f"  card        : {getattr(result, 'card_path', None) or 'n/a'}")
+
+    if summary:
+        health = summary.get("health") or {}
+        scope = health.get("flow_name") or health.get("experiment_id") or "(none)"
+        print(f"  scope       : {scope}")
+        print(
+            f"  runs        : {health.get('n_runs')} "
+            f"({health.get('n_successful')} ok, {health.get('n_failed')} failed)"
+        )
+        rate = health.get("success_rate")
+        print(f"  success rate: {rate if rate is not None else 'n/a'}")
+        print(f"  run health  : {health.get('status')}")
+        drift = summary.get("drift")
+        if drift is not None:
+            flags = drift.get("drift_flags") or []
+            print(
+                f"  drift       : {drift.get('status')} "
+                f"({len(flags)} column(s) flagged; "
+                f"+{len(drift.get('added') or [])} -{len(drift.get('removed') or [])} cols)"
+            )
+        print(f"  VERDICT     : {summary.get('status', '?')}")
+
+
+def _cmd_ops(args: argparse.Namespace) -> int:
+    """Handle ``loom ops``: read-only run/drift monitoring via the MLOps interface.
+
+    Resolves the configured MLOps execution provider, runs the read-only
+    :class:`flows.ops.OpsFlow` through its ``run_flow`` seam (never importing a
+    concrete backend or touching the datastore), prints a run-health / leaderboard /
+    drift summary + the ``@card`` reference, and appends a ``command="ops"`` learnings
+    row. Ops is the read-only tier: it trains nothing, writes nothing back, and never
+    prompts.
+
+    Args:
+        args: Parsed arguments for the ``ops`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on failure).
+    """
+    from flows import OPS_FLOW_PATH
+
+    config = _build_config(args)
+    flow_name = (getattr(args, "flow_name", None) or "").strip() or None
+    experiment = (getattr(args, "experiment", None) or "").strip() or None
+    dataset_ref = (getattr(args, "dataset", None) or "").strip() or None
+    reference = (getattr(args, "reference", None) or "").strip() or None
+
+    if not (flow_name or experiment or (dataset_ref and reference)):
+        print(
+            "error: give a monitoring target: --flow NAME, --experiment ID, or a "
+            "--dataset PATHSPEC --reference PATHSPEC drift pair.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        execution = get_execution(config.mlops_provider)(config)
+    except Exception as exc:  # noqa: BLE001 - actionable hint
+        print(
+            f"error: could not load the MLOps provider "
+            f"{config.mlops_provider!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    tags = [
+        "loom_command:ops",
+        f"loom_tenant:{config.tenant}",
+        f"loom_owned_by:{config.owned_by}",
+    ]
+    if dataset_ref:
+        tags.append(f"loom_dataset_ref:{dataset_ref}")
+
+    scope = flow_name or experiment or f"{dataset_ref} vs {reference}"
+    print(f"Monitoring {scope!r} (read-only)...")
+    try:
+        result = execution.run_flow(
+            OPS_FLOW_PATH,
+            {
+                "flow_name": flow_name,
+                "experiment": experiment,
+                "dataset_ref": dataset_ref,
+                "reference": reference,
+            },
+            tags=tags,
+        )
+    except NotImplementedError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+        print(
+            f"error: failed to run the ops flow: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not getattr(result, "successful", False):
+        print(
+            f"error: the ops run did not complete successfully: "
+            f"{getattr(result, 'error', None) or 'unknown error'}",
+            file=sys.stderr,
+        )
+
+    _print_ops_summary(result)
+    _record_ops_learning(config, flow_name, experiment, dataset_ref, reference, result)
+
+    return 0 if getattr(result, "successful", False) else 1
+
+
+def _record_ops_learning(
+    config: LoomConfig,
+    flow_name: Optional[str],
+    experiment: Optional[str],
+    dataset_ref: Optional[str],
+    reference: Optional[str],
+    result: object,
+) -> None:
+    """Append one ``command="ops"`` learnings row for this monitoring run.
+
+    Best-effort and sanitized: references + small scalars only (the scope, run
+    counts, drift status) -- never raw rows or secrets. A failure to record never
+    fails the command.
+    """
+    try:
+        from loom.learnings import Learnings, LearningRecord, Outcome, TaskSpec
+
+        summary = getattr(result, "summary", None) or {}
+        successful = bool(getattr(result, "successful", False))
+        health = summary.get("health") or {}
+        drift = summary.get("drift")
+        drift_status = drift.get("status") if isinstance(drift, dict) else None
+
+        artifacts = [
+            ref
+            for ref in (
+                getattr(result, "pathspec", None),
+                getattr(result, "card_path", None),
+            )
+            if ref
+        ]
+
+        record = LearningRecord(
+            command="ops",
+            task=TaskSpec(
+                data_ref=dataset_ref,
+                goal="monitor run health / leaderboard / data drift (read-only)",
+                metric="n/a (read-only ops)",
+                experiment_id=experiment or flow_name or dataset_ref or "ops",
+            ),
+            inputs={
+                "flow_name": flow_name,
+                "experiment": experiment,
+                "dataset_ref": dataset_ref,
+                "reference": reference,
+                "mlops_provider": config.mlops_provider,
+                "n_runs": health.get("n_runs"),
+                "success_rate": health.get("success_rate"),
+                "run_health": health.get("status"),
+                "drift_status": drift_status,
+            },
+            outcome=Outcome(
+                best_metric=None,
+                submission_ok=successful,
+                node_count=int(health.get("n_runs") or 0),
+            ),
+            artifacts=artifacts,
+            success=successful,
+            model=None,
+            tenant=config.tenant,
+            owned_by=config.owned_by,
+            reflection=(
+                f"ops flagged {drift_status or summary.get('status')}: review"
+                if summary.get("status") == "ATTENTION"
+                else None
+            ),
+        )
+        Learnings(config).record(record)
+    except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
+        pass
+
+
+def _print_collab_summary(source_ref: str, result: object) -> None:
+    """Print a compact collaboration-bundle summary + the ``@card`` reference.
+
+    Args:
+        source_ref: The run/experiment pathspec the bundle is built from.
+        result: The :class:`~loom.types.RunResult` returned by ``run_flow``.
+    """
+    summary = getattr(result, "summary", None) or {}
+    print("Loom collab complete.")
+    print(f"  source      : {source_ref}")
+    print(f"  run         : {getattr(result, 'pathspec', None) or 'n/a'}")
+    print(f"  card        : {getattr(result, 'card_path', None) or 'n/a'}")
+
+    if summary:
+        send = bool(summary.get("send"))
+        print(f"  send        : {send} "
+              f"(off-box send {'ON' if send else 'OFF — build only'})")
+        print(f"  would-send  : {summary.get('sink') or 'none configured'}")
+        print(f"  sent        : {summary.get('sent')}")
+        lineage = summary.get("lineage") or {}
+        if lineage.get("fingerprint"):
+            print(f"  fingerprint : {lineage.get('fingerprint')}")
+        sent_detail = summary.get("sent_detail")
+        if sent_detail and not sent_detail.get("sent") and sent_detail.get("error"):
+            print(f"  send error  : {sent_detail.get('error')}")
+        print(f"  VERDICT     : {summary.get('verdict', '?')}")
+
+
+def _cmd_collab(args: argparse.Namespace) -> int:
+    """Handle ``loom collab``: assemble a shareable bundle via the MLOps interface.
+
+    Resolves the configured MLOps execution provider, runs the
+    :class:`flows.collab.CollabFlow` through its ``run_flow`` seam (never importing a
+    concrete backend or touching the datastore), prints the bundle summary + the
+    would-send target + the ``@card`` reference, and appends a ``command="collab"``
+    learnings row. Collab is workspace-write to BUILD the (sanitized) bundle; the
+    off-box SEND is behind ``--send`` (OFF by default; the default builds only -- no
+    data leaves the box), is gated, and routes to an env/config-driven sink
+    (``LOOM_COLLAB_WEBHOOK`` / ``LOOM_COLLAB_OUTBOX``) -- never a hardcoded target.
+
+    Args:
+        args: Parsed arguments for the ``collab`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on failure).
+    """
+    from flows import COLLAB_FLOW_PATH
+
+    config = _build_config(args)
+    run_pathspec = (getattr(args, "run_pathspec", None) or "").strip() or None
+    experiment = (getattr(args, "experiment", None) or "").strip() or None
+    send = bool(getattr(args, "send", False))
+
+    source_ref = run_pathspec or experiment or ""
+
+    try:
+        execution = get_execution(config.mlops_provider)(config)
+    except Exception as exc:  # noqa: BLE001 - actionable hint
+        print(
+            f"error: could not load the MLOps provider "
+            f"{config.mlops_provider!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    tags = [
+        "loom_command:collab",
+        f"loom_tenant:{config.tenant}",
+        f"loom_owned_by:{config.owned_by}",
+    ]
+    if experiment:
+        tags.append(f"loom_experiment:{experiment}")
+
+    print(
+        f"Assembling a shareable bundle of {source_ref!r} "
+        f"(send={'ON' if send else 'OFF — build only'})..."
+    )
+    try:
+        result = execution.run_flow(
+            COLLAB_FLOW_PATH,
+            {
+                "run_pathspec": run_pathspec,
+                "experiment": experiment,
+                "send": send,
+            },
+            tags=tags,
+        )
+    except NotImplementedError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+        print(
+            f"error: failed to run the collab flow: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not getattr(result, "successful", False):
+        print(
+            f"error: the collab run did not complete successfully: "
+            f"{getattr(result, 'error', None) or 'unknown error'}",
+            file=sys.stderr,
+        )
+
+    _print_collab_summary(source_ref, result)
+    _record_collab_learning(config, run_pathspec, experiment, send, result)
+
+    return 0 if getattr(result, "successful", False) else 1
+
+
+def _record_collab_learning(
+    config: LoomConfig,
+    run_pathspec: Optional[str],
+    experiment: Optional[str],
+    send: bool,
+    result: object,
+) -> None:
+    """Append one ``command="collab"`` learnings row for this bundle run.
+
+    Best-effort and sanitized: references + small scalars only (the source ref, the
+    send intent + outcome, the would-send sink, the bundle fingerprint) -- never raw
+    rows or secrets. A failure to record never fails the command.
+    """
+    try:
+        from loom.learnings import Learnings, LearningRecord, Outcome, TaskSpec
+
+        summary = getattr(result, "summary", None) or {}
+        successful = bool(getattr(result, "successful", False))
+        source_ref = run_pathspec or experiment
+        lineage = summary.get("lineage") or {}
+
+        artifacts = [
+            ref
+            for ref in (
+                getattr(result, "pathspec", None),
+                getattr(result, "card_path", None),
+            )
+            if ref
+        ]
+
+        record = LearningRecord(
+            command="collab",
+            task=TaskSpec(
+                data_ref=None,
+                goal="assemble a sanitized shareable bundle of a run",
+                metric="n/a (collaboration bundle)",
+                experiment_id=source_ref or "collab",
+            ),
+            inputs={
+                "run_pathspec": run_pathspec,
+                "experiment": experiment,
+                "send": send,
+                "mlops_provider": config.mlops_provider,
+                "sink": summary.get("sink"),
+                "sent": bool(summary.get("sent")),
+                "fingerprint": lineage.get("fingerprint"),
+            },
+            outcome=Outcome(
+                best_metric=None,
+                submission_ok=successful,
+                node_count=0,
+            ),
+            artifacts=artifacts,
+            success=successful,
+            model=None,
+            tenant=config.tenant,
+            owned_by=config.owned_by,
+            reflection=(
+                "bundle sent off-box to the configured sink"
+                if summary.get("sent")
+                else None
+            ),
         )
         Learnings(config).record(record)
     except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal

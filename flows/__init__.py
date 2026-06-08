@@ -67,6 +67,39 @@ REPORT_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "report.py")
 #: results as card images.
 VIZ_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "viz.py")
 
+#: Absolute path to the feature-engineering flow file. ``loom features`` runs this
+#: through the MLOps interface's ``run_flow`` seam to build engineered features and
+#: WRITE them as a NEW Metaflow data object (a ``FeaturesFlow/<id>`` pathspec the
+#: downstream verbs consume via ``--dataset``). Workspace-write tier.
+FEATURES_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "features.py")
+
+#: Absolute path to the end-to-end lifecycle flow file. ``loom pipeline`` runs this
+#: through the MLOps interface's ``run_flow`` seam to chain profile -> features ->
+#: optimize -> validate into one gated run (each stage asserts the prior stage's
+#: VERDICT; the optimize stage is the bounded EXPENSIVE step). Workspace-write tier.
+PIPELINE_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "pipeline.py")
+
+#: Absolute path to the gated deployment flow file. ``loom deploy`` runs this through
+#: the MLOps interface's ``run_flow`` seam to promote a validated solution. The
+#: centerpiece is the cross-verb exit gate: it asserts the upstream ``ValidateFlow``
+#: VERDICT==PASS before deploying, and the real external apply is OFF by default
+#: (default = a deployment PLAN + staged register, no external mutation).
+#: Irreversible/external tier.
+DEPLOY_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "deploy.py")
+
+#: Absolute path to the read-only ops/monitoring flow file. ``loom ops`` runs this
+#: through the MLOps interface's ``run_flow`` seam to monitor run health, the
+#: leaderboard, schedule/run health, and a simple data-object drift check -- all via
+#: the Client API. Read-only tier: never prompts.
+OPS_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "ops.py")
+
+#: Absolute path to the collaboration/share-bundle flow file. ``loom collab`` runs
+#: this through the MLOps interface's ``run_flow`` seam to assemble a sanitized
+#: shareable bundle (report/card + lineage manifest) as a run + ``@card``. The
+#: off-box SEND is OFF by default (build-only), gated, to an env/config-driven sink.
+#: Build = workspace-write; send = irreversible/external.
+COLLAB_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "collab.py")
+
 __all__ = [
     "EVAL_CANDIDATE_FLOW_PATH",
     "INGEST_DATASET_FLOW_PATH",
@@ -74,4 +107,9 @@ __all__ = [
     "VALIDATE_FLOW_PATH",
     "REPORT_FLOW_PATH",
     "VIZ_FLOW_PATH",
+    "FEATURES_FLOW_PATH",
+    "PIPELINE_FLOW_PATH",
+    "DEPLOY_FLOW_PATH",
+    "OPS_FLOW_PATH",
+    "COLLAB_FLOW_PATH",
 ]

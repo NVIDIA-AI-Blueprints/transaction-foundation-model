@@ -133,23 +133,69 @@ loom run \
   --steps 10 --mlops metaflow
 ```
 
-`loom datasets`, `loom eda`, `loom validate`, `loom report`, and `loom viz` are
+`loom datasets`, `loom eda`, `loom features`, `loom pipeline`, `loom validate`,
+`loom deploy`, `loom ops`, `loom collab`, `loom report`, and `loom viz` are
 **lifecycle commands** that run *through Loom's MLOps interface*
 (`ExecutionProvider.run_flow`) rather than the candidate-search path — every
-lifecycle command's output is a **Metaflow run + an `@card`**. EDA / report / viz
-are **read-only**, so they never prompt; **validate** is workspace-write (it
-trains/scores a baseline in its own workspace, read-only over the data). Lifecycle
-flows need the `metaflow` MLOps provider (the `local` dev path runs candidate code
-only, not lifecycle flows).
+lifecycle command's output is a **Metaflow run + an `@card`** plus a typed JSON
+summary with a `VERDICT`/status line. Each verb declares an **approval tier**:
 
-After (or instead of) a search run, the **lifecycle verbs** evaluate, report on, and
-visualize what Loom did:
+- **read-only** (never prompts): `eda`, `report`, `viz`, **`ops`**.
+- **workspace-write** (light/auto, network off; reads read-only, writes only its own
+  workspace): `validate`, **`features`** (writes a NEW data object).
+- **workspace-write → escalates to expensive** at its train/optimize stage:
+  **`pipeline`** (the costly optimize stage is held to a declared budget; gate before
+  it).
+- **irreversible / external** (always gated, the real external action **OFF by
+  default**, never model-auto-invoked): **`deploy`** (the real apply is behind
+  `--apply`) and **`collab`** (the off-box send is behind `--send`).
+
+Lifecycle flows need the `metaflow` MLOps provider (the `local` dev path runs
+candidate code only, not lifecycle flows).
+
+After (or instead of) a search run, the **lifecycle verbs** engineer features, run
+the whole pipeline, evaluate, deploy, monitor, report on, share, and visualize what
+Loom did:
 
 ```bash
+# Build engineered features into a NEW data object (workspace-write). Compose with
+# loom-eda via --from: the EDA-flagged leakage columns are DROPPED before building.
+# The new FeaturesFlow/<id> pathspec is a --dataset for every downstream verb.
+loom features --dataset IngestDataset/123 --target target [--from EdaFlow/7] [--recipe minimal|full]
+
+# Run the whole lifecycle as ONE gated run: profile -> features -> a bounded
+# candidate/optimize step -> validate. Each stage asserts the prior stage's VERDICT
+# (leakage blocks features; a sub-threshold validate marks the run FAIL). The
+# optimize stage is the bounded EXPENSIVE step — workspace-write that escalates.
+loom pipeline --dataset IngestDataset/123 --goal "<one sentence>" --target target
+
 # Rigorously validate a baseline/solution (CV + a sealed holdout + calibration +
 # fairness when --sensitive is given + leakage flags) — emits a run + @card with a
 # VERDICT that gates promotion. Workspace-write (own workspace), never prompts.
 loom validate --dataset IngestDataset/123 --target target [--solution EvalCandidate/42] [--sensitive region]
+
+# Promote a validated solution — IRREVERSIBLE/EXTERNAL. Deploy ASSERTS the upstream
+# validate VERDICT==PASS (no leakage, holdout clears the floor) before it will
+# deploy; a sub-threshold/REVIEW/FAIL/leaky validate BLOCKS it (the cross-verb exit
+# gate). --apply is OFF by default: the default produces a deployment PLAN + a staged
+# registry manifest with NO external mutation. The real apply runs ONLY when the gate
+# ALLOWED *and* --apply is passed. The deploy target is env/config-driven.
+loom deploy --validate ValidateFlow/12            # PLAN only (staged register, no mutation)
+loom deploy --validate ValidateFlow/12 --apply    # real external action (gate must ALLOW)
+
+# Monitor runs + data objects (read-only): run health, the leaderboard, and a simple
+# data-object DRIFT check vs a reference. Never prompts.
+loom ops --flow ValidateFlow                                    # run health for a flow
+loom ops --experiment loom-abc123                               # runs + leaderboard
+loom ops --dataset IngestDataset/200 --reference IngestDataset/123   # data drift check
+
+# Assemble a sanitized, shareable bundle of a run (report/card + lineage manifest).
+# --send is OFF by default: the default BUILDS the bundle only (no data leaves the
+# box). The off-box send (--send) pushes to an env/config-driven sink
+# (LOOM_COLLAB_WEBHOOK / LOOM_COLLAB_OUTBOX, never a hardcoded target) and is the
+# irreversible/external action — always gated.
+loom collab --run ValidateFlow/12            # build the bundle only, NO send
+loom collab --run ValidateFlow/12 --send     # push off-box to the env/config sink
 
 # Assemble an experiment's runs + metrics + lineage into a model-card (read-only).
 loom report --experiment loom-abc123          # or: --runs EvalCandidate/1,EvalCandidate/2
@@ -157,6 +203,15 @@ loom report --experiment loom-abc123          # or: --runs EvalCandidate/1,EvalC
 # Plot a data object or a run's results as @card images (read-only).
 loom viz --dataset IngestDataset/123 --kind all     # or: --run EvalCandidate/42
 ```
+
+**Composition + exit gates.** Verbs compose by handing a Metaflow object to the next
+with machine-checkable gates: `loom eda` leakage flags → `loom features` (via
+`--from`, dropped); a `loom features` data object → `loom pipeline`/`loom validate`
+(via `--dataset`); a `loom validate` `VERDICT==PASS` → `loom deploy` (via
+`--validate` — a sub-threshold validate **BLOCKS** the deploy); a run → `loom collab`
+(via `--run`). The two irreversible verbs are **safe by default**: `loom deploy`
+produces a plan unless you pass `--apply` (and the gate must ALLOW), and `loom collab`
+builds only unless you pass `--send`.
 
 ---
 
@@ -446,14 +501,19 @@ loom/
   controller.py   run_loom(task, config) — wires it together
   corpus.py       append-only JSONL of every node (multi-tenant IP boundary)
   proxy/          the Loom gateway — Anthropic passthrough that logs every call (the moat capture)
-  cli.py          the `loom` command (`loom ingest`, `loom datasets`, `loom eda`, `loom validate`, `loom report`, `loom viz`, `loom run`, `loom proxy serve`)
+  cli.py          the `loom` command (`loom ingest`, `loom datasets`, `loom eda`, `loom features`, `loom pipeline`, `loom validate`, `loom deploy`, `loom ops`, `loom collab`, `loom report`, `loom viz`, `loom run`, `loom proxy serve`)
 flows/ingest_dataset.py   the external→Metaflow boundary (dir/CSV → data object)
 flows/eda.py              read-only EDA/profiling flow (lifecycle command → run + @card)
+flows/features.py         feature-engineering flow — WRITES a NEW data object (FeaturesFlow/<id>) the downstream verbs consume (→ run + @card)
+flows/pipeline.py         end-to-end lifecycle flow — profile→features→optimize→validate in one gated run, per-stage VERDICT gates (→ run + @card)
 flows/validate.py         rigorous validation flow — CV + sealed holdout + calibration + fairness + leakage (→ run + @card)
+flows/deploy.py           gated deployment flow — asserts validate VERDICT==PASS, produces a PLAN/manifest; real apply behind --apply, OFF by default (→ run + @card)
+flows/ops.py              read-only ops/monitoring flow — run health + leaderboard + data-object drift (→ run + @card)
+flows/collab.py           collaboration flow — sanitized shareable bundle + lineage manifest; off-box send behind --send, OFF by default (→ run + @card)
 flows/report.py           read-only experiment-report flow — runs + metrics + lineage → model-card (→ run + @card)
 flows/viz.py              read-only visualization flow — standard plots → @card images
 flows/eval_candidate.py   the one static evaluation flow (candidate = data)
-skills/           Claude Code skill-pack (loom-connect, loom-eda, loom-validate, loom-report, loom-viz, loom-optimize)
+skills/           Claude Code skill-pack (loom-connect, loom-eda, loom-features, loom-pipeline, loom-validate, loom-deploy, loom-ops, loom-collab, loom-report, loom-viz, loom-optimize)
 tasks/generic_demo/       the bundled smoke-test task
 ```
 
