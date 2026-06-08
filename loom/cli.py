@@ -1,17 +1,26 @@
 """Command-line interface for Loom.
 
 Exposes the ``loom`` console script (wired in ``pyproject.toml`` as
-``loom = loom.cli:main``). v0.1 ships a single subcommand:
+``loom = loom.cli:main``). Subcommands:
 
-``loom run --data DIR --goal STR --metric STR [--steps N]
+``loom ingest --source PATH [--name NAME]``
+    Run the :class:`flows.ingest_dataset.IngestDataset` flow once (via
+    ``metaflow.Runner``) to turn a local dataset into a **Metaflow data object**
+    and print its **pathspec** (e.g. ``IngestDataset/123``). That pathspec is the
+    ``dataset_ref`` to hand to ``loom run --dataset <pathspec>``. This is the one
+    external->Metaflow boundary; thereafter Loom reads the data only through the
+    Metaflow Client API and never touches the datastore (local or S3/minio).
+
+``loom run [--data DIR] [--dataset PATHSPEC] --goal STR --metric STR [--steps N]
          [--mlops metaflow|local] [--search aide]``
-
-The command builds a :class:`~loom.types.Task` and a
-:class:`~loom.config.LoomConfig` from the parsed arguments (provider/budget
-overrides on top of the env/.env/YAML-derived config), runs the task through
-:func:`loom.controller.run_loom`, and prints the best metric, the artifact
-paths from the returned :class:`~loom.types.SearchResult`, and a short
-leaderboard read from the execution provider's ``runs()``.
+    Build a :class:`~loom.types.Task` and a :class:`~loom.config.LoomConfig` from
+    the parsed arguments (provider/budget overrides on top of the env/.env/YAML
+    config), run the task through :func:`loom.controller.run_loom`, and print the
+    best metric, the artifact paths from the returned
+    :class:`~loom.types.SearchResult`, and a short leaderboard read from the
+    execution provider's ``runs()``. The ``metaflow`` provider consumes
+    ``--dataset`` (a data-object pathspec); the ``local`` dev provider consumes
+    ``--data`` (a local dir).
 
 This module is dependency-light at import time: it imports only the standard
 library and Loom core. The heavy optional dependencies (AIDE, Metaflow, ...)
@@ -61,9 +70,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "--data",
-        required=True,
+        default=None,
         metavar="DIR",
-        help="Path to the task's input data directory (staged into ./input).",
+        help=(
+            "Path to a local input data directory (staged into ./input by the "
+            "'local' provider). Optional when --dataset is given."
+        ),
+    )
+    run_parser.add_argument(
+        "--dataset",
+        default=None,
+        metavar="PATHSPEC",
+        help=(
+            "Metaflow pathspec of an ingested data object (e.g. IngestDataset/123 "
+            "from `loom ingest`). The 'metaflow' provider reads it via the "
+            "Metaflow Client API; Loom never touches the datastore directly."
+        ),
     )
     run_parser.add_argument(
         "--goal",
@@ -134,6 +156,41 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional path to a YAML config file (lowest precedence).",
     )
     run_parser.set_defaults(func=_cmd_run)
+
+    ingest_parser = subparsers.add_parser(
+        "ingest",
+        help="Ingest a local dataset into a Metaflow data object (once).",
+        description=(
+            "Run the IngestDataset flow to turn a local dir/CSV into a Metaflow "
+            "data object and print its pathspec (the --dataset value for "
+            "`loom run`). This is the one external->Metaflow boundary; Loom "
+            "thereafter reads the data only via the Metaflow Client API and never "
+            "touches the datastore (local or S3/minio) directly."
+        ),
+    )
+    ingest_parser.add_argument(
+        "--source",
+        required=True,
+        metavar="PATH",
+        help=(
+            "Local directory (with train.csv[, test.csv]) or a single .csv file "
+            "to ingest once into a Metaflow data object."
+        ),
+    )
+    ingest_parser.add_argument(
+        "--name",
+        default=None,
+        metavar="NAME",
+        help="Optional dataset name (also tagged as loom_dataset:<name>).",
+    )
+    ingest_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    ingest_parser.set_defaults(func=_cmd_ingest)
+
     return parser
 
 
@@ -153,11 +210,13 @@ def _build_config(args: argparse.Namespace) -> LoomConfig:
         read onto it; adapters consume keys/endpoints from the environment.
     """
     overrides: dict[str, object] = {}
-    if args.mlops is not None:
+    # Use getattr so this helper also serves subcommands (e.g. ``ingest``) whose
+    # parser does not define the run-only flags.
+    if getattr(args, "mlops", None) is not None:
         overrides["mlops_provider"] = args.mlops
-    if args.search is not None:
+    if getattr(args, "search", None) is not None:
         overrides["search_provider"] = args.search
-    if args.steps is not None:
+    if getattr(args, "steps", None) is not None:
         overrides["budget"] = {"steps": args.steps}
 
     # Model providers: --model-provider sets both roles; the per-role flags, when
@@ -305,6 +364,94 @@ def _print_result(result: SearchResult, leaderboard: list[dict]) -> None:
             print(f"  {rank:>2}. metric={metric}  node={node_id}{suffix}")
 
 
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    """Handle ``loom ingest``: run IngestDataset and print the data-object pathspec.
+
+    Runs :class:`flows.ingest_dataset.IngestDataset` once via ``metaflow.Runner``
+    (the one external->Metaflow boundary), tagging the run ``loom_dataset:<name>``,
+    and prints the resulting **pathspec** (``IngestDataset/<run_id>``) -- the
+    ``dataset_ref`` to pass to ``loom run --dataset <pathspec>``. Loom never
+    touches the underlying datastore; Metaflow persists the artifacts per the
+    active profile.
+
+    Args:
+        args: Parsed command-line arguments for the ``ingest`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on failure).
+    """
+    source = os.path.abspath(args.source)
+    if not os.path.exists(source):
+        print(f"error: --source path does not exist: {source}", file=sys.stderr)
+        return 2
+
+    config = _build_config(args)
+
+    # Lazy import: Metaflow is an optional dependency, pulled in only when an
+    # operation that needs it (ingest) is actually invoked.
+    try:
+        from metaflow import Runner
+    except Exception as exc:  # noqa: BLE001 - actionable hint, no traceback
+        print(
+            f"error: Metaflow is required for `loom ingest` but could not be "
+            f"imported: {exc}\nInstall it (it ships with Loom's deps) and try "
+            "again.",
+            file=sys.stderr,
+        )
+        return 2
+
+    from flows import INGEST_DATASET_FLOW_PATH
+
+    name = (args.name or "").strip()
+    runner_kwargs: dict[str, object] = {}
+    if config.metaflow_profile:
+        runner_kwargs["profile"] = config.metaflow_profile
+
+    run_kwargs: dict[str, object] = {"source": source}
+    if name:
+        # The flow's name Parameter is id'd ``dataset_name`` (``name`` is reserved
+        # by Metaflow's CLI options).
+        run_kwargs["dataset_name"] = name
+        run_kwargs["tags"] = [f"loom_dataset:{name}"]
+
+    print(f"Ingesting {source!r} into a Metaflow data object...")
+    try:
+        with Runner(
+            INGEST_DATASET_FLOW_PATH,
+            show_output=False,
+            **runner_kwargs,
+        ) as runner:
+            executing = runner.run(**run_kwargs)
+            status = getattr(executing, "status", None)
+            run = executing.run
+    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+        print(
+            f"error: failed to run IngestDataset flow: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # The Runner returns once the subprocess exits; a failed flow still yields an
+    # ExecutingRun, so check status before claiming success (otherwise we would
+    # print a pathspec whose run has no data object).
+    if status is not None and status != "successful":
+        print(
+            f"error: IngestDataset did not complete successfully (status="
+            f"{status!r}). Re-run with the Metaflow logs for details.",
+            file=sys.stderr,
+        )
+        return 1
+
+    pathspec = getattr(run, "pathspec", None) or str(run)
+    print("Ingest complete.")
+    print(f"  dataset_ref : {pathspec}")
+    print("")
+    print("Run a task against it with:")
+    print(f"  loom run --dataset {pathspec} --mlops metaflow --goal '...' --metric '...'")
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     """Handle ``loom run``: build a task + config, run it, print results.
 
@@ -314,12 +461,42 @@ def _cmd_run(args: argparse.Namespace) -> int:
     Returns:
         Process exit code (0 on success, non-zero on failure).
     """
-    data_dir = os.path.abspath(args.data)
-    if not os.path.isdir(data_dir):
-        print(f"error: --data directory does not exist: {data_dir}", file=sys.stderr)
-        return 2
-
     config = _build_config(args)
+
+    # Resolve the two input kinds. ``--dataset`` is a Metaflow data-object
+    # pathspec (read via the Client API); ``--data`` is a local dir (the dev
+    # fallback). A local --data, if given, must exist.
+    dataset_ref = (args.dataset or "").strip() or None
+    data_dir = ""
+    if args.data:
+        data_dir = os.path.abspath(args.data)
+        if not os.path.isdir(data_dir):
+            print(
+                f"error: --data directory does not exist: {data_dir}",
+                file=sys.stderr,
+            )
+            return 2
+
+    # Pre-flight (input): the metaflow provider's input IS a Metaflow data
+    # object, so it needs a --dataset pathspec (a local --data is only a
+    # fallback for the 'local' provider). Guide the user to ingest first.
+    if config.mlops_provider == "metaflow" and not dataset_ref and not data_dir:
+        print(
+            "error: the metaflow provider needs a Metaflow data object. Ingest "
+            "your data first, then pass the printed pathspec:\n"
+            "  loom ingest --source <path>\n"
+            "  loom run --dataset <pathspec> --mlops metaflow ...\n"
+            "(Or use the Metaflow-free dev path: --mlops local --data <dir>.)",
+            file=sys.stderr,
+        )
+        return 2
+    if not dataset_ref and not data_dir:
+        print(
+            "error: no input given. Pass --dataset <pathspec> (a `loom ingest` "
+            "data object) or --data <dir> (a local directory).",
+            file=sys.stderr,
+        )
+        return 2
 
     # Pre-flight (judge): AIDE's feedback step always uses tool calling, so a
     # feedback route that is not judge-capable would crash mid-run. Fail fast.
@@ -358,6 +535,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         eval=args.metric,
         experiment_id=experiment_id,
         tenant=config.tenant,
+        dataset_ref=dataset_ref,
     )
 
     print(

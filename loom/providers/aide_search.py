@@ -73,6 +73,10 @@ class AideSearchProvider(SearchProvider):
                 consumes keys/endpoints from the environment).
         """
         self.config = config
+        #: Host-local dir a Metaflow data object was materialized into for this
+        #: run (so AIDE's data-preview reflects the real dataset); cleaned up at
+        #: the end of :meth:`run`. ``None`` for the local-dir path.
+        self._materialized_dir: Optional[str] = None
 
     # ------------------------------------------------------------------ run --
 
@@ -116,49 +120,54 @@ class AideSearchProvider(SearchProvider):
 
         bud = self._resolve_budget(budget)
 
-        # 1) Build + patch + prep the AIDE config (no CLI args).
-        cfg = self._build_cfg(_load_cfg, prep_cfg, task, bud)
+        try:
+            # 1) Build + patch + prep the AIDE config (no CLI args). For the
+            # Metaflow data-object path this also materializes the dataset to a
+            # host-local dir (via the Client API) and points cfg.data_dir at it.
+            cfg = self._build_cfg(_load_cfg, prep_cfg, task, bud)
 
-        # 2) Materialize task description + workspace (./input + ./working).
-        task_desc = load_task_desc(cfg)
-        prep_agent_workspace(cfg)
+            # 2) Materialize task description + workspace (./input + ./working).
+            task_desc = load_task_desc(cfg)
+            prep_agent_workspace(cfg)
 
-        # 3) Journal + Agent, and the loom<->aide exec bridge.
-        journal = Journal()
-        agent = Agent(task_desc=task_desc, cfg=cfg, journal=journal)
-        bridge = self._make_bridge(execute)
+            # 3) Journal + Agent, and the loom<->aide exec bridge.
+            journal = Journal()
+            agent = Agent(task_desc=task_desc, cfg=cfg, journal=journal)
+            bridge = self._make_bridge(execute)
 
-        # 4) Drive the loop: step, persist, then mirror the newest node out.
-        steps = int(getattr(cfg.agent, "steps", bud.steps))
-        emitted = 0
-        for _ in range(steps):
-            agent.step(exec_callback=bridge)
-            save_run(cfg, journal)
+            # 4) Drive the loop: step, persist, then mirror the newest node out.
+            steps = int(getattr(cfg.agent, "steps", bud.steps))
+            emitted = 0
+            for _ in range(steps):
+                agent.step(exec_callback=bridge)
+                save_run(cfg, journal)
 
-            # The agent appends exactly one node per step; mirror any newly
-            # finished node(s) (defensively handle >1 in case of future changes).
-            while emitted < len(journal):
-                node: Node = journal[emitted]
-                emitted += 1
-                if on_node is not None:
-                    on_node(self._node_to_record(node, task, cfg))
+                # The agent appends exactly one node per step; mirror any newly
+                # finished node(s) (defensively handle >1 for future changes).
+                while emitted < len(journal):
+                    node: Node = journal[emitted]
+                    emitted += 1
+                    if on_node is not None:
+                        on_node(self._node_to_record(node, task, cfg))
 
-        # 5) Best node -> SearchResult.
-        best = journal.get_best_node(only_good=False)
-        best_code = best.code if best is not None else None
-        best_metric = self._metric_value(best)
+            # 5) Best node -> SearchResult.
+            best = journal.get_best_node(only_good=False)
+            best_code = best.code if best is not None else None
+            best_metric = self._metric_value(best)
 
-        log_dir = self._as_str(getattr(cfg, "log_dir", None))
-        journal_path = self._join(log_dir, "journal.json")
-        tree_path = self._join(log_dir, "tree_plot.html")
+            log_dir = self._as_str(getattr(cfg, "log_dir", None))
+            journal_path = self._join(log_dir, "journal.json")
+            tree_path = self._join(log_dir, "tree_plot.html")
 
-        return SearchResult(
-            best_code=best_code,
-            best_metric=best_metric,
-            journal_path=journal_path,
-            tree_path=tree_path,
-            node_count=len(journal),
-        )
+            return SearchResult(
+                best_code=best_code,
+                best_metric=best_metric,
+                journal_path=journal_path,
+                tree_path=tree_path,
+                node_count=len(journal),
+            )
+        finally:
+            self._cleanup_materialized_dir()
 
     # -------------------------------------------------------------- helpers --
 
@@ -200,8 +209,13 @@ class AideSearchProvider(SearchProvider):
         """
         cfg = load_cfg_fn(use_cli_args=False)
 
-        # Task-driven fields.
-        cfg.data_dir = task.data_dir
+        # Task-driven fields. For the Metaflow data-object path the input is a
+        # Metaflow artifact referenced by ``task.dataset_ref`` (a pathspec), not
+        # a local directory. Materialize it to a host-local dir via the Metaflow
+        # Client API (loom.dataio -- never direct S3) so AIDE's data-preview and
+        # workspace prep see the real dataset. The local provider keeps using the
+        # plain local ``data_dir``.
+        cfg.data_dir = self._resolve_data_dir(task)
         cfg.goal = task.goal
         cfg.eval = task.eval
 
@@ -237,6 +251,51 @@ class AideSearchProvider(SearchProvider):
                 provider.install_dispatch_override(aide_backend)
 
         return prep_cfg_fn(cfg)
+
+    def _resolve_data_dir(self, task: Task) -> str:
+        """Return the local ``data_dir`` AIDE should preview/stage for ``task``.
+
+        Two input paths, exactly one of which applies:
+
+        * **Metaflow data object** (``task.dataset_ref`` set, the metaflow
+          provider): the input is a Metaflow artifact, not a local dir. We
+          materialize it to a fresh host-local directory through the Metaflow
+          **Client API** (``loom.dataio.materialize_dataset`` -- never direct S3)
+          so AIDE's data-preview and ``prep_agent_workspace`` see the real
+          dataset, and return that directory.
+        * **Local dir** (no ``dataset_ref``, the local dev provider): return
+          ``task.data_dir`` unchanged.
+
+        The materialized directory is tracked on ``self`` and removed at the end
+        of :meth:`run`.
+
+        Args:
+            task: The task being solved.
+
+        Returns:
+            A local directory path to use as ``cfg.data_dir``.
+        """
+        ref = (task.dataset_ref or "").strip() if task.dataset_ref else ""
+        if not ref:
+            return task.data_dir
+
+        import tempfile
+
+        from loom.dataio import materialize_dataset
+
+        dest = tempfile.mkdtemp(prefix="loom-dataset-")
+        materialize_dataset(ref, dest)
+        self._materialized_dir = dest
+        return dest
+
+    def _cleanup_materialized_dir(self) -> None:
+        """Remove the host-local dir a Metaflow data object was materialized to."""
+        dest = self._materialized_dir
+        self._materialized_dir = None
+        if dest:
+            import shutil
+
+            shutil.rmtree(dest, ignore_errors=True)
 
     @staticmethod
     def _make_bridge(execute: ExecCallback) -> Any:

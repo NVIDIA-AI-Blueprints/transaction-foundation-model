@@ -55,9 +55,22 @@ class ExecutionResult:
 class Task:
     """A single experiment to run through Loom.
 
+    Loom's input data is a **Metaflow data object (an Artifact)** referenced by
+    **pathspec** and read only through the Metaflow Client API; the datastore
+    backing it (local or S3/minio) is an opaque detail Metaflow owns. Two fields
+    carry that reference, exactly one of which the active provider consumes:
+
+    * the ``metaflow`` provider uses :attr:`dataset_ref` (a pathspec produced by
+      ``loom ingest`` -> :class:`flows.ingest_dataset.IngestDataset`), and
+      materializes it to a host-local ``./input`` via the Client API;
+    * the ``local`` provider (the Metaflow-free dev fallback) uses
+      :attr:`data_dir`, a plain local directory copied into ``./input``.
+
     Attributes:
-        data_dir: Path to the directory holding the task's input data. An
-            execution provider stages this into the workspace's ``./input``.
+        data_dir: Path to a local directory holding the task's input data. Used
+            by the ``local`` (Metaflow-free) execution provider, which copies it
+            into the workspace's ``./input``. May be empty when the Metaflow
+            data-object path (``dataset_ref``) is used instead.
         goal: Natural-language description of what the solution should achieve.
         eval: Natural-language description of how a solution is evaluated
             (the validation metric the search provider should optimize).
@@ -65,6 +78,12 @@ class Task:
             and to key corpus records.
         tenant: Logical tenant the task belongs to (multi-tenant boundary).
             Defaults to ``"default"``.
+        dataset_ref: Optional Metaflow **pathspec** (e.g.
+            ``"IngestDataset/123"``) identifying the ingested data object to use
+            as input. This is the reference the ``metaflow`` provider reads via
+            the Metaflow Client API (``loom.dataio.materialize_dataset``); Loom
+            never touches the underlying datastore (S3/minio/local) directly.
+            ``None`` for the local-dev path, which uses ``data_dir`` instead.
     """
 
     data_dir: str
@@ -72,6 +91,7 @@ class Task:
     eval: str
     experiment_id: str
     tenant: str = "default"
+    dataset_ref: str | None = None
 
 
 @dataclass

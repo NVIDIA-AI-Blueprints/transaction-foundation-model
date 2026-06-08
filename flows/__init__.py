@@ -1,30 +1,42 @@
-"""Metaflow flows used by Loom execution providers.
+"""Metaflow flows used by Loom.
 
-This package holds the *static* Metaflow ``FlowSpec`` classes Loom drives. There
-is exactly one flow in v0.1 -- :class:`flows.eval_candidate.EvalCandidate` --
-and it is run as a subprocess via ``metaflow.Runner`` by the Metaflow execution
-provider (see :mod:`loom.providers.metaflow_exec`).
+This package holds the static Metaflow ``FlowSpec`` classes Loom drives, each run
+as a subprocess via ``metaflow.Runner``:
+
+* :class:`flows.ingest_dataset.IngestDataset` -- the **one external->Metaflow
+  boundary**. ``loom ingest`` runs it once to turn a local dataset into a
+  Metaflow **data object** (artifacts addressable by pathspec). Thereafter Loom
+  reads that data only through the Metaflow Client API (see :mod:`loom.dataio`),
+  and the datastore (local or S3/minio) is an opaque detail Metaflow owns.
+* :class:`flows.eval_candidate.EvalCandidate` -- the per-candidate evaluation
+  flow run by the Metaflow execution provider (see
+  :mod:`loom.providers.metaflow_exec`).
 
 Design invariant (mirrors the repo CLAUDE.md): a *candidate* solution is never
-turned into a new flow. There is ONE flow class, and each candidate enters it as
-**data** (an ``IncludeFile`` parameter), so the flow definition is stable across
-every evaluation.
+turned into a new flow. ``EvalCandidate`` is ONE static flow class, and each
+candidate enters it as **data** (an ``IncludeFile`` parameter), so the flow
+definition is stable across every evaluation.
 
-Importing this package must not require Metaflow to be installed: the flow module
-imports ``metaflow`` at its top level (a flow file genuinely needs it), so it is
-imported lazily by the provider rather than eagerly here. We therefore keep this
-package ``__init__`` import-light and expose only the path helper below.
+Importing this package must not require Metaflow to be installed: each flow
+module imports ``metaflow`` at its top level (a flow file genuinely needs it), so
+they are imported lazily by the provider/CLI rather than eagerly here. We
+therefore keep this package ``__init__`` import-light and expose only the path
+helpers below.
 """
 
 from __future__ import annotations
 
 import os
 
+_FLOWS_DIR = os.path.dirname(os.path.abspath(__file__))
+
 #: Absolute path to the static evaluation flow file. The Metaflow ``Runner``
 #: takes a flow *file path*, so the provider resolves the flow this way rather
 #: than importing the flow class (which would require Metaflow at import time).
-EVAL_CANDIDATE_FLOW_PATH: str = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "eval_candidate.py"
-)
+EVAL_CANDIDATE_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "eval_candidate.py")
 
-__all__ = ["EVAL_CANDIDATE_FLOW_PATH"]
+#: Absolute path to the dataset-ingest flow file. ``loom ingest`` runs this via
+#: ``metaflow.Runner`` to produce the data object referenced by pathspec.
+INGEST_DATASET_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "ingest_dataset.py")
+
+__all__ = ["EVAL_CANDIDATE_FLOW_PATH", "INGEST_DATASET_FLOW_PATH"]

@@ -5,16 +5,23 @@ Loom runs (via :class:`loom.providers.metaflow_exec.MetaflowExecutionProvider`)
 once per candidate solution. The flow definition is *static*: a candidate is
 never compiled into a bespoke flow. Instead the candidate's source enters the
 flow as **data** (an ``IncludeFile`` parameter), and the task context
-(``goal``/``eval``/``timeout``/``seed``/``input_ref``) enters as ``Parameter``s.
+(``goal``/``eval``/``timeout``/``seed``/``dataset_ref``) enters as ``Parameter``s.
 This mirrors the repo invariant "ONE static flow; candidates are data".
+
+The input dataset is a **Metaflow data object** referenced by ``dataset_ref`` (a
+pathspec like ``"IngestDataset/123"`` produced by ``loom ingest``). The ``start``
+step materializes it into ``./input`` through the Metaflow **Client API** only
+(``loom.dataio.materialize_dataset``); Loom never touches the underlying
+datastore (local or S3/minio) directly -- that is Metaflow's concern.
 
 Flow shape::
 
     start --> evaluate --> validate --> end
 
-* ``start``    -- reproduce the AIDE-style workspace: ``./input`` (staged from
-                  ``input_ref``), an empty ``./working``, and the candidate
-                  written to ``solution.py``.
+* ``start``    -- reproduce the AIDE-style workspace: ``./input`` (materialized
+                  from the ``dataset_ref`` data object via the Client API), an
+                  empty ``./working``, and the candidate written to
+                  ``solution.py``.
 * ``evaluate`` -- run the candidate via :func:`loom.providers._interpreter.run_code`
                   (the same dependency-light interpreter the ``local`` provider
                   uses, so the flow does not hard-depend on AIDE internals) and
@@ -102,14 +109,15 @@ class EvalCandidate(FlowSpec):
         help="Random seed exported to the candidate's environment.",
     )
 
-    #: Filesystem path (or URI understood by the workspace stager) whose contents
-    #: populate the workspace ``./input`` directory. A tenant points this at data
-    #: inside their own perimeter (BYO datastore).
-    input_ref = Parameter(
-        "input_ref",
+    #: Metaflow **pathspec** of the ingested data object to use as input (e.g.
+    #: ``"IngestDataset/123"``, produced by ``loom ingest``). The ``start`` step
+    #: materializes it into ``./input`` through the Metaflow Client API only;
+    #: Loom never touches the backing datastore (local or S3/minio) directly.
+    dataset_ref = Parameter(
+        "dataset_ref",
         default="",
         type=str,
-        help="Path whose contents are staged into the workspace ./input dir.",
+        help="Metaflow pathspec of the ingested data object (e.g. IngestDataset/123).",
     )
 
     @step
@@ -117,12 +125,12 @@ class EvalCandidate(FlowSpec):
         """Reproduce the AIDE-style workspace for this evaluation.
 
         Creates a fresh, isolated workspace directory containing ``./input``
-        (populated from ``input_ref`` if provided), an empty ``./working``, and
-        the candidate written to ``solution.py``. The absolute workspace path is
-        stored on ``self.workspace_dir`` for the ``evaluate`` step.
+        (materialized from the ``dataset_ref`` Metaflow data object via the
+        Client API when supplied), an empty ``./working``, and the candidate
+        written to ``solution.py``. The absolute workspace path is stored on
+        ``self.workspace_dir`` for the ``evaluate`` step.
         """
         import os
-        import shutil
         import tempfile
 
         # Isolated workspace; not cleaned up here so logs/artifacts survive a
@@ -133,21 +141,15 @@ class EvalCandidate(FlowSpec):
         os.makedirs(input_dir, exist_ok=True)
         os.makedirs(working_dir, exist_ok=True)
 
-        # Populate ./input from the reference path, if one was supplied and it
-        # exists. Directory trees are copied; a single file is copied in place.
-        ref = (self.input_ref or "").strip()
-        if ref and os.path.exists(ref):
-            if os.path.isdir(ref):
-                # Merge the referenced directory's contents into ./input.
-                for name in os.listdir(ref):
-                    src = os.path.join(ref, name)
-                    dst = os.path.join(input_dir, name)
-                    if os.path.isdir(src):
-                        shutil.copytree(src, dst, dirs_exist_ok=True)
-                    else:
-                        shutil.copy2(src, dst)
-            else:
-                shutil.copy2(ref, os.path.join(input_dir, os.path.basename(ref)))
+        # Populate ./input from the Metaflow data object referenced by
+        # ``dataset_ref``, read ONLY through the Client API (loom.dataio); the
+        # datastore behind it (local or S3/minio) is opaque to Loom. No direct
+        # S3, no local-path copy: the data lives as Metaflow artifacts.
+        ref = (self.dataset_ref or "").strip()
+        if ref:
+            from loom.dataio import materialize_dataset
+
+            materialize_dataset(ref, input_dir)
 
         # Write the candidate to solution.py at the workspace root. The candidate
         # is expected to read from ./input and write ./working/submission.csv.

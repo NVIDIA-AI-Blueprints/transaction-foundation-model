@@ -89,10 +89,45 @@ one. Every candidate is recorded; the winner is returned.
 
 ---
 
+## The data model: your input is a Metaflow data object
+
+Loom's input data is a **Metaflow data object — a Metaflow Artifact** — referenced
+by **pathspec** (e.g. `IngestDataset/123`) and read **only through the Metaflow
+Client API** (`metaflow.Run(pathspec).data.<artifact>`). The datastore behind it —
+**local or object storage (S3/minio)** — is an **opaque implementation detail
+Metaflow owns**: you configure it once in your **Metaflow profile/environment**,
+and **Loom never talks to that storage directly** (no bucket URIs in Loom code).
+Whether the bytes live on your laptop or in a bucket, Loom only ever sees
+artifacts.
+
+There is exactly **one boundary** where outside data crosses into Metaflow:
+`loom ingest`. After that, the dataset is a versioned, profile-backed object you
+reference by pathspec — the same object whether Loom runs locally now or in a
+cluster later.
+
+```bash
+# 1. Ingest once — turns a local dir/CSV into a Metaflow data object and prints
+#    its pathspec (the dataset_ref). Storage is whatever your Metaflow profile says.
+loom ingest --source ./your_task --name my-dataset
+#   ...
+#   dataset_ref : IngestDataset/123
+
+# 2. Run against the data object by pathspec (the metaflow provider reads it via
+#    the Client API; your data stays wherever your Metaflow datastore keeps it).
+loom run \
+  --dataset IngestDataset/123 \
+  --goal  "<one sentence: what a solution should achieve>" \
+  --metric "<one sentence: how it's scored, with direction>" \
+  --steps 10 --mlops metaflow
+```
+
+---
+
 ## Run it on your own data
 
-Loom expects a **data directory** it can stage into a workspace. The bundled demo
-shows the convention:
+A directory source is expected to contain `train.csv` (plus optional `test.csv` /
+`sample_submission.csv`); a single `.csv` is train/test-split for you. The bundled
+demo shows the directory convention:
 
 ```
 your_task/
@@ -102,15 +137,21 @@ your_task/
 ```
 
 A solution reads from `./input/` and writes its predictions to
-`./working/submission.csv`. Then point Loom at it:
+`./working/submission.csv`. There are two ways to point Loom at data:
 
-```bash
-loom run \
-  --data ./your_task \
-  --goal  "<one sentence: what a solution should achieve>" \
-  --metric "<one sentence: how it's scored, with direction — e.g. 'Maximize ROC-AUC' / 'Minimize RMSE'>" \
-  --steps 10 --mlops local
-```
+- **`--mlops metaflow` (default):** `loom ingest` your data once into a Metaflow
+  data object, then `loom run --dataset <pathspec>` (see the section above). The
+  data is read through the Metaflow Client API; the datastore is opaque to Loom.
+- **`--mlops local` (Metaflow-free dev path):** skip ingest and point `--data` at a
+  local directory — handy for quick trials without a Metaflow profile:
+
+  ```bash
+  loom run \
+    --data ./your_task \
+    --goal  "<one sentence: what a solution should achieve>" \
+    --metric "<one sentence: how it's scored, with direction — e.g. 'Maximize ROC-AUC' / 'Minimize RMSE'>" \
+    --steps 10 --mlops local
+  ```
 
 The metric sentence is the most important input — state the optimization
 **direction** unambiguously, because Loom optimizes exactly what you ask for.
@@ -121,19 +162,23 @@ The metric sentence is the most important input — state the optimization
 
 | | `--mlops local` | `--mlops metaflow` (default) |
 |---|---|---|
-| Setup | none | a Metaflow endpoint |
+| Setup | none | a Metaflow profile |
 | Best for | quick trials, dev, CI | scale, reproducibility, audit |
 | Each candidate | runs in-process | runs as a versioned Metaflow run |
-| Data | local | stays in **your** perimeter (BYO endpoint) |
+| Input | a local `--data` dir | a **Metaflow data object** (`--dataset <pathspec>` from `loom ingest`) |
+| Data | local | a Metaflow artifact; storage (local or S3/minio) stays in **your** perimeter and is opaque to Loom |
 
-Switch to Metaflow once the local path works. Loom runs each candidate through
-**one static flow** (`flows/eval_candidate.py`) — the candidate enters as *data*,
-never as generated flow code — against whatever Metaflow endpoint your
-`METAFLOW_PROFILE` points at, so your data never leaves your environment:
+Switch to Metaflow once the local path works. First `loom ingest` your data into a
+data object (the one external→Metaflow boundary), then Loom runs each candidate
+through **one static flow** (`flows/eval_candidate.py`) — the candidate enters as
+*data*, never as generated flow code — reading the dataset through the Metaflow
+**Client API** against whatever endpoint your `METAFLOW_PROFILE` points at. Loom
+never touches the datastore directly, so your data never leaves your environment:
 
 ```bash
 export METAFLOW_PROFILE="my-profile"
-loom run --data ./your_task --goal "..." --metric "..." --steps 20 --mlops metaflow
+loom ingest --source ./your_task --name my-dataset      # -> dataset_ref : IngestDataset/123
+loom run --dataset IngestDataset/123 --goal "..." --metric "..." --steps 20 --mlops metaflow
 ```
 
 ---
@@ -305,14 +350,16 @@ and registering it, no core changes.
 
 ```
 loom/
-  types.py        ExecutionResult · Task · SearchResult · NodeRecord  (the locked contract)
+  types.py        ExecutionResult · Task (data_dir + dataset_ref) · SearchResult · NodeRecord  (the locked contract)
   config.py       LoomConfig (env / .env / YAML)
   registry.py     name → provider class
+  dataio.py       materialize_dataset / dataset_schema — the Client-API data door (never touches S3)
   providers/      aide_search.py · metaflow_exec.py · local_exec.py · _interpreter.py
   controller.py   run_loom(task, config) — wires it together
   corpus.py       append-only JSONL of every node (multi-tenant IP boundary)
-  cli.py          the `loom` command
-flows/eval_candidate.py   the one static Metaflow flow (candidate = data)
+  cli.py          the `loom` command (`loom ingest`, `loom run`)
+flows/ingest_dataset.py   the external→Metaflow boundary (dir/CSV → data object)
+flows/eval_candidate.py   the one static evaluation flow (candidate = data)
 skills/           Claude Code skill-pack (loom-optimize, loom-eda)
 tasks/generic_demo/       the bundled smoke-test task
 ```

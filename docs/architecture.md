@@ -196,14 +196,50 @@ Two design decisions let any brain drive any muscle with zero glue:
 ## Core types (`loom/types.py`)
 
 - **`ExecutionResult`** — the locked, AIDE-parity result above.
-- **`Task(data_dir, goal, eval, experiment_id, tenant="default")`** — one
-  experiment: where the data is, what to achieve, how it's scored, the grouping
-  id, and the tenant.
+- **`Task(data_dir, goal, eval, experiment_id, tenant="default", dataset_ref=None)`**
+  — one experiment: what to achieve, how it's scored, the grouping id, the tenant,
+  and **where the input data is**, via two fields the active provider picks
+  between:
+  - `dataset_ref` — a Metaflow **pathspec** (e.g. `"IngestDataset/123"`)
+    identifying the ingested **data object**. The `metaflow` provider reads it via
+    the Client API (`loom.dataio`); see [The data model](#the-data-model-input-is-a-metaflow-data-object) below.
+  - `data_dir` — a plain local directory, used by the `local` (Metaflow-free) dev
+    provider.
 - **`SearchResult(best_code, best_metric, journal_path, tree_path, node_count)`**
   — the outcome of a search.
 - **`NodeRecord(...)`** — one finished search node, persisted by the corpus
   (carries `code`, `term_out`, `metric`, model/token routing metadata, and the
   `tenant` / `owned_by` IP tags).
+
+## The data model: input is a Metaflow data object
+
+Loom's input data is a **Metaflow data object — a Metaflow Artifact** — referenced
+by **pathspec** and read **only through the Metaflow Client API**
+(`metaflow.Run(pathspec).data.<artifact>`). This is load-bearing:
+
+- **One external→Metaflow boundary.** `loom ingest` runs the
+  `IngestDataset(FlowSpec)` flow (`flows/ingest_dataset.py`) once to turn a local
+  dir/CSV into Metaflow artifacts — `train` / `test` (DataFrames) and a `schema`
+  dict — and prints the run's pathspec. That pathspec is the `dataset_ref` carried
+  on the `Task`.
+- **One data-load path.** `loom/dataio.py` is the *only* place Loom reads that
+  data: `resolve_run(dataset_ref)` returns a `metaflow.Run`;
+  `materialize_dataset(dataset_ref, dest_dir)` writes `train.csv` / `test.csv` into
+  a host-local dir; `dataset_schema(dataset_ref)` returns the `schema` dict. All
+  three go through the Client API and lazy-import `metaflow` inside the function.
+- **The datastore is opaque.** Where the artifacts physically live — **local or
+  object storage (S3/minio)** — is an implementation detail **Metaflow owns**,
+  configured solely in the Metaflow profile/environment (`METAFLOW_PROFILE` /
+  `METAFLOW_*`). **Loom code never touches that storage directly**: no
+  object-storage SDK, no bucket-URI literals, no raw-URI Metaflow datastore
+  handle anywhere in `loom/` or `flows/` (a test scans the source to keep it so).
+  Loom is agnostic — it only ever sees artifacts.
+
+Both execution paths converge on the same on-disk workspace shape (`./input` with
+`train.csv`/`test.csv`, an empty `./working`): the `metaflow` provider materializes
+the data object into `./input` via the Client API, while the `local` provider
+copies `data_dir` into `./input`. So a candidate solution and AIDE's data-preview
+read `./input/...` identically regardless of where the bytes came from.
 
 ## Configuration (`loom/config.py`)
 
@@ -249,13 +285,23 @@ vertical, only the generic `owned_by` tag. Secrets are never persisted — a
 
 ## Request lifecycle
 
-1. The CLI (`loom run …`) builds a `Task` and a `LoomConfig` and calls
-   `controller.run_loom(task, config)`.
+0. (metaflow path) `loom ingest --source <path>` runs `IngestDataset` once via
+   `metaflow.Runner`, producing a data object whose pathspec is printed. The user
+   passes it as `loom run --dataset <pathspec>`.
+1. The CLI (`loom run …`) builds a `Task` (with `dataset_ref` for the metaflow
+   path, or `data_dir` for the local path) and a `LoomConfig`, then calls
+   `controller.run_loom(task, config)`. A pre-flight requires the metaflow provider
+   to have a `--dataset` (or, as a fallback, a local `--data`) and guides the user
+   to `loom ingest` otherwise.
 2. The controller resolves the execution and search provider **classes** from the
    registry by their configured names, instantiates each from the config, and
    creates a `Corpus`.
-3. `execution.setup(task)` stages the workspace (`./input` from `task.data_dir`,
-   empty `./working`, cwd set).
+3. `execution.setup(task)` records the input reference (the metaflow provider
+   carries `task.dataset_ref`; the local provider stages `./input` from
+   `task.data_dir` and sets cwd). For the metaflow path the AIDE adapter
+   materializes the data object to a host-local dir via the Client API
+   (`loom.dataio`) and points `cfg.data_dir` at it, so AIDE's data-preview reflects
+   the real dataset.
 4. `search.run(task, execute=execution, on_node=corpus.record, budget=…)` runs
    the loop: propose → `execute(code)` → score → `on_node(NodeRecord)` for each
    finished node. Inside the AIDE adapter's `_build_cfg`, the code and feedback
@@ -272,8 +318,8 @@ vertical, only the generic `owned_by` tag. Secrets are never persisted — a
 | Name | Port | Module | Notes |
 | --- | --- | --- | --- |
 | `aide` | search | `loom/providers/aide_search.py` | Drives AIDE's agent/journal loop (pinned by SHA `40dcf28`). Does **not** edit AIDE; converts results via field parity. |
-| `metaflow` | execution | `loom/providers/metaflow_exec.py` + `flows/eval_candidate.py` | Runs each candidate through **one static** `EvalCandidate(FlowSpec)` via `metaflow.Runner`; the candidate enters as **data** (`IncludeFile`), never as a generated flow. BYO Metaflow endpoint. |
-| `local` | execution | `loom/providers/local_exec.py` | Metaflow-free dev path; runs candidates in-process via the vendored interpreter. |
+| `metaflow` | execution | `loom/providers/metaflow_exec.py` + `flows/eval_candidate.py` | Runs each candidate through **one static** `EvalCandidate(FlowSpec)` via `metaflow.Runner`; the candidate enters as **data** (`IncludeFile`), never as a generated flow. Input is a Metaflow data object referenced by `task.dataset_ref` (read via the Client API). BYO Metaflow endpoint. |
+| `local` | execution | `loom/providers/local_exec.py` | Metaflow-free dev path; runs candidates in-process via the vendored interpreter. Input is a local `task.data_dir`. |
 | `anthropic-api` | model | `loom/providers/model/anthropic_api.py` | **Default.** Native Claude via AIDE's Anthropic backend; reads `ANTHROPIC_API_KEY`. Judge-capable. |
 | `openai-api` | model | `loom/providers/model/openai_api.py` | Native OpenAI (`gpt-*`/`o<N>`); reads `OPENAI_API_KEY`. Leaves `OPENAI_BASE_URL` unset (real OpenAI ignores it). |
 | `openrouter` | model | `loom/providers/model/openrouter.py` | OpenRouter via the OpenAI-compatible path; copies `OPENROUTER_API_KEY` → `OPENAI_API_KEY`. Per-slug judge check. |
@@ -291,9 +337,13 @@ internals.
 
 `EvalCandidate(FlowSpec)` (`start → evaluate → validate → end`) is defined once.
 Each candidate solution enters it as **data** (an `IncludeFile` candidate plus
-`Parameter`s for goal/eval/timeout/seed/input_ref), never as a freshly generated
-flow per candidate. This keeps the flow definition stable, cacheable, and
-inspectable across every evaluation. Use standard Metaflow APIs only.
+`Parameter`s for goal/eval/timeout/seed/`dataset_ref`), never as a freshly
+generated flow per candidate. This keeps the flow definition stable, cacheable,
+and inspectable across every evaluation. The `start` step materializes the input
+data object into `./input` through the Client API (`loom.dataio.materialize_dataset`)
+— never by touching the datastore directly. The separate `IngestDataset(FlowSpec)`
+(`start → end`) is the one place outside data crosses into Metaflow. Use standard
+Metaflow APIs only.
 
 ## How to add a provider
 

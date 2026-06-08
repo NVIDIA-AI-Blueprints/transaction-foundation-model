@@ -14,6 +14,11 @@ Design points enforced here:
 * **ONE static flow, candidates are data.** We never generate a flow per
   candidate; we write the candidate to a temp file and hand it to the static
   flow as an ``IncludeFile`` value.
+* **Input is a Metaflow data object.** The task's input is an ingested Metaflow
+  **artifact** referenced by ``task.dataset_ref`` (a pathspec). The flow reads it
+  only through the Metaflow Client API (``loom.dataio``); this provider never
+  touches the underlying datastore (local or S3/minio) directly. Run ``loom
+  ingest`` to produce a ``dataset_ref``.
 * **BYO endpoint / perimeter.** The Metaflow ``profile`` comes from
   ``config.metaflow_profile`` (env ``METAFLOW_PROFILE``), so a tenant points
   Loom at *their* Metaflow metadata service and datastore and their data never
@@ -74,26 +79,31 @@ class MetaflowExecutionProvider(ExecutionProvider):
         """
         self.config = config
         self._task: Optional[Task] = None
-        self._input_ref: Optional[str] = None
+        self._dataset_ref: Optional[str] = None
         #: Tags applied to every run for Client-API leaderboard filtering.
         self._tags: list[str] = []
 
     # -- lifecycle ---------------------------------------------------------
 
     def setup(self, task: Task) -> None:
-        """Stage the task's input reference and prepare run tags.
+        """Record the task's dataset reference and prepare run tags.
 
-        The Metaflow flow stages ``./input`` itself (inside its ``start`` step)
-        from ``input_ref``; here we only resolve that reference to an absolute
-        path and compute the tags used to group/rank this experiment's runs.
+        The Metaflow provider's input is a **Metaflow data object** referenced by
+        ``task.dataset_ref`` (a pathspec like ``"IngestDataset/123"`` produced by
+        ``loom ingest``). The flow's ``start`` step materializes it into
+        ``./input`` through the Metaflow Client API (``loom.dataio``); here we
+        only carry the reference and compute the tags used to group/rank this
+        experiment's runs. We do not resolve any local path or touch a datastore
+        -- the datastore (local or S3/minio) is Metaflow's concern.
 
         Args:
-            task: The task to evaluate candidates for.
+            task: The task to evaluate candidates for. ``task.dataset_ref`` is
+                required for this provider; a missing reference is surfaced as a
+                clear error result by :meth:`execute` (instructing the user to
+                run ``loom ingest`` first).
         """
         self._task = task
-        # Resolve to an absolute path so the Runner subprocess (which may run in
-        # a different cwd) can still find the inputs.
-        self._input_ref = os.path.abspath(task.data_dir) if task.data_dir else ""
+        self._dataset_ref = (task.dataset_ref or "").strip() if task.dataset_ref else ""
         self._tags = [
             f"loom_experiment:{task.experiment_id}",
             f"loom_tenant:{task.tenant}",
@@ -103,7 +113,7 @@ class MetaflowExecutionProvider(ExecutionProvider):
     def teardown(self) -> None:
         """Release per-task state. Workspace dirs are owned by the flow runs."""
         self._task = None
-        self._input_ref = None
+        self._dataset_ref = None
         self._tags = []
 
     # -- execution ---------------------------------------------------------
@@ -137,7 +147,17 @@ class MetaflowExecutionProvider(ExecutionProvider):
         task = self._task
         goal = task.goal if task else ""
         eval_desc = task.eval if task else ""
-        input_ref = self._input_ref or ""
+        dataset_ref = self._dataset_ref or ""
+
+        # The Metaflow provider's input IS the Metaflow data object. Without a
+        # dataset_ref there is nothing to evaluate against, so fail with an
+        # actionable message rather than running the flow against empty ./input.
+        if not dataset_ref:
+            return self._error_result(
+                "no dataset_ref set for the metaflow provider: ingest your data "
+                "first with `loom ingest --source <path>` and pass the printed "
+                "pathspec via `loom run --dataset <pathspec> --mlops metaflow`."
+            )
 
         # Write the candidate to a temp file: it enters the static flow as DATA
         # (IncludeFile), never as a generated flow.
@@ -170,7 +190,7 @@ class MetaflowExecutionProvider(ExecutionProvider):
                         goal=goal,
                         eval=eval_desc,
                         timeout=_CANDIDATE_TIMEOUT_S,
-                        input_ref=input_ref,
+                        dataset_ref=dataset_ref,
                         tags=list(self._tags),
                     )
                     run = executing.run
