@@ -1,10 +1,13 @@
 # Loom skill-pack (v0.1)
 
-Claude Code skills that drive Loom conversationally. Loom is a general-purpose,
-domain-neutral automated ML engine (the metric is the spec); these skills are the
-human-facing front door to it — they plan, gate on cost/data, invoke the `loom`
-CLI, and narrate results. They do not reimplement any engine logic; they call the
-same `loom run` entrypoint a human would.
+Claude Code skills that drive Loom conversationally. Loom is an agentic CLI for the
+**full data-science lifecycle** (domain-neutral; the metric is the spec) — ML
+modeling (the `loom-optimize` verb) is one slice; the other 97% is data access,
+EDA, features, pipelines, training, validation, viz, reporting, deployment, ops,
+and collaboration. These skills are the human-facing front door — they plan, gate
+on cost/data, invoke the `loom` CLI through its provider interfaces, and narrate
+lineage-grounded results. They do not reimplement any engine logic; they call the
+same `loom` entrypoints a human would.
 
 ## Authoring a new verb
 

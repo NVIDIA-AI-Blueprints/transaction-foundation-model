@@ -5,10 +5,11 @@ description: Drive a Loom run end to end — turn a goal + evaluation metric int
 
 # loom-optimize
 
-Loom is a general-purpose, domain-neutral automated ML engine: hand it a
-dataset, a goal, and an evaluation metric, and it searches for solution code that
-maximizes that metric, runs each candidate in a real execution environment, and
-returns the best solution plus a leaderboard.
+`loom-optimize` is Loom's **ML-iteration verb** — the AIDE-search slice of the
+data-science lifecycle (Loom itself is the agentic CLI across the *whole* lifecycle;
+this is one verb). Hand it a dataset, a goal, and an evaluation metric, and it
+searches for solution code that maximizes that metric, runs each candidate in a real
+execution environment, and returns the best solution plus a leaderboard.
 
 **The metric is the spec.** Your job in this skill is to turn a loosely stated
 request into a precise, runnable Loom invocation — and to stop at an approval

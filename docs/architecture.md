@@ -1,14 +1,20 @@
 # Loom architecture
 
-Loom is a **general-purpose, domain-neutral automated ML engine** built as
-**ports and adapters** ("providers"), the same way Kubernetes treats container
-runtimes as pluggable. `loom-core` defines the provider *interfaces* (the ports);
-concrete *adapters* implement them and are chosen purely by configuration. Adding
-a new brain or a new MLOps backend is a new adapter class plus a one-line
-registration — never a core change.
+Loom is a **Feynman-style agentic CLI for the full data-science lifecycle** —
+**not** an automated ML engine. It's a catalog of `/loom-*` verbs (`connect · eda ·
+features · pipeline · train · optimize · validate · viz · report · deploy · ops ·
+collab`) spanning the whole lifecycle; ML *modeling* (the `optimize` verb, AIDE's
+search) is the ~3% "brain", and the other **97%** — data access, EDA, features,
+pipelines, training, validation, viz, reporting, deployment, ops, collaboration —
+is the product. It is built as **ports and adapters** ("providers"), the same way
+Kubernetes treats container runtimes as pluggable: `loom-core` defines the provider
+*interfaces* (the ports); concrete *adapters* implement them and are chosen purely
+by configuration. Adding a new brain, MLOps backend, or model-builder is a new
+adapter class plus a one-line registration — never a core change.
 
-This document covers the provider model, the three seams, the request
-lifecycle, and how to add a provider.
+This document covers the provider model, the **four seams** (search, execution,
+model, model-builder), the two execution paths (the search loop and the lifecycle
+flows), the request lifecycle, and how to add a provider.
 
 ## The big picture
 
@@ -38,10 +44,20 @@ The controller (`loom/controller.py`) is the only orchestration seam. It resolve
 provider **classes by name** from the registry and never imports a concrete
 adapter directly — that indirection is what makes Loom pluggable.
 
-## The three ports (seams)
+**Two execution paths share these ports.** The diagram above is the **search /
+`optimize`** path (`controller.run_loom` — the AIDE brain proposing candidates).
+The other **lifecycle verbs** (`eda`, `features`, `validate`, `train`, `deploy`, …)
+run a **static Metaflow flow per verb through the MLOps interface**
+(`ExecutionProvider.run_flow(flow_path, params, tags) -> RunResult`), each producing
+a versioned **Metaflow run + an `@card`** plus a typed summary — never an in-process
+candidate. `train` additionally resolves the **model-builder** port (below) inside
+its flow. Both paths stay backend-swappable because the verb speaks the *interface*,
+never a concrete backend.
 
-The search and execution ports are abstract base classes in
-`loom/providers/__init__.py`; the model port lives in
+## The four ports (seams)
+
+The search, execution, and model-builder ports are abstract base classes in
+`loom/providers/__init__.py`; the model (LLM-backend) port lives in
 `loom/providers/model/__init__.py`. Every provider is constructed uniformly as
 `Provider(config)` so the controller (and the AIDE adapter, for the model port)
 can wire them symmetrically.
@@ -164,6 +180,64 @@ return contract; for `func_spec` (judge) calls it returns the parsed dict matchi
 `codex exec --output-schema` (Codex). This module never edits files under `aide/`;
 it patches the in-memory dispatch table.
 
+### ModelBuilderProvider — the model-builder (training)
+
+The fourth port: the heavy **training/serving** backend behind `/loom-train`,
+parallel to the search and execution ports (ABC in `loom/providers/__init__.py`,
+adapters in `loom/providers/model_builder/`). It is stated in **Loom DS-intent
+vocabulary, never backend nouns** — the adapter is a *compiler that lowers intent →
+backend config*, and every backend noun (`Megatron`, `.nemo`, `@resources(gpu=8)`)
+lives inside the adapter and nowhere else.
+
+```python
+OBJECTIVES = frozenset({"next-event", "masked-field", "contrastive"})
+BUDGETS    = frozenset({"probe", "small", "full"})
+MODES      = frozenset({"batch", "online"})
+
+class ModelBuilderProvider(ABC):
+    name: str = "model_builder"
+
+    @abstractmethod
+    def manifest(self) -> CapabilityManifest: ...                 # the only required method
+    def tokenize(self, sequences_ref, scheme)            -> ArtifactRef: ...  # searchable
+    def pretrain(self, sequences_ref, objective, budget) -> ArtifactRef: ...  # launch-and-track
+    def finetune(self, backbone_ref, task_ref, recipe)   -> ArtifactRef: ...  # searchable
+    def embed(self, backbone_ref, data_ref)              -> ArtifactRef: ...  # searchable
+    def evaluate(self, model_ref, holdout_ref, metric)   -> Scores: ...       # searchable
+    def serve(self, model_ref, mode)                     -> ArtifactRef: ...
+```
+
+I/O are **Metaflow artifact pathspecs** (via `loom.dataio` / the Client API), never
+`.nemo` files or raw object storage — a backbone/tokenizer/embeddings/model is only
+ever a pathspec, so the rest of the lifecycle composes with it. Each capability
+declares a **`mode`** in `manifest()`: `pretrain` is `launch-and-track` (heavy GPU —
+AIDE must **not** tree-search it; only `/loom-train` invokes it), while
+`tokenize/finetune/embed/evaluate` are `searchable` (cheap scalars `/loom-optimize`
+may search). This encodes the AIDE-vs-builder division of labor as a *provider fact*,
+not user knowledge — and it is asserted by the golden conformance suite.
+
+`manifest()` is the only required method; a backend overrides only the capabilities
+it supports and declares the rest unsupported, so a capability gap is **refused up
+front with a clear message** rather than failing deep in a GPU job. Built-in
+adapters:
+
+- **`nemo`** (default) — a lowering compiler. It maps Loom intent → NeMo config
+  (`pretrain(objective="next-event")` → an AutoModel causal-LM recipe;
+  `budget="full"` → `@resources(gpu=8)` + Megatron parallelism), estimates cost
+  (GPU-count · hours · $), and gates the real GPU launch behind `--launch`. With no
+  `gpu_target` configured it returns a clean `REFUSED_NO_GPU_TARGET` (never
+  launches); with a target but `launch=False` it returns a staged `PLANNED` plan —
+  the same posture as `deploy --apply`.
+- **`local`** — a **torch-free CPU stand-in** (PPMI + TruncatedSVD sequence
+  embeddings) that actually builds a backbone/embeddings end-to-end, deterministically
+  and in seconds, with zero new dependencies. It is the conformance/CI/dev default
+  path. An optional torch GRU fidelity mode hides behind the `model-local` extra and
+  falls back to the numpy path when torch is absent.
+
+It **hides vocabulary, not physics**: `budget="full"` still means real GPU-hours,
+surfaced at the expensive/mutate approval gate — Loom hides *Megatron parallelism*,
+never *this costs $X and takes Y hours*.
+
 ## The cross-seam contract
 
 Two design decisions let any brain drive any muscle with zero glue:
@@ -210,6 +284,21 @@ Two design decisions let any brain drive any muscle with zero glue:
 - **`NodeRecord(...)`** — one finished search node, persisted by the corpus
   (carries `code`, `term_out`, `metric`, model/token routing metadata, and the
   `tenant` / `owned_by` IP tags).
+- **`RunResult(pathspec, successful, card_path, summary, error)`** — the outcome of
+  a **lifecycle flow** run through `ExecutionProvider.run_flow` (a Metaflow run + an
+  `@card` + a typed summary); the mandated artifact of every `/loom-*` lifecycle verb.
+- **Model-builder types** (the `ModelBuilderProvider` contract):
+  - **`ArtifactRef(pathspec, kind, summary, error)`** — a model-builder output: a
+    Metaflow run pathspec + a small JSON-able summary; `kind` ∈
+    `backbone | tokenizer | embeddings | model | endpoint`. **Never a `.nemo` file
+    or a storage URI** — bulk stays in Metaflow as named artifacts.
+  - **`Scores(metric, value, detail)`** — the scalar(s) `evaluate` returns (a derived
+    number + small detail like `baseline`/`lift`/`n_holdout`, never rows).
+  - **`Capability(name, mode, supported, notes)`** — one declared capability and its
+    AIDE-search `mode` (`searchable` | `launch-and-track`); stand-ins carry an honest
+    `notes` ("don't over-sell").
+  - **`CapabilityManifest(backend, capabilities)`** — what `manifest()` returns;
+    `supports(name)` / `mode_of(name)` drive the up-front capability negotiation.
 
 ## The data model: input is a Metaflow data object
 
@@ -327,6 +416,8 @@ vertical, only the generic `owned_by` tag. Secrets are never persisted — a
 | `openai-compat` | model | `loom/providers/model/openai_compat.py` | Generic self-host (LiteLLM/vLLM/Ollama); `OPENAI_BASE_URL` from `model_base_url`, `OPENAI_API_KEY` passthrough. |
 | `claude-subscription` | model | `loom/providers/model/claude_subscription.py` | `cli-bridge`: drives the user's local `claude -p`. No key; checks CLI + login. |
 | `codex-subscription` | model | `loom/providers/model/codex_subscription.py` | `cli-bridge`: drives the user's local `codex exec` (judge via `--output-schema`). No key; checks CLI + `~/.codex/auth.json`. |
+| `nemo` | model-builder | `loom/providers/model_builder/nemo.py` | **Default.** Lowers Loom intent → NeMo config; estimates cost; gates the real GPU launch behind `--launch` (refuses cleanly with no `gpu_target`). All NeMo nouns confined here. |
+| `local` | model-builder | `loom/providers/model_builder/local.py` | Torch-free CPU stand-in (PPMI + TruncatedSVD); builds a backbone/embeddings end-to-end, deterministic, zero new deps. The conformance/CI/dev default. |
 
 The vendored interpreter (`loom/providers/_interpreter.py`) is a dependency-light
 port of AIDE's interpreter that produces a Loom `ExecutionResult`. It is shared by
@@ -344,6 +435,15 @@ data object into `./input` through the Client API (`loom.dataio.materialize_data
 — never by touching the datastore directly. The separate `IngestDataset(FlowSpec)`
 (`start → end`) is the one place outside data crosses into Metaflow. Use standard
 Metaflow APIs only.
+
+The **lifecycle verbs** follow the same discipline: each is its own static
+`FlowSpec` (`flows/eda.py`, `features.py`, `validate.py`, `pipeline.py`, `deploy.py`,
+`ops.py`, `collab.py`, `report.py`, `viz.py`, `train.py`) run through
+`ExecutionProvider.run_flow` and returning a `RunResult` (a Metaflow run + an
+`@card`). The chosen capability/objective/budget enter as **`Parameter`s (data)** —
+never a generated flow per request — so the topology stays static, cacheable, and
+inspectable. `train.py` resolves the configured model-builder provider inside its
+`build` step.
 
 ## How to add a provider
 
@@ -448,6 +548,42 @@ Add the registering import (guarded) to the bottom of
 CLI), use `kind="cli-bridge"` and override `install_dispatch_override` using
 `loom/providers/model/_dispatch.py`.
 
+### A new model-builder provider (training backend)
+
+```python
+from loom.config import LoomConfig
+from loom.providers import ModelBuilderProvider, OBJECTIVES, BUDGETS
+from loom.registry import register_model_builder
+from loom.types import ArtifactRef, Capability, CapabilityManifest, Scores
+
+
+@register_model_builder("my-trainer")
+class MyTrainer(ModelBuilderProvider):
+    name = "my-trainer"
+
+    def __init__(self, config: LoomConfig) -> None:
+        self.config = config        # read gpu_target / model_builder_base_url from it
+
+    def manifest(self) -> CapabilityManifest:
+        return CapabilityManifest(backend="my-trainer", capabilities={
+            "pretrain": Capability("pretrain", "launch-and-track", supported=True,
+                                   notes="...honest capability / stand-in note..."),
+            "embed":    Capability("embed",    "searchable",       supported=True),
+            # ...declare every capability; unsupported ones are refused up front
+        })
+
+    def pretrain(self, sequences_ref, objective, budget) -> ArtifactRef:
+        assert objective in OBJECTIVES and budget in BUDGETS     # reject backend nouns at the seam
+        ...  # I/O are Metaflow artifact pathspecs (loom.dataio) — never .nemo / raw S3
+```
+
+It must pass the **golden conformance suite** (`tests/test_model_builder_conformance.py`,
+parametrized over every registered backend): the `tokenize→pretrain→embed→finetune→
+evaluate` round-trip, valid artifact pathspecs (no file/`s3://`/`.nemo`), comparable
+scores, manifest honesty, correct `mode`s, and up-front capability-gap refusal. Add
+the guarded registering import to `loom/providers/model_builder/__init__.py`, then
+select it with `LOOM_MODEL_BUILDER_PROVIDER=my-trainer`.
+
 ### Rules for any new provider
 
 - **Construct from config**: `Provider(config)`; read endpoints/profiles from it,
@@ -455,7 +591,9 @@ CLI), use `kind="cli-bridge"` and override `install_dispatch_override` using
 - **Lazy-import** heavy/optional dependencies inside methods so core import stays
   light, and guard the registering import in `loom/providers/__init__.py`.
 - **Honor the contracts**: an `ExecutionProvider` must return the 5-field
-  `ExecutionResult`; a `SearchProvider` must emit `NodeRecord`s via `on_node` and
-  return a `SearchResult`.
+  `ExecutionResult` (and `run_flow` a `RunResult`); a `SearchProvider` must emit
+  `NodeRecord`s via `on_node` and return a `SearchResult`; a `ModelBuilderProvider`
+  must return `ArtifactRef`/`Scores` (pathspecs, never files) and pass the
+  conformance suite.
 - **Stay domain-neutral**: never fit a provider to a specific customer, dataset,
   or vertical.
