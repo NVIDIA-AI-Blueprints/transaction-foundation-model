@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import uuid
 from typing import Sequence
@@ -138,6 +139,76 @@ def _build_config(args: argparse.Namespace) -> LoomConfig:
     return LoomConfig.load(yaml_path=args.config, overrides=overrides)
 
 
+# Substrings that suggest an exception is really a missing/invalid LLM credential.
+_AUTH_ERROR_MARKERS = (
+    "api_key",
+    "auth",
+    "authentication",
+    "credential",
+    "unauthorized",
+    "401",
+)
+
+
+def _required_credential(model: str, has_base_url: bool) -> tuple[str, str]:
+    """Best-effort guess of the env var an AIDE model route needs.
+
+    Mirrors AIDE's model-name-based provider routing so the CLI can fail fast
+    with an actionable message instead of a deep backend traceback.
+
+    Args:
+        model: The configured model name (e.g. ``"claude-sonnet-4-5"``).
+        has_base_url: Whether ``OPENAI_BASE_URL`` is set (an OpenAI-compatible
+            endpoint such as an NVIDIA NIM).
+
+    Returns:
+        ``(env_var, why)`` naming the credential that route most likely needs.
+    """
+    m = (model or "").lower()
+    if m.startswith("claude") or m.startswith("anthropic"):
+        return "ANTHROPIC_API_KEY", "Claude models read ANTHROPIC_API_KEY"
+    if m.startswith("gpt-") or m.startswith("codex") or re.match(r"o\d", m):
+        return "OPENAI_API_KEY", "OpenAI models read OPENAI_API_KEY"
+    if has_base_url:
+        return (
+            "OPENAI_API_KEY",
+            "an OpenAI-compatible endpoint (OPENAI_BASE_URL) reads OPENAI_API_KEY",
+        )
+    return "OPENROUTER_API_KEY", "models routed via OpenRouter read OPENROUTER_API_KEY"
+
+
+def _llm_preflight(config: LoomConfig) -> list[str]:
+    """Return hints for any missing LLM credentials for the configured models.
+
+    The search brain calls an LLM to write solutions, so a run cannot succeed
+    without a credential for the configured model(s). Best-effort (mirrors
+    AIDE's routing): an empty list means no obvious problem.
+
+    Args:
+        config: The resolved Loom configuration.
+
+    Returns:
+        One hint string per missing credential (empty if all appear set).
+    """
+    has_base_url = bool(os.environ.get("OPENAI_BASE_URL"))
+    hints: list[str] = []
+    seen: set[str] = set()
+    for model in (config.code_model, config.feedback_model):
+        env_var, why = _required_credential(model, has_base_url)
+        if env_var in seen:
+            continue
+        seen.add(env_var)
+        if not os.environ.get(env_var):
+            hints.append(f"{env_var} is not set ({why}; model '{model}')")
+    return hints
+
+
+def _looks_like_auth_error(exc: BaseException) -> bool:
+    """Heuristic: does ``exc`` look like a missing/invalid LLM credential?"""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in _AUTH_ERROR_MARKERS)
+
+
 def _format_metric(value: object) -> str:
     """Render a metric value for display, tolerating ``None``/non-floats."""
     if value is None:
@@ -192,6 +263,29 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 2
 
     config = _build_config(args)
+
+    # Pre-flight: the search brain needs an LLM credential. Fail fast with an
+    # actionable message rather than a deep backend traceback at the first call.
+    cred_hints = _llm_preflight(config)
+    if cred_hints:
+        print(
+            "error: no LLM credential found for the configured model(s):",
+            file=sys.stderr,
+        )
+        for hint in cred_hints:
+            print(f"  - {hint}", file=sys.stderr)
+        print(
+            "\nLoom's search brain (AIDE) calls an LLM to write solutions. "
+            "Set a key and re-run, e.g.:\n"
+            "  export ANTHROPIC_API_KEY=...                       # Claude (default)\n"
+            "  # or an OpenAI-compatible / NVIDIA NIM endpoint:\n"
+            "  export OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1\n"
+            "  export OPENAI_API_KEY=...\n"
+            "See the README 'Configuration' section.",
+            file=sys.stderr,
+        )
+        return 2
+
     experiment_id = args.experiment_id or f"loom-{uuid.uuid4().hex[:12]}"
 
     task = Task(
@@ -208,7 +302,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
         f"steps={config.budget.steps})..."
     )
 
-    result = run_loom(task, config)
+    try:
+        result = run_loom(task, config)
+    except Exception as exc:  # noqa: BLE001 - translate to an actionable message
+        if _looks_like_auth_error(exc):
+            print(
+                f"\nerror: the LLM call failed with what looks like an "
+                f"authentication problem:\n  {type(exc).__name__}: {exc}\n"
+                "Check that the API key for your configured model is set and "
+                "valid (see the README 'Configuration' section).",
+                file=sys.stderr,
+            )
+            return 1
+        raise
 
     # Read the leaderboard from the execution provider (best-effort). Resolving
     # the provider class again and instantiating it from config is cheap and

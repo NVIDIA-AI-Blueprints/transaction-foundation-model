@@ -16,3 +16,7 @@ dist/
 data/
 runs/
 corpus/*.jsonl
+
+# Generated task inputs (recreated by each task's prepare_data.py)
+tasks/*/input/
+logs/
