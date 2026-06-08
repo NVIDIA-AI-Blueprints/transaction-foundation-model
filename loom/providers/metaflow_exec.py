@@ -251,6 +251,11 @@ class MetaflowExecutionProvider(ExecutionProvider):
                 leaderboard.append(
                     {
                         "run_id": run.pathspec,
+                        # ``pathspec`` is the canonical Metaflow identifier; we
+                        # alias it alongside ``run_id`` so the CLI leaderboard
+                        # renderer (which prefers a ``pathspec``/``run_id`` for
+                        # the Metaflow row shape) finds it under either key.
+                        "pathspec": run.pathspec,
                         "experiment_id": experiment_id,
                         "successful": ok,
                         "submission_ok": submission_ok,

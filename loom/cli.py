@@ -305,6 +305,20 @@ def _judge_preflight(config: LoomConfig) -> Optional[str]:
     if route.judge_capable:
         return None
 
+    # OpenRouter routes through AIDE's OpenAI-compatible backend only for
+    # non-reserved (provider/model) slugs; a bad-shaped feedback slug is a
+    # distinct failure mode from "model lacks tool calling", so surface the
+    # provider's precise shape message when that is the cause.
+    if config.feedback_provider == "openrouter":
+        try:
+            from loom.providers.model.openrouter import feedback_slug_shape_error
+
+            shape_error = feedback_slug_shape_error(config.feedback_model)
+        except Exception:  # noqa: BLE001 - fall back to the generic message below
+            shape_error = None
+        if shape_error is not None:
+            return f"the feedback provider 'openrouter' cannot run the judge: {shape_error}"
+
     hint = (
         f"the feedback provider {config.feedback_provider!r} resolves to a route "
         f"that cannot run the judge (model {route.model_name!r} lacks tool "
@@ -334,6 +348,56 @@ def _format_metric(value: object) -> str:
     return str(value)
 
 
+def _format_leaderboard_row(rank: int, row: dict) -> str:
+    """Render one leaderboard row, tolerating both provider row shapes.
+
+    Different execution providers emit differently-shaped run dicts and the CLI
+    must render either without hard-coding one provider's keys:
+
+    * the ``local`` provider (Loom corpus) emits AIDE-node rows with ``metric`` /
+      ``node_id`` / ``stage`` (the search-native shape);
+    * the ``metaflow`` provider emits Metaflow run rows with ``run_id`` (a
+      pathspec) / ``submission_ok`` / ``exec_time`` / ``exc_type`` and no metric
+      (the flow records execution outcome, not a scored search metric).
+
+    A row is treated as the search shape when it carries a ``metric``,
+    ``node_id``, or ``stage`` key; otherwise it is rendered as a Metaflow run row
+    (pathspec + submission flag + exec time). This avoids the old "metric=n/a
+    node=?" output for ``--mlops metaflow`` while keeping the local leaderboard
+    unchanged.
+
+    Args:
+        rank: 1-based display rank.
+        row: One run dict from an execution provider's ``runs()``.
+
+    Returns:
+        A single formatted leaderboard line (no trailing newline).
+    """
+    prefix = f"  {rank:>2}. "
+
+    # Search-native shape (local provider / AIDE corpus): prefer metric/node/stage.
+    if "metric" in row or "node_id" in row or "stage" in row:
+        metric = _format_metric(row.get("metric"))
+        node_id = row.get("node_id", row.get("id", "?"))
+        stage = row.get("stage", "")
+        suffix = f"  [{stage}]" if stage else ""
+        return f"{prefix}metric={metric}  node={node_id}{suffix}"
+
+    # Metaflow run shape: a pathspec + submission flag + exec time. There is no
+    # scored metric here, so report the run's execution outcome instead.
+    pathspec = row.get("run_id", row.get("pathspec", "?"))
+    submission_ok = bool(row.get("submission_ok", False))
+    exec_time = row.get("exec_time")
+    sub = "ok" if submission_ok else "no"
+    parts = [f"{prefix}run={pathspec}", f"submission={sub}"]
+    if isinstance(exec_time, (int, float)):
+        parts.append(f"exec_time={float(exec_time):.6g}s")
+    exc_type = row.get("exc_type")
+    if exc_type:
+        parts.append(f"exc={exc_type}")
+    return "  ".join(parts)
+
+
 def _print_result(result: SearchResult, leaderboard: list[dict]) -> None:
     """Print the best metric, artifact paths, and a short leaderboard.
 
@@ -357,11 +421,7 @@ def _print_result(result: SearchResult, leaderboard: list[dict]) -> None:
         print("")
         print(f"Leaderboard (top {min(_LEADERBOARD_LIMIT, len(leaderboard))}):")
         for rank, row in enumerate(leaderboard[:_LEADERBOARD_LIMIT], start=1):
-            metric = _format_metric(row.get("metric"))
-            node_id = row.get("node_id", row.get("id", "?"))
-            stage = row.get("stage", "")
-            suffix = f"  [{stage}]" if stage else ""
-            print(f"  {rank:>2}. metric={metric}  node={node_id}{suffix}")
+            print(_format_leaderboard_row(rank, row))
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:

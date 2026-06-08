@@ -74,6 +74,12 @@ class LoomConfig:
         budget: Search budget knobs (see :class:`BudgetConfig`).
         corpus_path: Path to the JSONL corpus the controller appends node
             records to.
+        learnings_path: Path to the JSONL learnings flywheel the controller
+            appends one command-level rollout record to per run. This is the
+            command-level rollup (one row per ``run_loom`` call) that sits above
+            the per-node ``corpus_path`` capture; both are anchored absolute at
+            load time so they survive a provider ``chdir`` into an ephemeral
+            workspace.
         tenant: Logical tenant this config runs under.
         owned_by: IP owner tag applied to corpus records. ``"general"`` marks
             records as usable by a cross-tenant moat model; any other value
@@ -91,6 +97,7 @@ class LoomConfig:
     model_base_url: str | None = None
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     corpus_path: str = "corpus/nodes.jsonl"
+    learnings_path: str = "learnings/rollouts.jsonl"
     tenant: str = "default"
     owned_by: str = "general"
 
@@ -152,6 +159,13 @@ class LoomConfig:
         if cfg.corpus_path and not os.path.isabs(cfg.corpus_path):
             cfg = replace(cfg, corpus_path=os.path.abspath(cfg.corpus_path))
 
+        # Anchor the learnings path absolute for the same reason as corpus_path:
+        # the controller appends the command-level rollout AFTER the execution
+        # provider has chdir'd into (and will tear down) its ephemeral workspace,
+        # so a relative path would write the moat fuel into the doomed workspace.
+        if cfg.learnings_path and not os.path.isabs(cfg.learnings_path):
+            cfg = replace(cfg, learnings_path=os.path.abspath(cfg.learnings_path))
+
         return cfg
 
     @staticmethod
@@ -199,6 +213,8 @@ class LoomConfig:
             out["model_base_url"] = v
         if (v := env.get("LOOM_CORPUS_PATH")) is not None:
             out["corpus_path"] = v
+        if (v := env.get("LOOM_LEARNINGS_PATH")) is not None:
+            out["learnings_path"] = v
         if (v := env.get("LOOM_TENANT")) is not None:
             out["tenant"] = v
         if (v := env.get("LOOM_OWNED_BY")) is not None:

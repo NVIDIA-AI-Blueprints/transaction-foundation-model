@@ -13,11 +13,17 @@ Model names come from config in provider/model slug form, e.g.
 ``"anthropic/claude-sonnet-4.5"`` — a non-reserved slug so ``determine_provider``
 falls through to the OPENAI_BASE_URL branch rather than matching ``gpt-``/``claude-``.
 
-Feedback (judge) capability is **per-slug**: not every OpenRouter model supports
-tool calling. :func:`feedback_slug_supports_tools` best-effort validates the
-feedback slug against OpenRouter's ``/models?supported_parameters=tools`` listing,
-caching the result and skipping gracefully when offline (assuming capable, but the
-preflight warns). The code role is assumed capable.
+Feedback (judge) capability is **per-slug** and has two gates. First a **shape
+guard** (:func:`feedback_slug_shape_error`): the feedback slug must be in
+``provider/model`` form (contain a ``"/"``) so it does not collide with AIDE's
+reserved ``gpt-``/``claude-``/``gemini-`` regexes — a bare slug would route to a
+native backend (or the func_spec-less dedicated openrouter backend) and crash the
+judge, so we fail fast. Second a **tool-support check**
+(:func:`feedback_slug_supports_tools`): not every OpenRouter model supports tool
+calling, so this best-effort validates the slug against OpenRouter's
+``/models?supported_parameters=tools`` listing, caching the result and skipping
+gracefully when offline (assuming capable, but the preflight warns). The code role
+is assumed capable.
 
 Optional attribution headers (``HTTP-Referer`` / ``X-Title``) are recorded on the
 route for completeness but NOT injected — injecting them needs a dispatch override
@@ -94,6 +100,47 @@ def feedback_slug_supports_tools(slug: str) -> Optional[bool]:
     return slug in capable
 
 
+def feedback_slug_shape_error(slug: str) -> Optional[str]:
+    """Return a fail-fast message if ``slug`` is not a routable OpenRouter slug.
+
+    OpenRouter is reached through AIDE's *OpenAI-compatible* backend, which only
+    engages when the model name is **not** one of AIDE's reserved prefixes
+    (``gpt-`` / ``o<N>`` -> openai, ``claude-`` -> anthropic, ``gemini-`` ->
+    gemini). A bare ``claude-...`` or ``gpt-...`` feedback slug would therefore be
+    routed to the *native* backend (and AIDE's dedicated openrouter backend
+    raises ``NotImplementedError`` for the judge's ``func_spec``), so the judge
+    would crash mid-run. Every real OpenRouter id is ``provider/model`` form, so
+    we require a ``"/"`` to guarantee the slug routes through the
+    ``OPENAI_BASE_URL`` diversion and does not collide with the reserved regexes.
+
+    Args:
+        slug: The configured feedback model slug.
+
+    Returns:
+        An actionable error string if the slug cannot serve as an OpenRouter
+        feedback route, else ``None``.
+    """
+    cleaned = (slug or "").strip()
+    if not cleaned:
+        return (
+            "no OpenRouter feedback model slug is configured. Set a tool-capable "
+            "provider/model slug (e.g. 'anthropic/claude-sonnet-4.5'); the judge "
+            "(submit_review) requires a tool-capable model."
+        )
+    if "/" not in cleaned:
+        return (
+            f"OpenRouter feedback slug {cleaned!r} is not in provider/model form. "
+            "OpenRouter routes through AIDE's OpenAI-compatible backend, which "
+            "only engages for non-reserved model names; a bare 'gpt-'/'claude-'/"
+            "'gemini-' slug instead collides with AIDE's native-backend regex and "
+            "the judge would crash. Use the full 'provider/model' slug (must "
+            "contain '/'), e.g. 'anthropic/claude-sonnet-4.5', and ensure it is "
+            "tool-capable (see "
+            "https://openrouter.ai/models?supported_parameters=tools)."
+        )
+    return None
+
+
 @register_model("openrouter")
 class OpenRouterModelProvider(ModelProvider):
     """OpenRouter via AIDE's OpenAI backend (OpenAI-compatible chat completions).
@@ -137,10 +184,18 @@ class OpenRouterModelProvider(ModelProvider):
 
         judge_capable = True
         if role == "feedback":
-            supported = feedback_slug_supports_tools(model)
-            # Assume capable if the check could not run (None); only mark False on
-            # a definitive negative.
-            judge_capable = supported is not False
+            # Shape guard first: a non-provider/model slug would mis-route to a
+            # native AIDE backend (or the func_spec-less openrouter backend) and
+            # crash the judge, so treat it as not judge-capable regardless of the
+            # tool-support listing. The CLI judge pre-flight then fails fast with
+            # the precise message from :func:`feedback_slug_shape_error`.
+            if feedback_slug_shape_error(model) is not None:
+                judge_capable = False
+            else:
+                supported = feedback_slug_supports_tools(model)
+                # Assume capable if the check could not run (None); only mark
+                # False on a definitive negative.
+                judge_capable = supported is not False
 
         # Attribution headers are recorded but NOT injected (needs a dispatch
         # override; left as polish). Drawn from env only if the user set them.
@@ -196,7 +251,14 @@ class OpenRouterModelProvider(ModelProvider):
             )
 
         if role == "feedback":
-            slug = self.resolve("feedback").model_name
+            slug = self.config.feedback_model
+            # Shape guard first: a slug that cannot route through the
+            # OpenAI-compatible diversion is unconditionally wrong for the judge,
+            # so surface that before the (network) tool-support check.
+            shape_error = feedback_slug_shape_error(slug)
+            if shape_error is not None:
+                hints.append(shape_error)
+                return hints
             supported = feedback_slug_supports_tools(slug)
             if supported is False:
                 hints.append(
@@ -214,4 +276,8 @@ class OpenRouterModelProvider(ModelProvider):
         return hints
 
 
-__all__ = ["OpenRouterModelProvider", "feedback_slug_supports_tools"]
+__all__ = [
+    "OpenRouterModelProvider",
+    "feedback_slug_supports_tools",
+    "feedback_slug_shape_error",
+]

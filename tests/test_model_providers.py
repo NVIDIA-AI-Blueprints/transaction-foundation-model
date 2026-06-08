@@ -529,6 +529,85 @@ def test_openrouter_feedback_judge_capable_reflects_tool_check(
 
 
 # ---------------------------------------------------------------------------
+# OpenRouter feedback-slug shape guard (must be provider/model form).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_slug",
+    ["claude-sonnet-4-5", "gpt-4o", "gemini-1.5-pro", "o3", "local-model", ""],
+)
+def test_openrouter_shape_error_on_non_slug(bad_slug: str) -> None:
+    """A bare (non provider/model) feedback slug yields an actionable shape error."""
+    import loom.providers.model.openrouter as orouter
+
+    err = orouter.feedback_slug_shape_error(bad_slug)
+    assert err is not None
+    # Actionable: mentions the provider/model requirement (or that it's missing).
+    assert "provider/model" in err or "configured" in err
+
+
+@pytest.mark.parametrize(
+    "good_slug",
+    ["anthropic/claude-sonnet-4.5", "openai/gpt-4o", "meta-llama/llama-3.1-70b"],
+)
+def test_openrouter_shape_ok_on_provider_model_slug(good_slug: str) -> None:
+    """A proper provider/model slug passes the shape guard (no error)."""
+    import loom.providers.model.openrouter as orouter
+
+    assert orouter.feedback_slug_shape_error(good_slug) is None
+
+
+def test_openrouter_bare_feedback_slug_is_not_judge_capable(clean_env: None) -> None:
+    """A bare 'claude-' feedback slug routes to native AIDE -> not judge-capable.
+
+    This is the collision the guard prevents: AIDE's name-based routing would send
+    'claude-...' to the native anthropic backend instead of the OpenAI-compatible
+    OpenRouter diversion, so the slug can never serve the OpenRouter judge.
+    """
+    cfg = LoomConfig(
+        code_provider="openrouter",
+        feedback_provider="openrouter",
+        code_model="anthropic/claude-sonnet-4.5",
+        feedback_model="claude-sonnet-4-5",  # bare reserved-prefix slug, no "/"
+    )
+    route = get_model("openrouter")(cfg).resolve("feedback")
+    assert route.judge_capable is False
+
+
+def test_openrouter_preflight_flags_bare_feedback_slug(
+    monkeypatch: pytest.MonkeyPatch, clean_env: None
+) -> None:
+    """preflight surfaces the shape error for a bare feedback slug (and only that)."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-fake")  # silence the key hint
+    provider = _provider(
+        "openrouter",
+        code_model="anthropic/claude-sonnet-4.5",
+        feedback_model="gpt-4o",  # bare reserved-prefix slug, no "/"
+    )
+    hints = provider.preflight("feedback")
+    assert _mentions(hints, "provider/model")
+    # The shape error short-circuits the (network) tool-support warning.
+    assert not _mentions(hints, "supports tool calling")
+
+
+def test_openrouter_preflight_clean_with_good_feedback_slug(
+    monkeypatch: pytest.MonkeyPatch, clean_env: None
+) -> None:
+    """A proper, tool-capable feedback slug clears the OpenRouter feedback preflight."""
+    import loom.providers.model.openrouter as orouter
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-fake")
+    monkeypatch.setattr(orouter, "feedback_slug_supports_tools", lambda _slug: True)
+    provider = _provider(
+        "openrouter",
+        code_model="anthropic/claude-sonnet-4.5",
+        feedback_model="anthropic/claude-sonnet-4.5",
+    )
+    assert provider.preflight("feedback") == []
+
+
+# ---------------------------------------------------------------------------
 # AIDE-dependent surface: only the dispatch override genuinely needs AIDE.
 # ---------------------------------------------------------------------------
 

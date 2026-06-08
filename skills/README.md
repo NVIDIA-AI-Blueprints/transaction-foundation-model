@@ -6,12 +6,36 @@ human-facing front door to it — they plan, gate on cost/data, invoke the `loom
 CLI, and narrate results. They do not reimplement any engine logic; they call the
 same `loom run` entrypoint a human would.
 
-## Skills
+## Authoring a new verb
 
-| Skill | What it does | Reach for it when |
-| --- | --- | --- |
-| [`loom-eda`](loom-eda/SKILL.md) | Quick, **read-only** data profile — shape, dtypes, missingness, target balance, leakage smells — and suggested goal/metric phrasing. | You point at a dataset and ask "what's in here?" / "is this ready for Loom?" |
-| [`loom-optimize`](loom-optimize/SKILL.md) | Metric-is-the-spec entry → plan → **approval gate (cost/data)** → invoke `loom run` → narrate best metric + leaderboard. | You want Loom to optimize solution code against a measurable metric. |
+Every `/loom-*` verb is a Claude Code `SKILL.md`. Author one from
+[`_TEMPLATE/SKILL.md`](_TEMPLATE/SKILL.md) (the canonical template +
+its 7-point acceptance test) and obey [`CONVENTIONS.md`](CONVENTIONS.md) (the
+cost/data approval matrix, the provider-interface discipline, no-S3, learnings
+capture). These are repo invariants — see the root [`CLAUDE.md`](../CLAUDE.md).
+
+## Command catalog (design-spec §3)
+
+The flat, hyphenated lifecycle surface. **Built** verbs ship in this pack today;
+**roadmap** verbs are designed (design-spec §3, build order §6) and not yet
+implemented. The default search brain is AIDE (behind `loom-optimize` only); the
+default MLOps muscle is Metaflow.
+
+| Verb | Status | What it does | Reach for it when |
+| --- | --- | --- | --- |
+| [`loom-setup-metaflow`](loom-setup-metaflow/) | **roadmap** (in progress) | Install the verified minikube + minio + Metaflow recipe so the MLOps interface has a backend. | You need to stand up Loom's local MLOps stack. |
+| [`loom-eda`](loom-eda/SKILL.md) | **built** | Quick, **read-only** data profile — shape, dtypes, missingness, target balance, leakage smells — and suggested goal/metric phrasing. | You point at a dataset and ask "what's in here?" / "is this ready for Loom?" |
+| `loom-connect` | roadmap | Data access — connect to / ingest a source into a data object by pathspec (the #1 daily DS pain). | You need to point Loom at warehouse/file data and get a `dataset_ref`. |
+| `loom-features` | roadmap | Build features into a versioned feature set; gated by `loom-eda`'s leakage flags. | You want engineered features as a reusable, lineage-grounded artifact. |
+| `loom-pipeline` | roadmap | Author/run the multi-stage DS pipeline (the recipe primitive; *is* a Metaflow `FlowSpec`). | You want a reproducible ingest→clean→feature→train→eval DAG. |
+| [`loom-optimize`](loom-optimize/SKILL.md) (AIDE) | **built** | Metric-is-the-spec entry → plan → **approval gate (cost/data)** → invoke `loom run` → narrate best metric + leaderboard. | You want Loom to optimize solution code against a measurable metric. |
+| `loom-validate` | roadmap | Validate a model against held-out metric/thresholds; emits a typed report with a `VERDICT` that blocks `loom-deploy` if sub-threshold. | You want to check a candidate is good enough before promotion. |
+| `loom-viz` | roadmap | Read-only charts/plots grounded in a run's artifacts. | You want a visual of a dataset/result, source-grounded to a pathspec. |
+| `loom-report` | roadmap | Narrative report / `@card` summarizing a run, lineage-grounded. | You want a shareable write-up of what Loom did and why. |
+| `loom-deploy` | roadmap | Promote/serve a model — **irreversible/external**, always gated, never model-auto-invoked. | You want to ship a validated model to serving. |
+| `loom-ops` | roadmap | Inspect/monitor running and past runs (jobs, status), killable; reads are free. | You want to see what's running or revisit a prior run. |
+| `loom-collab` | roadmap | Collaboration / handoff around runs and cards. | You want to share or hand off a run to a teammate. |
+| `loom-auto` | roadmap | Meta-skill: the one-command happy path (EDA→features→baseline→validate), surfacing only taste decisions. | You want the standard chain without memorizing the verbs. |
 
 ## Typical flow
 
@@ -24,9 +48,9 @@ same `loom run` entrypoint a human would.
 
 ## Interface (v0.1)
 
-Both skills are plain Claude-Code `SKILL.md` files: YAML frontmatter
-(`name` + `description`) followed by markdown instructions. They shell out to the
-project's CLI:
+Each verb is a plain Claude-Code `SKILL.md` file: YAML frontmatter
+(`name` + `description` + `when_to_use`) followed by markdown instructions. They
+shell out to the project's CLI (never importing a concrete backend):
 
 ```bash
 loom run --data DIR --goal STR --metric STR [--steps N] [--mlops metaflow|local] [--search aide]
@@ -39,10 +63,22 @@ for the engine and provider model.
 
 ## Conventions
 
-- **Domain-neutral.** No customer-, vertical-, or pricing-specific content — that
-  strategy lives elsewhere, never in this repo.
-- **Cost/data is gated.** A run spends model tokens and compute and reads real
-  data, so `loom-optimize` requires explicit user approval before it invokes the
-  CLI. Prefer the cheap path first (`--mlops local`, small `--steps`).
+The full rules every verb obeys live in [`CONVENTIONS.md`](CONVENTIONS.md) (the
+cost/data approval matrix, provider-interface discipline, no-S3, lineage +
+mandated artifact, learnings capture). The headlines:
+
+- **Speak the interface, not the backend.** Verbs call Loom's MLOps/search
+  interface (via the `loom` CLI, which resolves providers by name) — never
+  Metaflow/AIDE directly and never raw S3. MLOps default Metaflow, search default
+  AIDE; both swappable by config.
+- **Cost/data is gated by tier.** Read-only never prompts; workspace-write is
+  light/auto within a budget; expensive/mutate always gates; irreversible/external
+  always gates and is never model-auto-invoked. Prefer the cheap path first
+  (`--mlops local`, small `--steps`).
+- **Mandated artifact.** Every run returns a versioned Metaflow run + `@card` + a
+  typed-JSON summary, lineage-grounded by a Verifier step, and appends a sanitized
+  row to the flywheel corpus (`learnings/rollouts.jsonl`).
 - **Secrets via env only.** Keys/endpoints come from `.env`/environment; skills
   never print or pass key material.
+- **Domain-neutral.** No customer-, vertical-, or pricing-specific content — that
+  strategy lives elsewhere, never in this repo.

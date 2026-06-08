@@ -50,6 +50,28 @@ and pricing strategy live elsewhere and must never be added here.
   by a specific tenant are tagged, and only `owned_by == "general"` records may
   feed a cross-tenant model (`Corpus.general()`). Preserve this boundary.
 
+## Authoring a `/loom-*` skill — invariants
+- The `/loom-*` command surface lives in `skills/`. Anyone authoring or editing a
+  verb **must** follow [`skills/CONVENTIONS.md`](skills/CONVENTIONS.md) and start
+  from [`skills/_TEMPLATE/SKILL.md`](skills/_TEMPLATE/SKILL.md) (the canonical
+  template + its 7-point acceptance test). These are hard constraints, restating
+  this repo's invariants at the skill layer:
+  - **Speak Loom's provider interfaces, never a concrete backend.** A verb calls
+    the MLOps/search interface (in v0.1, via the `loom` CLI, which resolves
+    providers by name) — never Metaflow or AIDE directly, and **never raw S3**
+    (Client API + Artifacts only). MLOps default is Metaflow, search default is
+    AIDE; both stay swappable by config.
+  - **Cost/data is gated by tier** (read-only never prompts · workspace-write
+    light/auto · expensive+mutate always gate · irreversible/external always gate
+    **and** `disable-model-invocation: true`). Enforce in the client/hook layer,
+    not prose. Every autonomous loop carries a declared budget; cap outputs ~25k
+    tokens, spill larger to an Artifact.
+  - **Mandated artifact:** a versioned Metaflow run + `@card` + a typed-JSON
+    summary, lineage-grounded by a Verifier step (pathspec + data fingerprint +
+    commit). Every run appends a sanitized row to the flywheel corpus
+    (`learnings/rollouts.jsonl`) — the moat compounds from run #1.
+  - **Secrets via env only**; domain-neutral; single free-text arg; dual-invocation.
+
 ## Conventions
 - Python ≥ 3.10, type hints, docstrings, idiomatic style.
 - The vendored interpreter (`loom/providers/_interpreter.py`) is the single
