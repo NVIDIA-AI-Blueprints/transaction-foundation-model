@@ -100,6 +100,17 @@ OPS_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "ops.py")
 #: Build = workspace-write; send = irreversible/external.
 COLLAB_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "collab.py")
 
+#: Absolute path to the model-training flow file. ``loom train`` runs this through
+#: the MLOps interface's ``run_flow`` seam to build a model through the
+#: :class:`~loom.providers.ModelBuilderProvider` seam (the ``local`` PPMI+SVD
+#: stand-in / the ``nemo`` lowering compiler, resolved by config). It is the
+#: EXPENSIVE/MUTATE, ALWAYS-GATE tier: ``pretrain`` is manifest-typed
+#: ``launch-and-track`` (AIDE never tree-searches it), the cost PLAN (hours/$/GPU-
+#: count) is surfaced at the gate, and the real heavy GPU launch is OFF by default
+#: behind ``launch`` (the ``DeployFlow.apply`` posture), refusing cleanly when
+#: ``gpu_target`` is unset.
+TRAIN_FLOW_PATH: str = os.path.join(_FLOWS_DIR, "train.py")
+
 __all__ = [
     "EVAL_CANDIDATE_FLOW_PATH",
     "INGEST_DATASET_FLOW_PATH",
@@ -112,4 +123,5 @@ __all__ = [
     "DEPLOY_FLOW_PATH",
     "OPS_FLOW_PATH",
     "COLLAB_FLOW_PATH",
+    "TRAIN_FLOW_PATH",
 ]

@@ -26,6 +26,19 @@ dependencies = [
     "python-dotenv",
 ]
 
+# Optional extras.
+#
+# ``model-local`` is the opt-in torch GRU fidelity mode for the ``local``
+# model-builder adapter (design §3.8). It is NEVER a default dependency: the
+# default / conformance / CI path is torch-free (the numpy PPMI+TruncatedSVD
+# backbone), and ``torch`` only enters via this explicit extra + a guarded lazy
+# import that falls back to the numpy path on ``ImportError``. Keeping it out of
+# the core ``dependencies`` is load-bearing — the conformance suite shape-locks
+# both backends and runs on the torch-free default so dev (torch present
+# transitively via aideml) and CI (torch absent) cannot silently diverge.
+[project.optional-dependencies]
+model-local = ["torch>=2.0"]
+
 [project.scripts]
 loom = "loom.cli:main"
 

@@ -28,6 +28,7 @@ default MLOps muscle is Metaflow.
 | [`loom-eda`](loom-eda/SKILL.md) | **built** | **Read-only** profile of a data object **through the MLOps interface** (`loom eda`) — shape, dtypes, missingness, target balance, top correlations, leakage flags — emitting a Metaflow run + `@card`, plus suggested goal/metric phrasing. | You point at a `dataset_ref` and ask "what's in here?" / "is this ready for Loom?" / "check for leakage". |
 | [`loom-features`](loom-features/SKILL.md) | **built** | **Workspace-write** feature engineering **through the MLOps interface** (`loom features`) — domain-neutral transforms (scaling/interactions, encoding, datetime parts, aggregations) built into a **NEW** versioned data object (`FeaturesFlow/<id>`) every downstream verb consumes via `--dataset`; composes with `loom-eda` via `--from` (its leakage-flagged columns are dropped). Reads the source read-only, writes only its own workspace. | You want engineered features as a reusable, lineage-grounded data object. |
 | [`loom-pipeline`](loom-pipeline/SKILL.md) | **built** | **Workspace-write → escalates to expensive** end-to-end lifecycle **through the MLOps interface** (`loom pipeline`) — profile → features → a bounded candidate/optimize step → validate chained into ONE gated Metaflow run; each stage asserts the prior stage's `VERDICT` (leakage blocks features; a sub-threshold validate marks the run FAIL). The optimize stage is the bounded EXPENSIVE step. | You want a reproducible, gated ingest→feature→train→eval run in one shot. |
+| [`loom-train`](loom-train/SKILL.md) | **built** | **Expensive/mutate → escalates to irreversible/external** model build **through the MLOps interface** (`loom train`) over the third heavy backend (the `ModelBuilderProvider` seam) — stated in DS-intent vocabulary (objective/budget/backbone/metric); the adapter hides ALL backend vocabulary (you never name NeMo / a GPU-count / a checkpoint). `pretrain` is launch-and-track (AIDE never tree-searches it). The cost PLAN (hours/$/GPU-count) is surfaced at the gate; the real GPU launch is behind `--launch` (OFF by default) and refuses cleanly with no GPU target. The torch-free CPU `local` adapter actually builds a backbone + `IngestDataset`-shaped embeddings; the default `nemo` adapter plans it. Always gated; `disable-model-invocation: true`. | You want to pretrain a backbone, embed via a frozen backbone, or fine-tune a cheap head — build the model the lifecycle needs. |
 | [`loom-optimize`](loom-optimize/SKILL.md) (AIDE) | **built** | Metric-is-the-spec entry → plan → **approval gate (cost/data)** → invoke `loom run` → narrate best metric + leaderboard. | You want Loom to optimize solution code against a measurable metric. |
 | [`loom-validate`](loom-validate/SKILL.md) | **built** | **Workspace-write** rigorous validation of a baseline/solution against a data object **through the MLOps interface** (`loom validate`) — sealed holdout distinct from a stratified/purged K-fold CV, probability calibration (curve + Brier), per-slice / fairness metrics, and leakage flags — emitting a Metaflow run + `@card` with a `VERDICT` that blocks `loom-deploy` if sub-threshold/leaky. | You want to check a candidate is good enough before promotion. |
 | [`loom-viz`](loom-viz/SKILL.md) | **built** | **Read-only** charts/plots **through the MLOps interface** (`loom viz`) — feature distributions, correlation heatmap, target-vs-feature from a data object, or metric-over-nodes / leaderboard from a run — emitted as `@card` images. | You want a visual of a dataset/result, source-grounded to a pathspec. |
@@ -62,6 +63,7 @@ loom datasets                                # loom-connect: list ingested data 
 loom eda --dataset PATHSPEC [--target COL]   # loom-eda: read-only profile -> run + @card
 loom features --dataset PATHSPEC [--target COL] [--from EDA-RUN] [--recipe minimal|full]  # loom-features: build a NEW feature data object -> run + @card
 loom pipeline --dataset PATHSPEC --goal STR [--target COL]  # loom-pipeline: profile->features->optimize->validate in one gated run -> run + @card
+loom train --dataset PATHSPEC --objective next-event|masked-field|contrastive --budget probe|small|full [--capability pretrain|tokenize|finetune|embed] [--backbone PATHSPEC] [--metric STR] [--launch]  # loom-train: build a model via the model-builder seam -> run + @card (launch OFF by default; refuses with no GPU target)
 loom optimize ...  # via `loom run` (loom-optimize: AIDE tree-search)
 loom validate --dataset PATHSPEC [--target COL] [--solution RUN] [--sensitive COL]  # loom-validate: CV+holdout+calibration+fairness+leakage -> run + @card
 loom deploy (--validate RUN | --solution RUN) [--apply]  # loom-deploy: gate on validate VERDICT==PASS -> deploy PLAN/manifest (apply OFF by default)
@@ -75,10 +77,12 @@ loom run --dataset PATHSPEC --goal STR --metric STR [--steps N] [--mlops metaflo
 **Composition edges (artifact handoff + `--from`/`--validate`/`--run`, machine-checkable exit gates):**
 `loom-eda` leakage flags → `loom-features` (via `--from`, the flagged columns are dropped); a
 `loom-features` data object → `loom-pipeline`/`loom-optimize`/`loom-validate` (via `--dataset`); a
+`loom-train` backbone → `loom-train --capability embed` (via `--backbone`), and its
+`IngestDataset`-shaped embeddings → `loom-validate`/`loom-optimize` (via `--dataset`); a
 `loom-validate` `VERDICT==PASS` → `loom-deploy` (via `--validate`, a sub-threshold validate BLOCKS);
 a `loom-report`/`loom-validate` run → `loom-collab` (via `--run`). Each gate ships an executable
-self-test (deploy BLOCK-on-sub-threshold; pipeline stage-gate ordering; collab send-off + sanitize;
-ops drift; features leakage-drop).
+self-test (train local-lift + nemo no-GPU refusal; deploy BLOCK-on-sub-threshold; pipeline stage-gate
+ordering; collab send-off + sanitize; ops drift; features leakage-drop).
 
 Providers are selected by name (search brain default `aide`; MLOps muscle default
 `metaflow`, with `local` as a Metaflow-free dev path). See the repo

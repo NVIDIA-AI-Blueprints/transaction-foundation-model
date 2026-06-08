@@ -133,9 +133,9 @@ loom run \
   --steps 10 --mlops metaflow
 ```
 
-`loom datasets`, `loom eda`, `loom features`, `loom pipeline`, `loom validate`,
-`loom deploy`, `loom ops`, `loom collab`, `loom report`, and `loom viz` are
-**lifecycle commands** that run *through Loom's MLOps interface*
+`loom datasets`, `loom eda`, `loom features`, `loom pipeline`, `loom train`,
+`loom validate`, `loom deploy`, `loom ops`, `loom collab`, `loom report`, and
+`loom viz` are **lifecycle commands** that run *through Loom's MLOps interface*
 (`ExecutionProvider.run_flow`) rather than the candidate-search path — every
 lifecycle command's output is a **Metaflow run + an `@card`** plus a typed JSON
 summary with a `VERDICT`/status line. Each verb declares an **approval tier**:
@@ -146,6 +146,12 @@ summary with a `VERDICT`/status line. Each verb declares an **approval tier**:
 - **workspace-write → escalates to expensive** at its train/optimize stage:
   **`pipeline`** (the costly optimize stage is held to a declared budget; gate before
   it).
+- **expensive / mutate → escalates to irreversible/external** at the real GPU launch
+  (always gated, never model-auto-invoked): **`train`** — builds a model through the
+  third heavy backend (the `ModelBuilderProvider` seam) stated in DS-intent vocabulary
+  (objective/budget/backbone/metric); the cost PLAN (hours/$/GPU-count) is surfaced at
+  the gate, and the real heavy GPU launch is behind `--launch` (**OFF by default**),
+  refusing cleanly with no GPU target.
 - **irreversible / external** (always gated, the real external action **OFF by
   default**, never model-auto-invoked): **`deploy`** (the real apply is behind
   `--apply`) and **`collab`** (the off-box send is behind `--send`).
@@ -168,6 +174,18 @@ loom features --dataset IngestDataset/123 --target target [--from EdaFlow/7] [--
 # (leakage blocks features; a sub-threshold validate marks the run FAIL). The
 # optimize stage is the bounded EXPENSIVE step — workspace-write that escalates.
 loom pipeline --dataset IngestDataset/123 --goal "<one sentence>" --target target
+
+# Build the model the lifecycle needs through the model-builder seam — EXPENSIVE/MUTATE.
+# Stated in DS-intent vocabulary (objective/budget/backbone/metric); the adapter hides
+# all backend vocabulary (you never name NeMo/a GPU-count/a checkpoint). pretrain is
+# launch-and-track (AIDE never tree-searches it — use loom-optimize for cheap scalars).
+# The cost PLAN (hours/$/GPU-count) is surfaced at the gate; the real GPU launch is OFF
+# by default behind --launch and refuses cleanly with no GPU target. The torch-free CPU
+# `local` adapter actually builds a backbone + IngestDataset-shaped embeddings (a
+# first-class --dataset for the downstream verbs); the default `nemo` adapter plans it.
+loom train --dataset IngestDataset/123 --objective next-event --budget probe   # PLAN / CPU build, NO GPU launch
+loom train --dataset IngestDataset/123 --capability embed --backbone TrainFlow/12   # embed via a frozen backbone
+loom train --dataset IngestDataset/123 --objective next-event --budget full --launch  # real GPU launch (needs a gpu_target)
 
 # Rigorously validate a baseline/solution (CV + a sealed holdout + calibration +
 # fairness when --sensitive is given + leakage flags) — emits a run + @card with a
@@ -207,11 +225,14 @@ loom viz --dataset IngestDataset/123 --kind all     # or: --run EvalCandidate/42
 **Composition + exit gates.** Verbs compose by handing a Metaflow object to the next
 with machine-checkable gates: `loom eda` leakage flags → `loom features` (via
 `--from`, dropped); a `loom features` data object → `loom pipeline`/`loom validate`
-(via `--dataset`); a `loom validate` `VERDICT==PASS` → `loom deploy` (via
+(via `--dataset`); a `loom train` backbone → `loom train --capability embed` (via
+`--backbone`), and its `IngestDataset`-shaped embeddings → `loom validate`/`loom
+optimize` (via `--dataset`); a `loom validate` `VERDICT==PASS` → `loom deploy` (via
 `--validate` — a sub-threshold validate **BLOCKS** the deploy); a run → `loom collab`
-(via `--run`). The two irreversible verbs are **safe by default**: `loom deploy`
-produces a plan unless you pass `--apply` (and the gate must ALLOW), and `loom collab`
-builds only unless you pass `--send`.
+(via `--run`). The safe-by-default verbs gate their costly action: `loom train`
+plans / builds on CPU unless you pass `--launch` (and a GPU target must be set),
+`loom deploy` produces a plan unless you pass `--apply` (and the gate must ALLOW), and
+`loom collab` builds only unless you pass `--send`.
 
 ---
 

@@ -701,6 +701,88 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     collab_parser.set_defaults(func=_cmd_collab)
 
+    train_parser = subparsers.add_parser(
+        "train",
+        help="Build a model through the model-builder seam (gated) -> a run + @card.",
+        description=(
+            "Run the model-training flow to build a model stated in Loom DS-intent "
+            "vocabulary (objective / budget / backbone / metric). The training "
+            "backend (the `local` torch-free PPMI+SVD CPU stand-in, or `nemo` -- a "
+            "lowering compiler) is resolved by config (model_builder_provider); the "
+            "skill speaks the interface and never names a backend. `pretrain` is "
+            "launch-and-track (AIDE never tree-searches it -- use `loom optimize` "
+            "for cheap scalars like tokenization/heads/embeddings). EXPENSIVE/MUTATE "
+            "tier: the cost PLAN (hours / $ / GPU-count for the budget) is surfaced "
+            "at the gate, and the real heavy GPU launch is OFF by default behind "
+            "--launch (the deploy --apply posture); with no GPU target it refuses "
+            "cleanly (REFUSED_NO_GPU_TARGET) without launching. The work executes as "
+            "a Metaflow run through Loom's MLOps interface and produces an @card; "
+            "Loom reads the data only via the Client API and never touches the "
+            "datastore. The `local` adapter actually builds (backbone / "
+            "IngestDataset-shaped embeddings) on CPU; the produced run's pathspec is "
+            "a first-class dataset_ref."
+        ),
+    )
+    train_parser.add_argument(
+        "--dataset",
+        required=True,
+        metavar="PATHSPEC",
+        help=(
+            "Metaflow pathspec of the sequences data object (e.g. IngestDataset/123 "
+            "from `loom ingest`) to build the model from."
+        ),
+    )
+    train_parser.add_argument(
+        "--objective",
+        default=None,
+        metavar="OBJ",
+        help="Pretraining objective: next-event | masked-field | contrastive (default next-event).",
+    )
+    train_parser.add_argument(
+        "--budget",
+        default=None,
+        metavar="BUDGET",
+        help="Training budget: probe | small | full (default probe; physics at the gate).",
+    )
+    train_parser.add_argument(
+        "--capability",
+        default=None,
+        metavar="CAP",
+        help=(
+            "Capability to build (default pretrain): pretrain | tokenize | finetune "
+            "| embed | serve. /loom-train only invokes launch-and-track capabilities; "
+            "a searchable one is redirected to `loom optimize`."
+        ),
+    )
+    train_parser.add_argument(
+        "--backbone",
+        dest="backbone_ref",
+        default=None,
+        metavar="PATHSPEC",
+        help="Pathspec of a frozen backbone for finetune/embed (e.g. TrainFlow/12).",
+    )
+    train_parser.add_argument(
+        "--metric",
+        default=None,
+        metavar="STR",
+        help="Evaluation metric the build is steered toward (default fraud-pr-auc).",
+    )
+    train_parser.add_argument(
+        "--launch",
+        action="store_true",
+        help=(
+            "Perform the real heavy GPU launch (OFF by default; needs a configured "
+            "gpu_target -- with none it refuses cleanly without launching)."
+        ),
+    )
+    train_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    train_parser.set_defaults(func=_cmd_train)
+
     datasets_parser = subparsers.add_parser(
         "datasets",
         help="List ingested Metaflow data objects (via the Client API).",
@@ -2364,6 +2446,255 @@ def _record_deploy_learning(
                 "deploy BLOCKED by the exit gate: "
                 + "; ".join(gate.get("reasons") or [])
                 if not allowed
+                else None
+            ),
+        )
+        Learnings(config).record(record)
+    except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
+        pass
+
+
+def _print_train_summary(dataset_ref: str, result: object) -> None:
+    """Print a compact training summary + the gate STATUS + the ``@card`` reference.
+
+    Surfaces the headline status line (PLAN / PLANNED / REFUSED_NO_GPU_TARGET /
+    BUILT) the model-builder seam produced, plus the cost PLAN (physics at the
+    gate), the produced artifact pathspec, and -- for the ``local`` adapter -- the
+    backbone/embeddings fingerprint.
+
+    Args:
+        dataset_ref: The data object's pathspec the model was built from.
+        result: The :class:`~loom.types.RunResult` returned by ``run_flow``.
+    """
+    summary = getattr(result, "summary", None) or {}
+    print("Loom train complete.")
+    print(f"  dataset_ref : {dataset_ref}")
+    print(f"  run         : {getattr(result, 'pathspec', None) or 'n/a'}")
+    print(f"  card        : {getattr(result, 'card_path', None) or 'n/a'}")
+
+    if summary:
+        print(
+            f"  backend     : {summary.get('backend')} "
+            f"(model_builder_provider {summary.get('model_builder_provider')})"
+        )
+        print(
+            f"  capability  : {summary.get('capability')} "
+            f"(mode {summary.get('capability_mode')})"
+        )
+        print(
+            f"  objective   : {summary.get('objective')} "
+            f"(budget {summary.get('budget')})"
+        )
+        cost = summary.get("cost") or {}
+        if cost.get("headline"):
+            print(f"  cost (gate) : {cost.get('headline')}")
+        launch = summary.get("launch")
+        print(
+            f"  launch      : {launch} "
+            f"(real GPU launch {'ON' if launch else 'OFF — plan only'}; "
+            f"posture {summary.get('launch_posture')})"
+        )
+        if summary.get("gpu_target") is not None:
+            print(f"  gpu_target  : {summary.get('gpu_target')}")
+        artifact = summary.get("artifact_pathspec")
+        print(f"  artifact    : {artifact or 'none'} ({summary.get('artifact_kind')})")
+        if summary.get("fingerprint"):
+            print(f"  fingerprint : {summary.get('fingerprint')}")
+        if summary.get("error"):
+            print(f"  refused     : {summary.get('error')}")
+        # The headline status line (PLAN / PLANNED / REFUSED_NO_GPU_TARGET / BUILT).
+        print(f"  STATUS      : {summary.get('status', '?')}")
+
+
+def _cmd_train(args: argparse.Namespace) -> int:
+    """Handle ``loom train``: build a model through the MLOps interface (gated).
+
+    Resolves the configured MLOps execution provider, runs the
+    :class:`flows.train.TrainFlow` through its ``run_flow`` seam (never importing a
+    concrete model-builder backend or touching the datastore), prints a training
+    summary + the gate STATUS + the ``@card`` reference, and appends a
+    ``command="train"`` learnings row. Train is the EXPENSIVE/MUTATE, ALWAYS-GATE
+    tier: ``pretrain`` is launch-and-track, the cost PLAN is surfaced at the gate,
+    and the real heavy GPU launch is OFF by default behind ``--launch`` (with no
+    GPU target it refuses cleanly without launching). The training backend is
+    resolved by config (``model_builder_provider``); the CLI speaks the interface.
+
+    Args:
+        args: Parsed arguments for the ``train`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on failure). A clean run that
+        cleanly PLANNED / REFUSED (no GPU target) still returns the run's success
+        code -- the gate status is the correct outcome, surfaced in the summary.
+    """
+    from flows import TRAIN_FLOW_PATH
+
+    config = _build_config(args)
+    dataset_ref = (args.dataset or "").strip()
+    objective = (getattr(args, "objective", None) or "").strip() or "next-event"
+    budget = (getattr(args, "budget", None) or "").strip() or "probe"
+    capability = (getattr(args, "capability", None) or "").strip() or "pretrain"
+    backbone_ref = (getattr(args, "backbone_ref", None) or "").strip() or ""
+    metric = (getattr(args, "metric", None) or "").strip() or "fraud-pr-auc"
+    launch = bool(getattr(args, "launch", False))
+
+    if not dataset_ref:
+        print(
+            "error: --dataset is required (a `loom ingest` pathspec, e.g. "
+            "IngestDataset/123).",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        execution = get_execution(config.mlops_provider)(config)
+    except Exception as exc:  # noqa: BLE001 - actionable hint
+        print(
+            f"error: could not load the MLOps provider "
+            f"{config.mlops_provider!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    tags = [
+        "loom_command:train",
+        f"loom_dataset_ref:{dataset_ref}",
+        f"loom_tenant:{config.tenant}",
+        f"loom_owned_by:{config.owned_by}",
+    ]
+
+    print(
+        f"Training a model from {dataset_ref!r} "
+        f"(EXPENSIVE/MUTATE; launch={'ON' if launch else 'OFF — plan only'})..."
+    )
+    try:
+        result = execution.run_flow(
+            TRAIN_FLOW_PATH,
+            {
+                "dataset_ref": dataset_ref,
+                "capability": capability,
+                "objective": objective,
+                "budget": budget,
+                "backbone_ref": backbone_ref,
+                "metric": metric,
+                "launch": launch,
+            },
+            tags=tags,
+        )
+    except NotImplementedError as exc:
+        # The 'local' dev MLOps provider cannot run lifecycle flows; guide to metaflow.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+        print(
+            f"error: failed to run the train flow: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not getattr(result, "successful", False):
+        print(
+            f"error: the train run did not complete successfully: "
+            f"{getattr(result, 'error', None) or 'unknown error'}",
+            file=sys.stderr,
+        )
+
+    _print_train_summary(dataset_ref, result)
+    _record_train_learning(
+        config, dataset_ref, capability, objective, budget, metric, launch, result
+    )
+
+    return 0 if getattr(result, "successful", False) else 1
+
+
+def _record_train_learning(
+    config: LoomConfig,
+    dataset_ref: str,
+    capability: str,
+    objective: str,
+    budget: str,
+    metric: str,
+    launch: bool,
+    result: object,
+) -> None:
+    """Append one ``command="train"`` learnings row for this training run.
+
+    Best-effort and sanitized: references + small derived scalars only (the data
+    object pathspec, the produced artifact pathspec, the backend, the gate status,
+    the cost line, the fingerprint) -- never raw rows or secrets. A failure to
+    record never fails the command.
+
+    Args:
+        config: The active Loom configuration.
+        dataset_ref: The data object pathspec the model was built from.
+        capability: The invoked capability.
+        objective: The pretraining objective.
+        budget: The training budget.
+        metric: The evaluation metric.
+        launch: Whether the real heavy GPU launch was requested.
+        result: The :class:`~loom.types.RunResult` from ``run_flow``.
+    """
+    try:
+        from loom.learnings import Learnings, LearningRecord, Outcome, TaskSpec
+
+        summary = getattr(result, "summary", None) or {}
+        successful = bool(getattr(result, "successful", False))
+        status = str(summary.get("status") or "")
+        # A train "succeeds" as a build only when the local adapter actually built;
+        # a clean PLANNED / REFUSED_NO_GPU_TARGET is a correct gate outcome, not a
+        # produced artifact (mirrors the deploy BLOCK posture).
+        built = status == "BUILT"
+        cost = summary.get("cost") or {}
+
+        artifacts = [
+            ref
+            for ref in (
+                getattr(result, "pathspec", None),
+                getattr(result, "card_path", None),
+                summary.get("artifact_pathspec"),
+            )
+            if ref
+        ]
+
+        record = LearningRecord(
+            command="train",
+            task=TaskSpec(
+                data_ref=dataset_ref,
+                goal=f"build a model ({capability}) via the model-builder seam",
+                metric=metric or "n/a",
+                experiment_id=dataset_ref,
+            ),
+            inputs={
+                "capability": capability,
+                "objective": objective,
+                "budget": budget,
+                "metric": metric,
+                "launch": launch,
+                "mlops_provider": config.mlops_provider,
+                "model_builder_provider": summary.get("model_builder_provider"),
+                "backend": summary.get("backend"),
+                "capability_mode": summary.get("capability_mode"),
+                "launch_posture": summary.get("launch_posture"),
+                "gpu_target": summary.get("gpu_target"),
+                "est_usd": cost.get("est_usd"),
+                "gpu_hours": cost.get("gpu_hours"),
+                "status": status,
+                "fingerprint": summary.get("fingerprint"),
+            },
+            outcome=Outcome(
+                best_metric=None,
+                submission_ok=successful and built,
+                node_count=0,
+            ),
+            artifacts=artifacts,
+            success=successful,
+            model=None,
+            tenant=config.tenant,
+            owned_by=config.owned_by,
+            reflection=(
+                f"train did not produce an artifact (status={status}): "
+                + str(summary.get("error") or "see gate status")
+                if (successful and not built)
                 else None
             ),
         )

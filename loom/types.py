@@ -196,10 +196,107 @@ class NodeRecord:
     ts: float = field(default=0.0)
 
 
+@dataclass
+class ArtifactRef:
+    """A model-builder output: a Metaflow run pathspec + a small JSON-able summary.
+
+    The model-builder analogue of :class:`RunResult`. The crux of constraint 1
+    of the ``ModelBuilderProvider`` port: a backbone/tokenizer/embeddings/model
+    is **only ever a pathspec** here, never a ``.nemo`` file or an object-store
+    URI. Bulk stays in Metaflow as named artifacts referenced by the pathspec.
+
+    Attributes:
+        pathspec: The Metaflow run pathspec (e.g. ``"PretrainFlow/123"``)
+            identifying the produced run, or ``None`` on failure / refusal.
+        kind: The kind of artifact produced — one of ``"backbone"``,
+            ``"tokenizer"``, ``"embeddings"``, ``"model"``, or ``"endpoint"``.
+        summary: A small, JSON-able dict summarizing the output (e.g. dims,
+            vocab size, objective, fingerprint). Kept small by contract; bulk
+            stays in Metaflow as artifacts referenced by ``pathspec``.
+        error: Human-readable description of why the build failed or was
+            refused, or ``None`` on success.
+    """
+
+    pathspec: str | None
+    kind: str
+    summary: dict = field(default_factory=dict)
+    error: str | None = None
+
+
+@dataclass
+class Scores:
+    """The scalar(s) ``evaluate`` returns.
+
+    Parallels :attr:`SearchResult.best_metric` / :attr:`RunResult.summary`: a
+    derived number plus a small detail dict, never rows.
+
+    Attributes:
+        metric: The metric name (e.g. ``"fraud-pr-auc"``, ``"roc_auc"``).
+        value: The scalar metric value, or ``None`` if it could not be computed.
+        detail: A small JSON-able dict of supporting detail (e.g.
+            ``{"baseline": .., "lift": .., "n_holdout": ..}``).
+    """
+
+    metric: str
+    value: float | None
+    detail: dict = field(default_factory=dict)
+
+
+@dataclass
+class Capability:
+    """One capability a model-builder backend declares, with its AIDE-search mode.
+
+    Attributes:
+        name: The capability name — one of ``"tokenize"``, ``"pretrain"``,
+            ``"finetune"``, ``"embed"``, ``"evaluate"``, ``"serve"``.
+        mode: The AIDE-search mode — ``"searchable"`` (AIDE may tree-search it)
+            or ``"launch-and-track"`` (heavy/external; AIDE never searches it).
+        supported: Whether the backend actually supports this capability.
+        notes: A REQUIRED honesty note for stand-ins/limited capabilities
+            ("don't over-sell"); e.g. why a CPU stand-in is not a real
+            transformer, or that ``serve`` is batch-only.
+    """
+
+    name: str
+    mode: str
+    supported: bool
+    notes: str = ""
+
+
+@dataclass
+class CapabilityManifest:
+    """What :meth:`loom.providers.ModelBuilderProvider.manifest` returns.
+
+    The negotiation contract a backend exposes up front: what it can do, the
+    mode of each capability, and the honesty notes the refusal logic reads.
+
+    Attributes:
+        backend: The backend name (e.g. ``"local"``, ``"nemo"``).
+        capabilities: Mapping of capability name -> :class:`Capability`.
+    """
+
+    backend: str
+    capabilities: dict[str, Capability]
+
+    def supports(self, name: str) -> bool:
+        """Return whether ``name`` is a declared, supported capability."""
+        cap = self.capabilities.get(name)
+        return bool(cap and cap.supported)
+
+    def mode_of(self, name: str) -> str | None:
+        """Return the declared mode of ``name``, or ``None`` if undeclared."""
+        cap = self.capabilities.get(name)
+        return cap.mode if cap else None
+
+
 __all__ = [
     "ExecutionResult",
     "RunResult",
     "Task",
     "SearchResult",
     "NodeRecord",
+    "ArtifactRef",
+    "Scores",
+    "Capability",
+    "CapabilityManifest",
 ]

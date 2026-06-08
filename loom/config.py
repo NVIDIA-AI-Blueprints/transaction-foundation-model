@@ -56,6 +56,19 @@ class LoomConfig:
         metaflow_profile: Metaflow profile name (env ``METAFLOW_PROFILE``);
             ``None`` uses Metaflow's default profile. Lets a tenant point Loom
             at their own Metaflow endpoint (BYO perimeter).
+        model_builder_provider: Name of the model-builder ("training/serving")
+            provider — the fourth Loom port. Default ``"nemo"`` (the spec mandates
+            NeMo as the default adapter); use ``"local"`` for the torch-free CPU
+            stand-in (the conformance/CI default path).
+        gpu_target: Routing string naming a GPU cluster/target the heavy
+            launch-and-track path uses, or ``None``. ``None`` => no GPU target =>
+            the launch-and-track path REFUSES up front (constraint 4). Parallels
+            ``metaflow_profile`` as a BYO-perimeter field; the matching cluster
+            credentials stay in the environment, never on this object.
+        model_builder_base_url: Base URL for a hosted/managed model-builder
+            adapter or NIM serving endpoint (env ``LOOM_MODEL_BUILDER_BASE_URL``).
+            Mirrors ``nim_base_url``/``model_base_url``: the matching API key is
+            read from the environment at call time, never stored here.
         code_model: Model used to generate solution code.
         feedback_model: Model used to review/score executed solutions.
         code_provider: Name of the model ("LLM backend") provider for the code
@@ -102,6 +115,9 @@ class LoomConfig:
     search_provider: str = "aide"
     mlops_provider: str = "metaflow"
     metaflow_profile: str | None = None
+    model_builder_provider: str = "nemo"
+    gpu_target: str | None = None
+    model_builder_base_url: str | None = None
     code_model: str = _DEFAULT_CODE_MODEL
     feedback_model: str = _DEFAULT_FEEDBACK_MODEL
     code_provider: str = "anthropic-api"
@@ -222,6 +238,12 @@ class LoomConfig:
             out["mlops_provider"] = v
         if (v := env.get("METAFLOW_PROFILE")) is not None:
             out["metaflow_profile"] = v
+        if (v := env.get("LOOM_MODEL_BUILDER_PROVIDER")) is not None:
+            out["model_builder_provider"] = v
+        if (v := env.get("LOOM_GPU_TARGET")) is not None:
+            out["gpu_target"] = v
+        if (v := env.get("LOOM_MODEL_BUILDER_BASE_URL")) is not None:
+            out["model_builder_base_url"] = v
         if (v := env.get("LOOM_CODE_MODEL")) is not None:
             out["code_model"] = v
         if (v := env.get("LOOM_FEEDBACK_MODEL")) is not None:

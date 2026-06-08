@@ -28,7 +28,16 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
-from loom.types import ExecutionResult, NodeRecord, RunResult, SearchResult, Task
+from loom.types import (
+    ArtifactRef,
+    CapabilityManifest,
+    ExecutionResult,
+    NodeRecord,
+    RunResult,
+    Scores,
+    SearchResult,
+    Task,
+)
 
 # The exec-callback seam, matching AIDE's ``ExecCallbackType``
 # (aide/agent.py): ``Callable[[str, bool], ExecutionResult]`` i.e.
@@ -182,11 +191,154 @@ class SearchProvider(ABC):
         raise NotImplementedError
 
 
+# ---------------------------------------------------------------------------
+# The model-builder port (the third heavy backend, a fourth port).
+#
+# The abstraction boundary is drawn in Loom DS-intent vocabulary: the adapter
+# is a *compiler* that lowers intent -> backend config. A backend noun (Megatron,
+# ``.nemo``, ``@resources(gpu=8)``) lives inside the adapter and nowhere else.
+# These module-level frozensets are the seam: a NeMo noun is rejected here, in
+# Loom vocabulary, before any adapter sees it (constraint 2). Enums stay
+# ``str``-typed at the boundary (the repo passes provider names/roles as plain
+# strings everywhere) but are validated against these sets at the seam.
+# ---------------------------------------------------------------------------
+
+OBJECTIVES = frozenset({"next-event", "masked-field", "contrastive"})
+BUDGETS = frozenset({"probe", "small", "full"})
+MODES = frozenset({"batch", "online"})
+
+
+class ModelBuilderProvider(ABC):
+    """Port: builds/serves models stated in Loom DS-intent vocabulary.
+
+    The training/serving "model builder" — the third heavy backend, a fourth
+    port exactly parallel to :class:`SearchProvider` and
+    :class:`ExecutionProvider`. I/O are Metaflow artifact pathspecs (via
+    :mod:`loom.dataio` / the Client API), never ``.nemo`` files or raw object
+    storage. Each capability declares a ``mode`` in :meth:`manifest` so the
+    AIDE-vs-builder split (``/loom-train`` launch-and-track vs ``/loom-optimize``
+    searchable) is a *provider fact*, not user knowledge.
+
+    Mirrors the :class:`ExecutionProvider` style: a concrete ``ABC`` with a
+    ``name`` class attribute and exactly **one** :func:`abstractmethod`
+    (:meth:`manifest`). The six capabilities are plain methods that
+    ``raise NotImplementedError`` by default (the ``run_flow`` optional-by-raise
+    pattern): a backend overrides only the capabilities it supports and declares
+    the rest unsupported in its manifest, so a capability gap is refused up front
+    rather than failing deep in a job.
+
+    Instantiated uniformly as ``Provider(config)`` (like the other ports), so the
+    flow/CLI can resolve a builder from :class:`~loom.config.LoomConfig`.
+
+    Attributes:
+        name: The registry name of this provider (e.g. ``"local"``, ``"nemo"``).
+    """
+
+    name: str = "model_builder"
+
+    @abstractmethod
+    def manifest(self) -> CapabilityManifest:
+        """Return the :class:`~loom.types.CapabilityManifest` for this backend.
+
+        The negotiation contract the up-front refusal reads: which capabilities
+        are supported, the AIDE-search mode of each, and the honesty notes for
+        stand-in/limited capabilities. The only required method.
+        """
+        raise NotImplementedError
+
+    def tokenize(self, sequences_ref: str, scheme: dict) -> ArtifactRef:
+        """Build a tokenizer/vocab over the sequences. Mode: ``searchable``.
+
+        Args:
+            sequences_ref: Pathspec of the sequences data object.
+            scheme: The tokenization scheme (fields, min_count, max_vocab,
+                n_buckets) AIDE may tree-search.
+
+        Returns:
+            An :class:`~loom.types.ArtifactRef` of ``kind="tokenizer"``.
+        """
+        raise NotImplementedError
+
+    def pretrain(self, sequences_ref: str, objective: str, budget: str) -> ArtifactRef:
+        """Pretrain a backbone from the sequences. Mode: ``launch-and-track``.
+
+        Args:
+            sequences_ref: Pathspec of the sequences data object.
+            objective: A Loom objective validated against :data:`OBJECTIVES`.
+            budget: A budget validated against :data:`BUDGETS` (physics —
+                surfaced at the gate, never faked away).
+
+        Returns:
+            An :class:`~loom.types.ArtifactRef` of ``kind="backbone"``.
+        """
+        raise NotImplementedError
+
+    def finetune(self, backbone_ref: str, task_ref: str, recipe: dict) -> ArtifactRef:
+        """Fit a cheap head on a frozen backbone. Mode: ``searchable``.
+
+        Args:
+            backbone_ref: Pathspec of the frozen backbone.
+            task_ref: Pathspec of the task data object.
+            recipe: The head recipe (estimator/regularization/pooled features)
+                AIDE may tree-search.
+
+        Returns:
+            An :class:`~loom.types.ArtifactRef` of ``kind="model"``.
+        """
+        raise NotImplementedError
+
+    def embed(self, backbone_ref: str, data_ref: str) -> ArtifactRef:
+        """Embed data through a frozen backbone. Mode: ``searchable``.
+
+        Args:
+            backbone_ref: Pathspec of the frozen backbone.
+            data_ref: Pathspec of the data object to embed.
+
+        Returns:
+            An :class:`~loom.types.ArtifactRef` of ``kind="embeddings"`` whose
+            pathspec is an ``IngestDataset``-shaped, first-class ``dataset_ref``.
+        """
+        raise NotImplementedError
+
+    def evaluate(self, model_ref: str, holdout_ref: str, metric: str) -> Scores:
+        """Score a model on a sealed holdout. Mode: ``searchable``.
+
+        Args:
+            model_ref: Pathspec of the fitted model.
+            holdout_ref: Pathspec of the sealed temporal holdout data object.
+            metric: The metric name (e.g. ``"fraud-pr-auc"``).
+
+        Returns:
+            A :class:`~loom.types.Scores` carrying the scalar + comparability
+            detail (baseline + lift).
+        """
+        raise NotImplementedError
+
+    def serve(self, model_ref: str, mode: str) -> ArtifactRef:
+        """Serve a model. Mode declared per backend in the manifest.
+
+        ``EndpointRef`` collapses to ``ArtifactRef(kind="endpoint")`` in v0.1
+        (no live endpoint object until NIM online serving lands).
+
+        Args:
+            model_ref: Pathspec of the model to serve.
+            mode: A serving mode validated against :data:`MODES`.
+
+        Returns:
+            An :class:`~loom.types.ArtifactRef` of ``kind="endpoint"``.
+        """
+        raise NotImplementedError
+
+
 __all__ = [
     "ExecCallback",
     "OnNode",
     "ExecutionProvider",
     "SearchProvider",
+    "ModelBuilderProvider",
+    "OBJECTIVES",
+    "BUDGETS",
+    "MODES",
 ]
 
 
@@ -215,5 +367,10 @@ except Exception:  # pragma: no cover - optional dependency guard
 
 try:  # Model providers (the LLM-backend port); each adapter self-registers.
     from . import model  # noqa: F401
+except Exception:  # pragma: no cover - optional dependency guard
+    pass
+
+try:  # Model-builder providers (the training/serving port); each adapter self-registers.
+    from . import model_builder  # noqa: F401
 except Exception:  # pragma: no cover - optional dependency guard
     pass

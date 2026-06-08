@@ -20,6 +20,7 @@ from typing import Callable, Type, TypeVar
 _SEARCH_PROVIDERS: dict[str, type] = {}
 _EXECUTION_PROVIDERS: dict[str, type] = {}
 MODEL_PROVIDERS: dict[str, type] = {}
+_MODEL_BUILDER_PROVIDERS: dict[str, type] = {}
 
 _T = TypeVar("_T", bound=type)
 
@@ -75,6 +76,28 @@ def register_model(name: str) -> Callable[[_T], _T]:
 
     def _decorator(cls: _T) -> _T:
         MODEL_PROVIDERS[name] = cls
+        return cls
+
+    return _decorator
+
+
+def register_model_builder(name: str) -> Callable[[_T], _T]:
+    """Class decorator that registers a model-builder provider under ``name``.
+
+    The model-builder provider is the fourth Loom port: the training/serving
+    backend (which builds/serves models stated in DS-intent vocabulary). See
+    :class:`loom.providers.ModelBuilderProvider`.
+
+    Args:
+        name: The configuration name to bind the class to (e.g. ``"nemo"`` or
+            ``"local"``).
+
+    Returns:
+        A decorator that registers the class and returns it unchanged.
+    """
+
+    def _decorator(cls: _T) -> _T:
+        _MODEL_BUILDER_PROVIDERS[name] = cls
         return cls
 
     return _decorator
@@ -159,12 +182,37 @@ def get_model(name: str) -> type:
         ) from None
 
 
+def get_model_builder(name: str) -> type:
+    """Resolve a registered model-builder provider class by name.
+
+    Args:
+        name: The provider name from configuration (e.g. ``"nemo"``).
+
+    Returns:
+        The registered provider class.
+
+    Raises:
+        KeyError: If no model-builder provider is registered under ``name`` (the
+            error message lists the names that are available).
+    """
+    _ensure_builtins_loaded()
+    try:
+        return _MODEL_BUILDER_PROVIDERS[name]
+    except KeyError:
+        available = ", ".join(sorted(_MODEL_BUILDER_PROVIDERS)) or "<none>"
+        raise KeyError(
+            f"No model-builder provider registered under {name!r}. Available: {available}."
+        ) from None
+
+
 __all__ = [
     "register_search",
     "register_execution",
     "register_model",
+    "register_model_builder",
     "get_search",
     "get_execution",
     "get_model",
+    "get_model_builder",
     "MODEL_PROVIDERS",
 ]
