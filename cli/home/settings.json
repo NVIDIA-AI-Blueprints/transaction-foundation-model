@@ -1,5 +1,6 @@
 {
   "theme": "loom",
   "quietStartup": true,
-  "collapseChangelog": true
+  "collapseChangelog": true,
+  "lastChangelogVersion": "0.79.0"
 }

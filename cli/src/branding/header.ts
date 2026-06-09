@@ -5,13 +5,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { LOOM_ASCII_LOGO, LOOM_TAGLINE } from "./logo.js";
 
 /**
- * Install the LOOM banner as the Pi REPL header on session_start
- * (cf. Feynman's installFeynmanHeader, research-tools/header.ts). The header is
+ * Install the LOOM banner as the REPL header on session start. The header is
  * a static-ish card — logo + version + active model + cwd + the registered verb
  * count — recomputed only on resize, so high-churn workflows don't redraw it.
  *
  * `theme.fg(name, text)` / `theme.bold(text)` apply ANSI; the logo strings are
- * plain ASCII so visible width is `.length` (no pi-tui width helper needed).
+ * plain ASCII so visible width is `.length`.
  */
 export function installLoomHeader(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	if (!ctx.hasUI) return;
@@ -67,7 +66,7 @@ export function installLoomHeader(pi: ExtensionAPI, ctx: ExtensionContext): void
 			push(labeled("version", `v${version}`));
 			push(labeled("model", modelLabel));
 			push(labeled("cwd", dirLabel));
-			push(labeled("engine", `python -m loom  (${loomVerbToolCount} verbs, ${commandCount} commands)`));
+			push(labeled("verbs", `${loomVerbToolCount} data-science verbs · ${commandCount} commands`));
 			push(bottom());
 
 			return lines;

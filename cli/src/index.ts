@@ -13,9 +13,8 @@ const DEFAULT_LOOM_PYTHON = "/Users/anub/Work/Loom/.venv/bin/python";
 
 /**
  * The 15 Loom verbs. The agentic front door accepts `loom <verb> ...` and maps
- * it to the `/loom-<verb>` slash-command prompt inside Pi (cf. Feynman's
- * resolveInitialPrompt). The authoritative source is `python -m loom verbs
- * --json`; this static set is only used for top-level routing before the child
+ * it to the `/loom-<verb>` slash-command prompt. The authoritative source is the
+ * verb manifest; this static set is only used for top-level routing before the child
  * boots, so a stale entry just falls through to a freeform prompt.
  */
 const LOOM_VERBS = new Set([
@@ -53,7 +52,7 @@ function loadPackageVersion(appRoot: string): string | undefined {
 function printHelp(version: string | undefined): void {
 	const lines = [
 		"",
-		"  loom — agentic data-science operator (Loom verbs on the Pi harness)",
+		"  loom — an agentic CLI for data science",
 		version ? `  v${version}` : "",
 		"",
 		"  Usage:",
@@ -63,15 +62,15 @@ function printHelp(version: string | undefined): void {
 		"    loom --help               Show this help",
 		"    loom --version            Show version",
 		"",
-		"  Verbs (driven by the Python engine, python -m loom <verb> --json):",
+		"  Verbs:",
 		"    understand:  ingest  eda  validate  viz  datasets  doctor",
 		"    build:       features  pipeline  run",
 		"    operate:     report  ops",
 		"    gated:       deploy  train  collab  skillopt   (require explicit confirm)",
 		"",
 		"  Env:",
-		"    LOOM_PYTHON   interpreter for the engine (default: " + DEFAULT_LOOM_PYTHON + ")",
-		"    --model <p/m> pick the agent's LLM (or set ANTHROPIC_API_KEY etc.)",
+		"    --model <p/m> pick the LLM (or set ANTHROPIC_API_KEY etc.)",
+		"    LOOM_PYTHON   advanced — override the engine runtime path",
 		"",
 	];
 	console.log(lines.filter((l) => l !== undefined).join("\n"));
@@ -142,7 +141,7 @@ export async function main(): Promise<void> {
 	mkdirSync(loomHomeDir, { recursive: true });
 	mkdirSync(sessionDir, { recursive: true });
 	// Hash-tracked sync of bundled branded assets (the LOOM theme) into the home,
-	// preserving any user edits (cf. Feynman's bootstrap sync). Then force the
+	// preserving any user edits. Then force the
 	// branding-related settings keys.
 	syncBundledAssets(appRoot, loomHomeDir);
 	normalizeLoomSettings(resolve(loomHomeDir, "settings.json"));

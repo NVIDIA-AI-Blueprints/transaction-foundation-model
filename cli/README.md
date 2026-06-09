@@ -3,8 +3,8 @@
 `loom` is the standalone **agentic data-science operator**: natural language in,
 the agent picks the right **Loom verb**, runs it, reads the structured `VERDICT` /
 summary, and composes the next step. The agent loop, tool-calling, multi-provider
-LLM, sessions, and TUI are hosted on the [Pi](https://github.com/badlogic/pi-mono)
-coding-agent harness (the Feynman pattern). Loom's Python engine (AIDE search +
+LLM, sessions, and TUI are hosted on the [Pi](https://github.com/earendil-works/pi)
+coding-agent harness. Loom's Python engine (AIDE search +
 Metaflow flows + providers + telemetry) is **unchanged** — this package is a thin,
 swappable interface layer: a launcher, one extension that maps the 15 verbs to Pi
 tools, and a persona/branding bundle.
