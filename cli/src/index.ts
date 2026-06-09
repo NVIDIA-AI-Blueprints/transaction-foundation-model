@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 
-import { syncBundledAssets } from "./bootstrap/sync.js";
+import { materializeAgentPersonas, syncBundledAssets } from "./bootstrap/sync.js";
 import { ensureLoomPackages } from "./pi/ensure-packages.js";
 import { launchPiChat } from "./pi/launch.js";
 import { normalizeLoomSettings } from "./pi/settings.js";
@@ -145,9 +145,13 @@ export async function main(): Promise<void> {
 	// preserving any user edits. Then force the
 	// branding-related settings keys.
 	syncBundledAssets(appRoot, loomHomeDir);
+	// Materialize the Loom subagent personas, injecting the host-resolved path to
+	// the loom-tools extension so delegated child agents can call the verb tools.
+	materializeAgentPersonas(appRoot, loomHomeDir);
 	normalizeLoomSettings(resolve(loomHomeDir, "settings.json"));
-	// Ensure Loom's bundled Pi capability packages (MCP via pi-mcp-adapter) are
-	// installed in the home — idempotent, first-launch only.
+	// Ensure Loom's bundled Pi capability packages (MCP via pi-mcp-adapter,
+	// subagents via pi-subagents) are installed in the home — idempotent, first
+	// launch only.
 	ensureLoomPackages(appRoot, loomHomeDir);
 
 	const missing = validatePiInstallation(appRoot);

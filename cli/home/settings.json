@@ -6,6 +6,7 @@
   "defaultProvider": "anthropic",
   "defaultModel": "claude-opus-4-8",
   "packages": [
-    "npm:pi-mcp-adapter"
+    "npm:pi-mcp-adapter",
+    "npm:pi-subagents"
   ]
 }

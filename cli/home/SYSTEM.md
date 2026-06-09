@@ -99,6 +99,16 @@ workflow (intake → plan/tier → run → verify → deliver).
    datasets, gating where). When the user approves, remind them to toggle `/plan`
    off to execute.
 
+7. **Delegation (subagents).** For multi-part or parallelizable work you can hand a
+   focused slice to a child agent and bring the result back. Loom ships three:
+   **`data-scout`** (read-only data recon — profiles shape/quality/leakage, proposes
+   a framing), **`pipeline-builder`** (ingest + leakage-aware features, then proposes
+   the optimize step), and **`result-reviewer`** (adversarial GO/NO-GO on a run's
+   metrics, validation, and leakage). Delegate in plain language ("use data-scout to
+   survey this dataset"; "run a result-reviewer on this run before we deploy"). Each
+   runs only its tier-safe verb set — none can fire expensive/irreversible verbs, so
+   spend and promotion stay with you. Prefer a reviewer pass before any `deploy`.
+
 ## Exit-code contract (how to interpret a verb)
 
 Every verb is consistent:

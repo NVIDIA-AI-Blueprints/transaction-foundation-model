@@ -92,7 +92,13 @@ function syncManagedFiles(
 	scope: string,
 	state: BootstrapState,
 	result: BootstrapSyncResult,
+	transform?: (text: string) => string,
 ): void {
+	// `transform` lets a bundled file be materialized (e.g. an absolute path
+	// injected) before landing in the home. State tracks the SOURCE (template)
+	// hash and the TARGET (materialized) hash separately, so we can tell apart a
+	// template change, a host-specific re-materialization, and a user edit.
+	const apply = transform ?? ((text: string) => text);
 	const sourceKeys = new Set(listFiles(sourceRoot).map((p) => relative(sourceRoot, p)));
 
 	// Remove files we previously synced that the bundle no longer ships, but only
@@ -119,14 +125,16 @@ function syncManagedFiles(
 		const targetPath = resolve(targetRoot, key);
 		const sourceText = readFileSync(sourcePath, "utf8");
 		const sourceHash = sha256(sourceText);
+		const targetText = apply(sourceText);
+		const targetHash = sha256(targetText);
 		const scopedKey = `${scope}:${key}`;
 		const previous = state.files[scopedKey];
 
 		mkdirSync(dirname(targetPath), { recursive: true });
 
 		if (!existsSync(targetPath)) {
-			writeFileSync(targetPath, sourceText, "utf8");
-			state.files[scopedKey] = { lastAppliedSourceHash: sourceHash, lastAppliedTargetHash: sourceHash };
+			writeFileSync(targetPath, targetText, "utf8");
+			state.files[scopedKey] = { lastAppliedSourceHash: sourceHash, lastAppliedTargetHash: targetHash };
 			result.copied.push(key);
 			continue;
 		}
@@ -134,9 +142,10 @@ function syncManagedFiles(
 		const currentText = readFileSync(targetPath, "utf8");
 		const currentHash = sha256(currentText);
 
-		if (currentHash === sourceHash) {
-			// Already identical — record the baseline so future edits are detectable.
-			state.files[scopedKey] = { lastAppliedSourceHash: sourceHash, lastAppliedTargetHash: currentHash };
+		if (currentHash === targetHash) {
+			// Already the materialized content — record the baseline so future edits
+			// are detectable (and a changed template/host path re-materializes below).
+			state.files[scopedKey] = { lastAppliedSourceHash: sourceHash, lastAppliedTargetHash: targetHash };
 			continue;
 		}
 		if (!previous || currentHash !== previous.lastAppliedTargetHash) {
@@ -144,8 +153,8 @@ function syncManagedFiles(
 			result.skipped.push(key);
 			continue;
 		}
-		writeFileSync(targetPath, sourceText, "utf8");
-		state.files[scopedKey] = { lastAppliedSourceHash: sourceHash, lastAppliedTargetHash: sourceHash };
+		writeFileSync(targetPath, targetText, "utf8");
+		state.files[scopedKey] = { lastAppliedSourceHash: sourceHash, lastAppliedTargetHash: targetHash };
 		result.updated.push(key);
 	}
 }
@@ -165,6 +174,36 @@ export function syncBundledAssets(appRoot: string, homeDir: string): BootstrapSy
 	syncManagedFiles(resolve(assetsRoot, "themes"), resolve(homeDir, "themes"), "themes", state, result);
 	// settings.json is force-normalized separately (settings.ts) so it is NOT
 	// managed here — we only seed the theme palette.
+
+	writeState(statePath, state);
+	return result;
+}
+
+/** Placeholder in the bundled persona templates, replaced with the resolved path. */
+const LOOM_TOOLS_EXTENSION_PLACEHOLDER = "__LOOM_TOOLS_EXTENSION__";
+
+/**
+ * Materialize the bundled Loom subagent personas (cli/assets/home/agents) into the
+ * live Pi home (home/agents), injecting the **absolute** path to the loom-tools
+ * extension. A subagent runs as a child Pi process; pi-subagents loads a persona's
+ * declared `extensions:` with `--no-extensions`, so the path must be absolute and
+ * resolved per host (the repo can be cloned anywhere) — hence inject-at-launch
+ * rather than a committed path. Hash-tracked: a user edit to a materialized persona
+ * is preserved; a template or host-path change re-materializes. No-op when the
+ * bundle dir is absent.
+ */
+export function materializeAgentPersonas(appRoot: string, homeDir: string): BootstrapSyncResult {
+	const result: BootstrapSyncResult = { copied: [], updated: [], skipped: [], removed: [] };
+	const sourceRoot = resolve(appRoot, "assets", "home", "agents");
+	if (!existsSync(sourceRoot)) return result;
+
+	const extensionPath = resolve(appRoot, "extensions", "loom-tools.ts");
+	const statePath = resolve(homeDir, ".loom-bootstrap.json");
+	const state = readState(statePath);
+
+	syncManagedFiles(sourceRoot, resolve(homeDir, "agents"), "agents", state, result, (text) =>
+		text.split(LOOM_TOOLS_EXTENSION_PLACEHOLDER).join(extensionPath),
+	);
 
 	writeState(statePath, state);
 	return result;
