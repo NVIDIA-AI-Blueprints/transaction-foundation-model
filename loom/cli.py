@@ -145,6 +145,8 @@ are pulled in only when the controller resolves a provider that needs them, at
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import os
 import sys
 import uuid
@@ -157,6 +159,336 @@ from loom.types import SearchResult, Task
 
 # How many leaderboard rows to display after a run.
 _LEADERBOARD_LIMIT = 10
+
+# ---------------------------------------------------------------------------
+# The machine-readable contract (loom-on-pi §7): a `--json` mode on every verb
+# and a `loom verbs --json` manifest. This is the stable, machine-readable
+# boundary the Pi-based agentic CLI consumes; it changes only HOW a verb reports,
+# never what it DOES, and preserves the existing 0/1/2 exit codes.
+#
+# Per-verb metadata table (tier + disable-model-invocation), kept explicit and
+# consistent with the skills/loom-* frontmatter + CONVENTIONS.md §1/§5-6:
+#   read-only      = datasets, eda, viz, report, ops, validate, doctor,
+#                    telemetry-status (reads; never prompt)
+#   workspace-write= ingest, features, pipeline (write to workspace/Metaflow)
+#   expensive      = run/optimize (long search; no irreversible external action)
+#   irreversible   = deploy(--apply), train(--launch), collab(--send),
+#                    skillopt(--apply); these four set disable_model_invocation
+#
+# Note: `tier` here is the verb's BASE tier (the resting posture the manifest
+# advertises). The FOUR disable_model_invocation verbs -- deploy/train/collab/
+# skillopt -- are all advertised at their `irreversible` tier (not the lighter
+# resting posture their no-flag default run uses), because their gated mutate
+# (--apply/--launch/--send) is the model-facing safety boundary the manifest must
+# surface. This keeps the manifest invariant the agentic CLI relies on: the four
+# dmi verbs are exactly the four `irreversible` verbs. `run` is the one purely
+# `expensive` verb (a long Metaflow search, no off-by-default external mutate).
+_VERB_TIER = {
+    "datasets": "read-only",
+    "eda": "read-only",
+    "viz": "read-only",
+    "report": "read-only",
+    "ops": "read-only",
+    "validate": "read-only",
+    "doctor": "read-only",
+    "ingest": "workspace-write",
+    "features": "workspace-write",
+    "pipeline": "workspace-write",
+    "run": "expensive",
+    "train": "irreversible",
+    "deploy": "irreversible",
+    "collab": "irreversible",
+    "skillopt": "irreversible",
+}
+
+# The four verbs whose gated mutate must never be model-auto-invoked
+# (disable-model-invocation: true in the skill frontmatter). These are exactly
+# the irreversible/external actions behind an off-by-default flag (deploy
+# --apply, train --launch, collab --send, skillopt --apply).
+_DISABLE_MODEL_INVOCATION = {"deploy", "train", "collab", "skillopt"}
+
+# Verbs that ship a VERDICT/status line in their typed summary (CONVENTIONS §5).
+# The value is the summary key carrying the verb's headline VERDICT/status. A
+# verb absent from this map has no VERDICT (the envelope emits null).
+_VERB_VERDICT_KEY = {
+    "eda": None,            # eda has no VERDICT line; leakage_flags are the gate signal
+    "validate": "verdict",
+    "report": "verdict",
+    "features": "verdict",
+    "pipeline": "verdict",
+    "deploy": "verdict",
+    "collab": "verdict",
+    "ops": "status",        # ops reports a health/drift status line
+    "train": "status",      # train reports a gate STATUS line (PLAN/PLANNED/BUILT/REFUSED_*)
+}
+
+# Verbs that gate (carry a {decision, reasons} gate block in the envelope).
+# deploy is the canonical cross-verb exit gate; its summary already carries a
+# `gate` sub-dict ({decision, verdict, reasons, allow}).
+_VERB_GATES = {"deploy"}
+
+
+def _emit_json(obj: object) -> None:
+    """Emit ONE JSON value to stdout (the machine-readable verb contract).
+
+    A single ``print`` of ``json.dumps(obj)`` so a downstream tool can
+    ``JSON.parse(stdout)`` the whole line. Used only on the ``--json`` path;
+    human prose goes to stderr (see :func:`_verb_prose`). Every per-verb ``--json``
+    path emits exactly ONE JSON object (the verb envelope); ``loom verbs --json``
+    emits ONE JSON array (the manifest).
+
+    Args:
+        obj: The envelope dict (per-verb) or manifest list (``verbs``) to serialize.
+    """
+    print(json.dumps(obj, default=str))
+
+
+def _json_active(args: argparse.Namespace) -> bool:
+    """Return whether ``--json`` was requested for this verb."""
+    return bool(getattr(args, "json", False))
+
+
+@contextlib.contextmanager
+def _verb_prose(args: argparse.Namespace):
+    """Route a handler's human prose to STDERR when ``--json`` is active.
+
+    Keeps the EXACT existing human output on the non-``--json`` path (prose to
+    stdout). When ``--json`` is set, every ``print(...)`` the handler makes is
+    redirected to STDERR so stdout carries ONLY the one JSON envelope the handler
+    emits via :func:`_emit_json`. Does not change control flow or exit codes.
+    """
+    if _json_active(args):
+        with contextlib.redirect_stdout(sys.stderr):
+            yield
+    else:
+        yield
+
+
+def _verb_summary(result: object) -> dict:
+    """Return a verb result's typed summary dict (the one it already built)."""
+    summary = getattr(result, "summary", None)
+    return summary if isinstance(summary, dict) else {}
+
+
+def _verb_envelope(
+    verb: str,
+    result: object,
+    *,
+    pathspec: Optional[str] = None,
+) -> dict:
+    """Build the one ``--json`` envelope for a flow-backed verb's RunResult.
+
+    Reuses the EXISTING typed ``result.summary`` dict the handler already built
+    (never recomputed) and the RunResult's pathspec/card_path/successful/error.
+    Shape (the stable contract):
+
+        {verb, status, VERDICT, pathspec, card_path, summary, gate, error}
+
+    Args:
+        verb: The verb name (e.g. ``"eda"``).
+        result: The :class:`~loom.types.RunResult` the handler produced.
+        pathspec: Override for the envelope ``pathspec`` (defaults to the run's
+            own pathspec). ``features`` uses the run pathspec (the NEW data
+            object) which is already ``result.pathspec``; no override needed.
+
+    Returns:
+        The JSON-able envelope dict.
+    """
+    summary = _verb_summary(result)
+    successful = bool(getattr(result, "successful", False))
+    error = getattr(result, "error", None)
+
+    verdict = None
+    key = _VERB_VERDICT_KEY.get(verb, None)
+    if key is not None:
+        verdict = summary.get(key)
+
+    gate = None
+    if verb in _VERB_GATES:
+        raw = summary.get("gate") or {}
+        gate = {
+            "decision": raw.get("decision"),
+            "reasons": list(raw.get("reasons") or []),
+        }
+
+    return {
+        "verb": verb,
+        "status": "ok" if successful else "error",
+        "VERDICT": verdict,
+        "pathspec": pathspec if pathspec is not None else getattr(result, "pathspec", None),
+        "card_path": getattr(result, "card_path", None),
+        "summary": summary,
+        "gate": gate,
+        "error": error,
+    }
+
+
+def _add_json_flag(parser: argparse.ArgumentParser) -> None:
+    """Add the ``--json`` flag to a verb subparser (the machine-readable mode).
+
+    When set, the verb emits ONE JSON envelope to stdout (the typed summary +
+    VERDICT/pathspec/card_path/gate/error) and routes human prose to stderr,
+    keeping the EXACT same exit code. Does not change what the verb does.
+    """
+    parser.add_argument(
+        "--json",
+        dest="json",
+        action="store_true",
+        help=(
+            "Emit one machine-readable JSON object to stdout (the typed summary + "
+            "VERDICT/pathspec/card_path/gate/error); human prose goes to stderr. "
+            "Exit code is unchanged. Consumed by the Pi-based agentic CLI."
+        ),
+    )
+
+
+def _emit_simple_envelope(
+    verb: str,
+    *,
+    successful: bool,
+    summary: Optional[dict] = None,
+    verdict: object = None,
+    pathspec: Optional[str] = None,
+    card_path: Optional[str] = None,
+    gate: Optional[dict] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Emit the one ``--json`` envelope for a verb that has no ``RunResult``.
+
+    The flow-backed verbs reuse :func:`_verb_envelope` (which reads a
+    ``RunResult``'s pathspec/card_path/successful/error + typed ``summary``). The
+    verbs that do not produce a ``RunResult`` -- ``datasets``, ``doctor``,
+    ``ingest``, ``run``, ``telemetry status`` -- build their typed summary by hand
+    and hand it here so the STDOUT JSON shape is IDENTICAL to every other verb:
+
+        {verb, status, VERDICT, pathspec, card_path, summary, gate, error}
+
+    Args:
+        verb: The verb name.
+        successful: Whether the verb succeeded (-> ``status`` ok/error).
+        summary: The verb's typed summary dict (already built by the handler).
+        verdict: The verb's headline VERDICT/status, or ``None`` if it has none.
+        pathspec: A produced run/data-object pathspec, or ``None``.
+        card_path: A produced ``@card`` reference, or ``None``.
+        gate: A ``{decision, reasons}`` gate block, or ``None`` if the verb does
+            not gate.
+        error: A human-readable error string, or ``None`` on success.
+    """
+    _emit_json(
+        {
+            "verb": verb,
+            "status": "ok" if successful else "error",
+            "VERDICT": verdict,
+            "pathspec": pathspec,
+            "card_path": card_path,
+            "summary": summary if isinstance(summary, dict) else {},
+            "gate": gate,
+            "error": error,
+        }
+    )
+
+
+# Cross-cutting flags that are infrastructure, not part of a verb's DOMAIN arg
+# contract, so they are dropped from the manifest's required/optional lists:
+#   - ``json``   is injected by the tool wrapper itself (it always appends --json)
+#   - ``help``   is argparse's own action
+_VERB_MANIFEST_EXCLUDE_ARGS = {"json", "help"}
+
+
+def _verb_manifest_args(parser: argparse.ArgumentParser) -> tuple[list[str], list[str]]:
+    """Introspect a verb subparser into its (required, optional) arg-name lists.
+
+    Walks the subparser's argparse actions, deriving each arg's canonical name
+    (the longest ``--long-flag`` for an optional, or the ``dest`` for a
+    positional) and bucketing by ``action.required``. Note that an arg inside a
+    *required mutually-exclusive group* is itself ``required=False`` (the GROUP is
+    required, not the individual member), so such args land in ``optional`` --
+    which correctly models "exactly one of" for the downstream TypeBox schema.
+    The cross-cutting infra flags in :data:`_VERB_MANIFEST_EXCLUDE_ARGS` are
+    dropped (``--json`` is tool-injected; ``--help`` is argparse's own).
+
+    Args:
+        parser: The verb's argparse subparser.
+
+    Returns:
+        ``(required, optional)`` lists of arg names, each de-duplicated and in
+        declaration order.
+    """
+    required: list[str] = []
+    optional: list[str] = []
+    for action in parser._actions:  # noqa: SLF001 - argparse has no public API here
+        if not action.option_strings:
+            # A positional; use its dest (skip the implicit subcommand catch-alls).
+            name = action.dest
+            if name in _VERB_MANIFEST_EXCLUDE_ARGS or name == argparse.SUPPRESS:
+                continue
+            (required if action.required else optional).append(name)
+            continue
+        # An optional flag: canonical name is the longest long-form, stripped.
+        name = max(action.option_strings, key=len).lstrip("-")
+        if name in _VERB_MANIFEST_EXCLUDE_ARGS:
+            continue
+        (required if action.required else optional).append(name)
+    return required, optional
+
+
+def _build_verb_manifest(root_parser: argparse.ArgumentParser) -> list[dict]:
+    """Build the verb MANIFEST: one entry per lifecycle verb (the source of truth).
+
+    The Pi-based agentic CLI consumes this to generate one typed tool per verb +
+    the gate policy. The verb SET is the explicit, curated :data:`_VERB_TIER` table
+    (the 15 flat lifecycle verbs -- ``chat``/``proxy``/``telemetry``/``verbs`` are
+    infrastructure/meta, not model-facing lifecycle verbs and are excluded). For
+    each verb the entry carries:
+
+        {name, summary (the subparser's one-line help), required[], optional[],
+         tier ("read-only"|"workspace-write"|"expensive"|"irreversible"),
+         disable_model_invocation (bool)}
+
+    ``required``/``optional`` are introspected from each verb's subparser
+    (:func:`_verb_manifest_args`); ``tier`` + ``disable_model_invocation`` come
+    from the explicit :data:`_VERB_TIER` / :data:`_DISABLE_MODEL_INVOCATION` tables
+    (consistent with the skills/loom-* frontmatter + CONVENTIONS §1/§5-6).
+
+    Args:
+        root_parser: The fully-built top-level parser to introspect.
+
+    Returns:
+        The manifest list, sorted by verb name for a stable contract.
+    """
+    subparsers: dict[str, argparse.ArgumentParser] = {}
+    help_by_name: dict[str, str] = {}
+    for action in root_parser._actions:  # noqa: SLF001 - no public API for this
+        if isinstance(action, argparse._SubParsersAction):
+            subparsers = dict(action.choices)
+            # The per-choice one-line `help=` lives on the pseudo-actions, keyed
+            # by the subcommand name (`.dest`); recover it for the summary.
+            for choice_action in action._choices_actions:  # noqa: SLF001
+                help_by_name[choice_action.dest] = choice_action.help or ""
+            break
+
+    manifest: list[dict] = []
+    for name in sorted(_VERB_TIER):
+        sub = subparsers.get(name)
+        if sub is None:  # pragma: no cover - guarded by the parity test
+            continue
+        required, optional = _verb_manifest_args(sub)
+        # The curated one-line summary is the subparser's `help`; fall back to the
+        # first line of its longer `description` if help was omitted.
+        summary = (help_by_name.get(name) or "").strip()
+        if not summary:
+            summary = ((sub.description or "").strip().splitlines() or [""])[0]
+        manifest.append(
+            {
+                "name": name,
+                "summary": summary,
+                "required": required,
+                "optional": optional,
+                "tier": _VERB_TIER[name],
+                "disable_model_invocation": name in _DISABLE_MODEL_INVOCATION,
+            }
+        )
+    return manifest
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -296,6 +628,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (lowest precedence).",
     )
+    _add_json_flag(run_parser)
     run_parser.set_defaults(func=_cmd_run)
 
     ingest_parser = subparsers.add_parser(
@@ -330,6 +663,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(ingest_parser)
     ingest_parser.set_defaults(func=_cmd_ingest)
 
     eda_parser = subparsers.add_parser(
@@ -365,6 +699,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(eda_parser)
     eda_parser.set_defaults(func=_cmd_eda)
 
     validate_parser = subparsers.add_parser(
@@ -416,6 +751,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(validate_parser)
     validate_parser.set_defaults(func=_cmd_validate)
 
     report_parser = subparsers.add_parser(
@@ -449,6 +785,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(report_parser)
     report_parser.set_defaults(func=_cmd_report)
 
     viz_parser = subparsers.add_parser(
@@ -495,6 +832,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(viz_parser)
     viz_parser.set_defaults(func=_cmd_viz)
 
     features_parser = subparsers.add_parser(
@@ -553,6 +891,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(features_parser)
     features_parser.set_defaults(func=_cmd_features)
 
     pipeline_parser = subparsers.add_parser(
@@ -598,6 +937,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(pipeline_parser)
     pipeline_parser.set_defaults(func=_cmd_pipeline)
 
     deploy_parser = subparsers.add_parser(
@@ -648,6 +988,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(deploy_parser)
     deploy_parser.set_defaults(func=_cmd_deploy)
 
     ops_parser = subparsers.add_parser(
@@ -696,6 +1037,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(ops_parser)
     ops_parser.set_defaults(func=_cmd_ops)
 
     collab_parser = subparsers.add_parser(
@@ -744,6 +1086,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(collab_parser)
     collab_parser.set_defaults(func=_cmd_collab)
 
     train_parser = subparsers.add_parser(
@@ -826,6 +1169,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(train_parser)
     train_parser.set_defaults(func=_cmd_train)
 
     datasets_parser = subparsers.add_parser(
@@ -844,6 +1188,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(datasets_parser)
     datasets_parser.set_defaults(func=_cmd_datasets)
 
     doctor_parser = subparsers.add_parser(
@@ -871,6 +1216,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
+    _add_json_flag(doctor_parser)
     doctor_parser.set_defaults(func=_cmd_doctor)
 
     proxy_parser = subparsers.add_parser(
@@ -981,6 +1327,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the learnings path / owner).",
     )
+    _add_json_flag(skillopt_parser)
     skillopt_parser.set_defaults(func=_cmd_skillopt)
 
     telemetry_parser = subparsers.add_parser(
@@ -1019,6 +1366,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YAML",
         help="Optional path to a YAML config file (for the telemetry paths).",
     )
+    _add_json_flag(telemetry_status)
     telemetry_status.set_defaults(func=_cmd_telemetry_status)
 
     telemetry_export = telemetry_sub.add_parser(
@@ -1108,6 +1456,22 @@ def _build_parser() -> argparse.ArgumentParser:
     telemetry_parser.set_defaults(
         func=_cmd_telemetry, _telemetry_parser=telemetry_parser
     )
+
+    verbs_parser = subparsers.add_parser(
+        "verbs",
+        help="Emit the verb MANIFEST (name/summary/required/optional/tier/dmi).",
+        description=(
+            "Print the Loom verb MANIFEST: one entry per lifecycle verb with its "
+            "name, one-line summary, required/optional argument names, tier "
+            "(read-only | workspace-write | expensive | irreversible), and "
+            "disable_model_invocation flag. With --json it emits a single JSON "
+            "array (the machine-readable source of truth the Pi-based agentic CLI "
+            "uses to generate one typed tool per verb + the gate policy); without "
+            "--json it prints a human table. Read-only; introspects the parser."
+        ),
+    )
+    _add_json_flag(verbs_parser)
+    verbs_parser.set_defaults(func=_cmd_verbs, _root_parser=parser)
 
     return parser
 
@@ -1364,24 +1728,54 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     source = os.path.abspath(args.source)
     if not os.path.exists(source):
         print(f"error: --source path does not exist: {source}", file=sys.stderr)
+        if _json_active(args):
+            _emit_simple_envelope(
+                "ingest",
+                successful=False,
+                summary={"source": source},
+                error=f"--source path does not exist: {source}",
+            )
         return 2
 
     config = _build_config(args)
     name = (args.name or "").strip()
 
-    print(f"Ingesting {source!r} into a Metaflow data object...")
-    pathspec, error = _ingest_source(source, name, config)
+    with _verb_prose(args):
+        print(f"Ingesting {source!r} into a Metaflow data object...")
+        pathspec, error = _ingest_source(source, name, config)
+        if error is None:
+            print("Ingest complete.")
+            print(f"  dataset_ref : {pathspec}")
+            print("")
+            print("Run a task against it with:")
+            print(
+                f"  loom run --dataset {pathspec} --mlops metaflow "
+                "--goal '...' --metric '...'"
+            )
+        else:
+            print(f"error: {error}", file=sys.stderr)
+
     if error is not None:
-        print(f"error: {error}", file=sys.stderr)
+        if _json_active(args):
+            _emit_simple_envelope(
+                "ingest",
+                successful=False,
+                summary={"source": source, "name": name or None},
+                error=error,
+            )
         # Metaflow-absent is a setup/config problem (exit 2); a flow failure is a
         # runtime failure (exit 1), preserving the original exit codes.
         return 2 if "Metaflow is required" in error else 1
 
-    print("Ingest complete.")
-    print(f"  dataset_ref : {pathspec}")
-    print("")
-    print("Run a task against it with:")
-    print(f"  loom run --dataset {pathspec} --mlops metaflow --goal '...' --metric '...'")
+    if _json_active(args):
+        # ingest's typed summary is the produced data object's pathspec (the new
+        # dataset_ref). It carries no VERDICT and does not gate.
+        _emit_simple_envelope(
+            "ingest",
+            successful=True,
+            summary={"source": source, "name": name or None, "dataset_ref": pathspec},
+            pathspec=pathspec,
+        )
     return 0
 
 
@@ -1544,35 +1938,38 @@ def _cmd_eda(args: argparse.Namespace) -> int:
         f"loom_owned_by:{config.owned_by}",
     ]
 
-    print(f"Profiling data object {dataset_ref!r} (read-only)...")
-    try:
-        result = execution.run_flow(
-            EDA_FLOW_PATH,
-            {"dataset_ref": dataset_ref, "target": target},
-            tags=tags,
-        )
-    except NotImplementedError as exc:
-        # The 'local' provider cannot run lifecycle flows; guide to metaflow.
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
-        print(
-            f"error: failed to run the EDA flow: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        return 1
+    with _verb_prose(args):
+        print(f"Profiling data object {dataset_ref!r} (read-only)...")
+        try:
+            result = execution.run_flow(
+                EDA_FLOW_PATH,
+                {"dataset_ref": dataset_ref, "target": target},
+                tags=tags,
+            )
+        except NotImplementedError as exc:
+            # The 'local' provider cannot run lifecycle flows; guide to metaflow.
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+            print(
+                f"error: failed to run the EDA flow: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
-    if not getattr(result, "successful", False):
-        print(
-            f"error: the EDA run did not complete successfully: "
-            f"{getattr(result, 'error', None) or 'unknown error'}",
-            file=sys.stderr,
-        )
-        # Still record the failed rollout below so the flywheel sees it.
+        if not getattr(result, "successful", False):
+            print(
+                f"error: the EDA run did not complete successfully: "
+                f"{getattr(result, 'error', None) or 'unknown error'}",
+                file=sys.stderr,
+            )
+            # Still record the failed rollout below so the flywheel sees it.
 
-    _print_eda_summary(dataset_ref, result)
-    _record_eda_learning(config, dataset_ref, target, result)
+        _print_eda_summary(dataset_ref, result)
+        _record_eda_learning(config, dataset_ref, target, result)
 
+    if _json_active(args):
+        _emit_json(_verb_envelope("eda", result))
     return 0 if getattr(result, "successful", False) else 1
 
 
@@ -1752,38 +2149,41 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         f"loom_owned_by:{config.owned_by}",
     ]
 
-    print(f"Validating against data object {dataset_ref!r} (workspace-write)...")
-    try:
-        result = execution.run_flow(
-            VALIDATE_FLOW_PATH,
-            {
-                "dataset_ref": dataset_ref,
-                "target": target,
-                "solution_run": solution,
-                "sensitive": sensitive,
-            },
-            tags=tags,
-        )
-    except NotImplementedError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
-        print(
-            f"error: failed to run the validate flow: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        return 1
+    with _verb_prose(args):
+        print(f"Validating against data object {dataset_ref!r} (workspace-write)...")
+        try:
+            result = execution.run_flow(
+                VALIDATE_FLOW_PATH,
+                {
+                    "dataset_ref": dataset_ref,
+                    "target": target,
+                    "solution_run": solution,
+                    "sensitive": sensitive,
+                },
+                tags=tags,
+            )
+        except NotImplementedError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+            print(
+                f"error: failed to run the validate flow: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
-    if not getattr(result, "successful", False):
-        print(
-            f"error: the validate run did not complete successfully: "
-            f"{getattr(result, 'error', None) or 'unknown error'}",
-            file=sys.stderr,
-        )
+        if not getattr(result, "successful", False):
+            print(
+                f"error: the validate run did not complete successfully: "
+                f"{getattr(result, 'error', None) or 'unknown error'}",
+                file=sys.stderr,
+            )
 
-    _print_validate_summary(dataset_ref, result)
-    _record_validate_learning(config, dataset_ref, target, solution, result)
+        _print_validate_summary(dataset_ref, result)
+        _record_validate_learning(config, dataset_ref, target, solution, result)
 
+    if _json_active(args):
+        _emit_json(_verb_envelope("validate", result))
     return 0 if getattr(result, "successful", False) else 1
 
 
@@ -1932,33 +2332,36 @@ def _cmd_report(args: argparse.Namespace) -> int:
         tags.append(f"loom_experiment:{experiment_id}")
 
     target_desc = experiment_id or runs
-    print(f"Assembling report for {target_desc!r} (read-only)...")
-    try:
-        result = execution.run_flow(
-            REPORT_FLOW_PATH,
-            {"experiment_id": experiment_id, "run_pathspecs": runs},
-            tags=tags,
-        )
-    except NotImplementedError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
-        print(
-            f"error: failed to run the report flow: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        return 1
+    with _verb_prose(args):
+        print(f"Assembling report for {target_desc!r} (read-only)...")
+        try:
+            result = execution.run_flow(
+                REPORT_FLOW_PATH,
+                {"experiment_id": experiment_id, "run_pathspecs": runs},
+                tags=tags,
+            )
+        except NotImplementedError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+            print(
+                f"error: failed to run the report flow: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
-    if not getattr(result, "successful", False):
-        print(
-            f"error: the report run did not complete successfully: "
-            f"{getattr(result, 'error', None) or 'unknown error'}",
-            file=sys.stderr,
-        )
+        if not getattr(result, "successful", False):
+            print(
+                f"error: the report run did not complete successfully: "
+                f"{getattr(result, 'error', None) or 'unknown error'}",
+                file=sys.stderr,
+            )
 
-    _print_report_summary(experiment_id, result)
-    _record_report_learning(config, experiment_id, runs, result)
+        _print_report_summary(experiment_id, result)
+        _record_report_learning(config, experiment_id, runs, result)
 
+    if _json_active(args):
+        _emit_json(_verb_envelope("report", result))
     return 0 if getattr(result, "successful", False) else 1
 
 
@@ -2084,38 +2487,41 @@ def _cmd_viz(args: argparse.Namespace) -> int:
     if dataset_ref:
         tags.append(f"loom_dataset_ref:{dataset_ref}")
 
-    print(f"Plotting {source_ref!r} (read-only)...")
-    try:
-        result = execution.run_flow(
-            VIZ_FLOW_PATH,
-            {
-                "dataset_ref": dataset_ref,
-                "run_pathspec": run_pathspec,
-                "target": target,
-                "kind": kind,
-            },
-            tags=tags,
-        )
-    except NotImplementedError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
-        print(
-            f"error: failed to run the viz flow: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        return 1
+    with _verb_prose(args):
+        print(f"Plotting {source_ref!r} (read-only)...")
+        try:
+            result = execution.run_flow(
+                VIZ_FLOW_PATH,
+                {
+                    "dataset_ref": dataset_ref,
+                    "run_pathspec": run_pathspec,
+                    "target": target,
+                    "kind": kind,
+                },
+                tags=tags,
+            )
+        except NotImplementedError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+            print(
+                f"error: failed to run the viz flow: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
-    if not getattr(result, "successful", False):
-        print(
-            f"error: the viz run did not complete successfully: "
-            f"{getattr(result, 'error', None) or 'unknown error'}",
-            file=sys.stderr,
-        )
+        if not getattr(result, "successful", False):
+            print(
+                f"error: the viz run did not complete successfully: "
+                f"{getattr(result, 'error', None) or 'unknown error'}",
+                file=sys.stderr,
+            )
 
-    _print_viz_summary(source_ref, result)
-    _record_viz_learning(config, dataset_ref, run_pathspec, kind, result)
+        _print_viz_summary(source_ref, result)
+        _record_viz_learning(config, dataset_ref, run_pathspec, kind, result)
 
+    if _json_active(args):
+        _emit_json(_verb_envelope("viz", result))
     return 0 if getattr(result, "successful", False) else 1
 
 
@@ -2266,38 +2672,41 @@ def _cmd_features(args: argparse.Namespace) -> int:
         f"loom_owned_by:{config.owned_by}",
     ]
 
-    print(f"Building features from data object {dataset_ref!r} (workspace-write)...")
-    try:
-        result = execution.run_flow(
-            FEATURES_FLOW_PATH,
-            {
-                "dataset_ref": dataset_ref,
-                "target": target,
-                "eda_run": eda_run,
-                "recipe": recipe,
-            },
-            tags=tags,
-        )
-    except NotImplementedError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
-        print(
-            f"error: failed to run the features flow: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        return 1
+    with _verb_prose(args):
+        print(f"Building features from data object {dataset_ref!r} (workspace-write)...")
+        try:
+            result = execution.run_flow(
+                FEATURES_FLOW_PATH,
+                {
+                    "dataset_ref": dataset_ref,
+                    "target": target,
+                    "eda_run": eda_run,
+                    "recipe": recipe,
+                },
+                tags=tags,
+            )
+        except NotImplementedError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+            print(
+                f"error: failed to run the features flow: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
-    if not getattr(result, "successful", False):
-        print(
-            f"error: the features run did not complete successfully: "
-            f"{getattr(result, 'error', None) or 'unknown error'}",
-            file=sys.stderr,
-        )
+        if not getattr(result, "successful", False):
+            print(
+                f"error: the features run did not complete successfully: "
+                f"{getattr(result, 'error', None) or 'unknown error'}",
+                file=sys.stderr,
+            )
 
-    _print_features_summary(dataset_ref, result)
-    _record_features_learning(config, dataset_ref, target, eda_run, recipe, result)
+        _print_features_summary(dataset_ref, result)
+        _record_features_learning(config, dataset_ref, target, eda_run, recipe, result)
 
+    if _json_active(args):
+        _emit_json(_verb_envelope("features", result))
     return 0 if getattr(result, "successful", False) else 1
 
 
@@ -2454,36 +2863,39 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
         f"loom_owned_by:{config.owned_by}",
     ]
 
-    print(
-        f"Running the end-to-end pipeline on {dataset_ref!r} "
-        "(workspace-write -> EXPENSIVE at optimize)..."
-    )
-    try:
-        result = execution.run_flow(
-            PIPELINE_FLOW_PATH,
-            {"dataset_ref": dataset_ref, "goal": goal, "target": target},
-            tags=tags,
-        )
-    except NotImplementedError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+    with _verb_prose(args):
         print(
-            f"error: failed to run the pipeline flow: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
+            f"Running the end-to-end pipeline on {dataset_ref!r} "
+            "(workspace-write -> EXPENSIVE at optimize)..."
         )
-        return 1
+        try:
+            result = execution.run_flow(
+                PIPELINE_FLOW_PATH,
+                {"dataset_ref": dataset_ref, "goal": goal, "target": target},
+                tags=tags,
+            )
+        except NotImplementedError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+            print(
+                f"error: failed to run the pipeline flow: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
-    if not getattr(result, "successful", False):
-        print(
-            f"error: the pipeline run did not complete successfully: "
-            f"{getattr(result, 'error', None) or 'unknown error'}",
-            file=sys.stderr,
-        )
+        if not getattr(result, "successful", False):
+            print(
+                f"error: the pipeline run did not complete successfully: "
+                f"{getattr(result, 'error', None) or 'unknown error'}",
+                file=sys.stderr,
+            )
 
-    _print_pipeline_summary(dataset_ref, goal, result)
-    _record_pipeline_learning(config, dataset_ref, goal, target, result)
+        _print_pipeline_summary(dataset_ref, goal, result)
+        _record_pipeline_learning(config, dataset_ref, goal, target, result)
 
+    if _json_active(args):
+        _emit_json(_verb_envelope("pipeline", result))
     return 0 if getattr(result, "successful", False) else 1
 
 
@@ -2636,40 +3048,43 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
         f"loom_owned_by:{config.owned_by}",
     ]
 
-    print(
-        f"Planning deploy from {source_run!r} "
-        f"(irreversible/external; apply={'ON' if apply else 'OFF — staged plan only'})..."
-    )
-    try:
-        result = execution.run_flow(
-            DEPLOY_FLOW_PATH,
-            {
-                "validate_run": validate_run,
-                "solution_run": solution_run,
-                "apply": apply,
-            },
-            tags=tags,
-        )
-    except NotImplementedError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+    with _verb_prose(args):
         print(
-            f"error: failed to run the deploy flow: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
+            f"Planning deploy from {source_run!r} "
+            f"(irreversible/external; apply={'ON' if apply else 'OFF — staged plan only'})..."
         )
-        return 1
+        try:
+            result = execution.run_flow(
+                DEPLOY_FLOW_PATH,
+                {
+                    "validate_run": validate_run,
+                    "solution_run": solution_run,
+                    "apply": apply,
+                },
+                tags=tags,
+            )
+        except NotImplementedError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+            print(
+                f"error: failed to run the deploy flow: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
-    if not getattr(result, "successful", False):
-        print(
-            f"error: the deploy run did not complete successfully: "
-            f"{getattr(result, 'error', None) or 'unknown error'}",
-            file=sys.stderr,
-        )
+        if not getattr(result, "successful", False):
+            print(
+                f"error: the deploy run did not complete successfully: "
+                f"{getattr(result, 'error', None) or 'unknown error'}",
+                file=sys.stderr,
+            )
 
-    _print_deploy_summary(source_run, result)
-    _record_deploy_learning(config, source_run, apply, result)
+        _print_deploy_summary(source_run, result)
+        _record_deploy_learning(config, source_run, apply, result)
 
+    if _json_active(args):
+        _emit_json(_verb_envelope("deploy", result))
     return 0 if getattr(result, "successful", False) else 1
 
 
@@ -2858,47 +3273,50 @@ def _cmd_train(args: argparse.Namespace) -> int:
         f"loom_owned_by:{config.owned_by}",
     ]
 
-    print(
-        f"Training a model from {dataset_ref!r} "
-        f"(EXPENSIVE/MUTATE; launch={'ON' if launch else 'OFF — plan only'})..."
-    )
-    try:
-        result = execution.run_flow(
-            TRAIN_FLOW_PATH,
-            {
-                "dataset_ref": dataset_ref,
-                "capability": capability,
-                "objective": objective,
-                "budget": budget,
-                "backbone_ref": backbone_ref,
-                "metric": metric,
-                "launch": launch,
-            },
-            tags=tags,
-        )
-    except NotImplementedError as exc:
-        # The 'local' dev MLOps provider cannot run lifecycle flows; guide to metaflow.
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+    with _verb_prose(args):
         print(
-            f"error: failed to run the train flow: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
+            f"Training a model from {dataset_ref!r} "
+            f"(EXPENSIVE/MUTATE; launch={'ON' if launch else 'OFF — plan only'})..."
         )
-        return 1
+        try:
+            result = execution.run_flow(
+                TRAIN_FLOW_PATH,
+                {
+                    "dataset_ref": dataset_ref,
+                    "capability": capability,
+                    "objective": objective,
+                    "budget": budget,
+                    "backbone_ref": backbone_ref,
+                    "metric": metric,
+                    "launch": launch,
+                },
+                tags=tags,
+            )
+        except NotImplementedError as exc:
+            # The 'local' dev MLOps provider cannot run lifecycle flows; guide to metaflow.
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+            print(
+                f"error: failed to run the train flow: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
-    if not getattr(result, "successful", False):
-        print(
-            f"error: the train run did not complete successfully: "
-            f"{getattr(result, 'error', None) or 'unknown error'}",
-            file=sys.stderr,
+        if not getattr(result, "successful", False):
+            print(
+                f"error: the train run did not complete successfully: "
+                f"{getattr(result, 'error', None) or 'unknown error'}",
+                file=sys.stderr,
+            )
+
+        _print_train_summary(dataset_ref, result)
+        _record_train_learning(
+            config, dataset_ref, capability, objective, budget, metric, launch, result
         )
 
-    _print_train_summary(dataset_ref, result)
-    _record_train_learning(
-        config, dataset_ref, capability, objective, budget, metric, launch, result
-    )
-
+    if _json_active(args):
+        _emit_json(_verb_envelope("train", result))
     return 0 if getattr(result, "successful", False) else 1
 
 
@@ -3082,38 +3500,41 @@ def _cmd_ops(args: argparse.Namespace) -> int:
         tags.append(f"loom_dataset_ref:{dataset_ref}")
 
     scope = flow_name or experiment or f"{dataset_ref} vs {reference}"
-    print(f"Monitoring {scope!r} (read-only)...")
-    try:
-        result = execution.run_flow(
-            OPS_FLOW_PATH,
-            {
-                "flow_name": flow_name,
-                "experiment": experiment,
-                "dataset_ref": dataset_ref,
-                "reference": reference,
-            },
-            tags=tags,
-        )
-    except NotImplementedError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
-        print(
-            f"error: failed to run the ops flow: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        return 1
+    with _verb_prose(args):
+        print(f"Monitoring {scope!r} (read-only)...")
+        try:
+            result = execution.run_flow(
+                OPS_FLOW_PATH,
+                {
+                    "flow_name": flow_name,
+                    "experiment": experiment,
+                    "dataset_ref": dataset_ref,
+                    "reference": reference,
+                },
+                tags=tags,
+            )
+        except NotImplementedError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+            print(
+                f"error: failed to run the ops flow: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
-    if not getattr(result, "successful", False):
-        print(
-            f"error: the ops run did not complete successfully: "
-            f"{getattr(result, 'error', None) or 'unknown error'}",
-            file=sys.stderr,
-        )
+        if not getattr(result, "successful", False):
+            print(
+                f"error: the ops run did not complete successfully: "
+                f"{getattr(result, 'error', None) or 'unknown error'}",
+                file=sys.stderr,
+            )
 
-    _print_ops_summary(result)
-    _record_ops_learning(config, flow_name, experiment, dataset_ref, reference, result)
+        _print_ops_summary(result)
+        _record_ops_learning(config, flow_name, experiment, dataset_ref, reference, result)
 
+    if _json_active(args):
+        _emit_json(_verb_envelope("ops", result))
     return 0 if getattr(result, "successful", False) else 1
 
 
@@ -3262,40 +3683,43 @@ def _cmd_collab(args: argparse.Namespace) -> int:
     if experiment:
         tags.append(f"loom_experiment:{experiment}")
 
-    print(
-        f"Assembling a shareable bundle of {source_ref!r} "
-        f"(send={'ON' if send else 'OFF — build only'})..."
-    )
-    try:
-        result = execution.run_flow(
-            COLLAB_FLOW_PATH,
-            {
-                "run_pathspec": run_pathspec,
-                "experiment": experiment,
-                "send": send,
-            },
-            tags=tags,
-        )
-    except NotImplementedError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+    with _verb_prose(args):
         print(
-            f"error: failed to run the collab flow: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
+            f"Assembling a shareable bundle of {source_ref!r} "
+            f"(send={'ON' if send else 'OFF — build only'})..."
         )
-        return 1
+        try:
+            result = execution.run_flow(
+                COLLAB_FLOW_PATH,
+                {
+                    "run_pathspec": run_pathspec,
+                    "experiment": experiment,
+                    "send": send,
+                },
+                tags=tags,
+            )
+        except NotImplementedError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - surface as an actionable message
+            print(
+                f"error: failed to run the collab flow: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
-    if not getattr(result, "successful", False):
-        print(
-            f"error: the collab run did not complete successfully: "
-            f"{getattr(result, 'error', None) or 'unknown error'}",
-            file=sys.stderr,
-        )
+        if not getattr(result, "successful", False):
+            print(
+                f"error: the collab run did not complete successfully: "
+                f"{getattr(result, 'error', None) or 'unknown error'}",
+                file=sys.stderr,
+            )
 
-    _print_collab_summary(source_ref, result)
-    _record_collab_learning(config, run_pathspec, experiment, send, result)
+        _print_collab_summary(source_ref, result)
+        _record_collab_learning(config, run_pathspec, experiment, send, result)
 
+    if _json_active(args):
+        _emit_json(_verb_envelope("collab", result))
     return 0 if getattr(result, "successful", False) else 1
 
 
@@ -3779,15 +4203,28 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         _doctor_client_api_smoke(config),
     ]
 
-    print("Loom doctor -- local stack health check (read-only):")
-    for check in checks:
-        print(f"  [{check['status']:<4}] {check['name']} -- {check['detail']}")
-        if check["status"] != _DOCTOR_PASS and check["fix"]:
-            print(f"         fix: {check['fix']}")
-
     verdict, ok = _doctor_verdict(checks)
-    print("")
-    print(f"VERDICT: {verdict}")
+
+    with _verb_prose(args):
+        print("Loom doctor -- local stack health check (read-only):")
+        for check in checks:
+            print(f"  [{check['status']:<4}] {check['name']} -- {check['detail']}")
+            if check["status"] != _DOCTOR_PASS and check["fix"]:
+                print(f"         fix: {check['fix']}")
+        print("")
+        print(f"VERDICT: {verdict}")
+
+    if _json_active(args):
+        # doctor's typed summary is the per-check result list + the rolled-up
+        # verdict line. The headline VERDICT is PASS (ok) / FAIL; doctor exits 1
+        # iff a check FAILed (a WARN never fails), so success mirrors `ok`.
+        _emit_simple_envelope(
+            "doctor",
+            successful=ok,
+            summary={"checks": checks, "verdict_line": verdict},
+            verdict="PASS" if ok else "FAIL",
+            error=None if ok else verdict,
+        )
     return 0 if ok else 1
 
 
@@ -3815,6 +4252,13 @@ def _cmd_datasets(args: argparse.Namespace) -> int:
             f"imported: {exc}",
             file=sys.stderr,
         )
+        if _json_active(args):
+            _emit_simple_envelope(
+                "datasets",
+                successful=False,
+                summary={"datasets": []},
+                error=f"Metaflow is required but could not be imported: {exc}",
+            )
         return 2
 
     # Point the Client API at the configured profile's metadata service. The
@@ -3836,7 +4280,12 @@ def _cmd_datasets(args: argparse.Namespace) -> int:
         if not runs:
             runs = list(flow.runs())
     except Exception:  # noqa: BLE001 - no such flow yet / metadata down
-        print("No ingested data objects found (run `loom ingest` first).")
+        with _verb_prose(args):
+            print("No ingested data objects found (run `loom ingest` first).")
+        if _json_active(args):
+            _emit_simple_envelope(
+                "datasets", successful=True, summary={"n_datasets": 0, "datasets": []}
+            )
         return 0
 
     rows: list[tuple[str, str, str]] = []
@@ -3869,13 +4318,27 @@ def _cmd_datasets(args: argparse.Namespace) -> int:
             detail = "schema n/a"
         rows.append((pathspec, name or "-", detail))
 
-    if not rows:
-        print("No ingested data objects found (run `loom ingest` first).")
-        return 0
+    with _verb_prose(args):
+        if not rows:
+            print("No ingested data objects found (run `loom ingest` first).")
+        else:
+            print(f"Ingested data objects ({len(rows)}):")
+            for pathspec, name, detail in rows:
+                print(f"  {pathspec}  ·  {name}  ·  {detail}")
 
-    print(f"Ingested data objects ({len(rows)}):")
-    for pathspec, name, detail in rows:
-        print(f"  {pathspec}  ·  {name}  ·  {detail}")
+    if _json_active(args):
+        # datasets' typed summary is the catalog: one entry per readable data
+        # object (its pathspec + name + the row/col detail line). No VERDICT.
+        _emit_simple_envelope(
+            "datasets",
+            successful=True,
+            summary={
+                "n_datasets": len(rows),
+                "datasets": [
+                    {"pathspec": ps, "name": nm, "detail": dt} for ps, nm, dt in rows
+                ],
+            },
+        )
     return 0
 
 
@@ -4062,29 +4525,54 @@ def _cmd_telemetry_status(args: argparse.Namespace) -> int:
 
     otel = bootstrap_ops_telemetry(config)
 
-    print("Loom telemetry -- COMPLETE training-data corpus, not observability (read-only):")
-    print(f"  events path      : {config.telemetry_path}")
-    print(f"  trajectories path: {config.trajectories_path}")
-    print(f"  proxy calls path : {config.proxy_log_path}")
-    print(f"  learnings path   : {config.learnings_path}")
-    print(f"  events           : {len(events)}")
-    print(f"  trajectories     : {len(trajectories)}")
-    print(f"  IP boundary      : {general} general · {tenant_owned} tenant-owned")
-    print(
-        f"  capture enabled  : {'on' if telemetry_enabled() else 'off'} "
-        "(LOOM_TELEMETRY)"
-    )
-    print(
-        f"  content logging  : {'on' if content_logging_enabled() else 'off (redacted)'} "
-        "(LOOM_LOG_CONTENT)"
-    )
-    print(
-        f"  OTel ops mirror  : "
-        f"{'on' if otel.enabled else 'off'} / "
-        f"{'available' if otel.available else 'sdk-absent'}"
-        + (f" [{', '.join(otel.exporters)}]" if otel.exporters else "")
-        + " (LOOM_TELEMETRY_OTEL_OPS; ops-only, NOT the corpus)"
-    )
+    with _verb_prose(args):
+        print("Loom telemetry -- COMPLETE training-data corpus, not observability (read-only):")
+        print(f"  events path      : {config.telemetry_path}")
+        print(f"  trajectories path: {config.trajectories_path}")
+        print(f"  proxy calls path : {config.proxy_log_path}")
+        print(f"  learnings path   : {config.learnings_path}")
+        print(f"  events           : {len(events)}")
+        print(f"  trajectories     : {len(trajectories)}")
+        print(f"  IP boundary      : {general} general · {tenant_owned} tenant-owned")
+        print(
+            f"  capture enabled  : {'on' if telemetry_enabled() else 'off'} "
+            "(LOOM_TELEMETRY)"
+        )
+        print(
+            f"  content logging  : {'on' if content_logging_enabled() else 'off (redacted)'} "
+            "(LOOM_LOG_CONTENT)"
+        )
+        print(
+            f"  OTel ops mirror  : "
+            f"{'on' if otel.enabled else 'off'} / "
+            f"{'available' if otel.available else 'sdk-absent'}"
+            + (f" [{', '.join(otel.exporters)}]" if otel.exporters else "")
+            + " (LOOM_TELEMETRY_OTEL_OPS; ops-only, NOT the corpus)"
+        )
+
+    if _json_active(args):
+        # telemetry status' typed summary is the read-only corpus snapshot
+        # (counts + the IP split + the exporter state + the paths). No VERDICT.
+        _emit_simple_envelope(
+            "telemetry-status",
+            successful=True,
+            summary={
+                "events_path": config.telemetry_path,
+                "trajectories_path": config.trajectories_path,
+                "proxy_calls_path": config.proxy_log_path,
+                "learnings_path": config.learnings_path,
+                "n_events": len(events),
+                "n_trajectories": len(trajectories),
+                "ip_boundary": {"general": general, "tenant_owned": tenant_owned},
+                "capture_enabled": telemetry_enabled(),
+                "content_logging": content_logging_enabled(),
+                "otel": {
+                    "enabled": otel.enabled,
+                    "available": otel.available,
+                    "exporters": list(otel.exporters),
+                },
+            },
+        )
     return 0
 
 
@@ -4585,71 +5073,107 @@ def _cmd_skillopt(args: argparse.Namespace) -> int:
                 "candidate.)"
             )
 
-    print(
-        f"Optimizing skill {verb!r} (SKILL.md is the trainable artifact; "
-        f"apply={'ON' if apply else 'OFF — proposes a sidecar candidate'})..."
-    )
-    if proposer_note:
-        print(proposer_note)
-    _print_skillopt_corpus(corpus)
+    applied = False
+    sidecar_written = None
+    with _verb_prose(args):
+        print(
+            f"Optimizing skill {verb!r} (SKILL.md is the trainable artifact; "
+            f"apply={'ON' if apply else 'OFF — proposes a sidecar candidate'})..."
+        )
+        if proposer_note:
+            print(proposer_note)
+        _print_skillopt_corpus(corpus)
 
-    scorer = ContractCorpusScorer()
-    result = optimize_skill(verb, incumbent_text, candidate_texts, scorer, corpus)
+        scorer = ContractCorpusScorer()
+        result = optimize_skill(verb, incumbent_text, candidate_texts, scorer, corpus)
 
-    print("")
-    _print_skillopt_result(result)
+        print("")
+        _print_skillopt_result(result)
 
-    # Show what would change (winner vs. incumbent). Empty when the incumbent is kept.
-    if result.promoted:
-        diff = unified_diff(incumbent_text, result.winner_text, verb)
-        if diff:
-            print("")
-            print("Winner vs. incumbent (unified diff):")
-            # Cap the inline diff defensively; large output spills nowhere here, so
-            # just truncate the rendered text rather than flood the transcript.
-            if len(diff) > 20000:
-                diff = diff[:20000] + "\n... (diff truncated)\n"
-            print(diff)
-
-    # SAFE BY DEFAULT: default PROPOSES (sidecar), --apply is the gated mutate.
-    exit_code = 0
-    if apply:
+        # Show what would change (winner vs. incumbent). Empty when the incumbent is kept.
         if result.promoted:
-            try:
-                with open(skill_path, "w", encoding="utf-8") as fh:
-                    fh.write(result.winner_text)
+            diff = unified_diff(incumbent_text, result.winner_text, verb)
+            if diff:
                 print("")
-                print(f"--apply: gate PROMOTED -> overwrote {skill_path} in place.")
+                print("Winner vs. incumbent (unified diff):")
+                # Cap the inline diff defensively; large output spills nowhere here,
+                # so just truncate the rendered text rather than flood the transcript.
+                if len(diff) > 20000:
+                    diff = diff[:20000] + "\n... (diff truncated)\n"
+                print(diff)
+
+        # SAFE BY DEFAULT: default PROPOSES (sidecar), --apply is the gated mutate.
+        exit_code = 0
+        if apply:
+            if result.promoted:
+                try:
+                    with open(skill_path, "w", encoding="utf-8") as fh:
+                        fh.write(result.winner_text)
+                    applied = True
+                    print("")
+                    print(f"--apply: gate PROMOTED -> overwrote {skill_path} in place.")
+                except OSError as exc:
+                    print(f"error: could not overwrite {skill_path}: {exc}", file=sys.stderr)
+                    exit_code = 1
+            else:
+                print("")
+                print(
+                    f"--apply: gate did NOT promote (VERDICT={result.verdict}); "
+                    "the incumbent is kept UNCHANGED (never deploy a worse skill)."
+                )
+        elif result.promoted:
+            sidecar = os.path.join(skills_root, verb, "SKILL.candidate.md")
+            try:
+                with open(sidecar, "w", encoding="utf-8") as fh:
+                    fh.write(result.winner_text)
+                sidecar_written = sidecar
+                print("")
+                print(
+                    f"Proposed: wrote the winning candidate to {sidecar} "
+                    "(review it, then re-run with --apply to overwrite in place)."
+                )
             except OSError as exc:
-                print(f"error: could not overwrite {skill_path}: {exc}", file=sys.stderr)
+                print(f"error: could not write the sidecar {sidecar}: {exc}", file=sys.stderr)
                 exit_code = 1
         else:
             print("")
             print(
-                f"--apply: gate did NOT promote (VERDICT={result.verdict}); "
-                "the incumbent is kept UNCHANGED (never deploy a worse skill)."
+                f"Proposed nothing to promote (VERDICT={result.verdict}); "
+                "the incumbent stands."
             )
-    elif result.promoted:
-        sidecar = os.path.join(skills_root, verb, "SKILL.candidate.md")
-        try:
-            with open(sidecar, "w", encoding="utf-8") as fh:
-                fh.write(result.winner_text)
-            print("")
-            print(
-                f"Proposed: wrote the winning candidate to {sidecar} "
-                "(review it, then re-run with --apply to overwrite in place)."
-            )
-        except OSError as exc:
-            print(f"error: could not write the sidecar {sidecar}: {exc}", file=sys.stderr)
-            exit_code = 1
-    else:
-        print("")
-        print(
-            f"Proposed nothing to promote (VERDICT={result.verdict}); "
-            "the incumbent stands."
-        )
 
-    _record_skillopt_learning(config, verb, candidate_path, propose, apply, result)
+        _record_skillopt_learning(config, verb, candidate_path, propose, apply, result)
+
+    if _json_active(args):
+        # skillopt's typed summary is the gate outcome (verdict + promoted/applied)
+        # + the contract/corpus scores. Its VERDICT is the never-worse gate verdict;
+        # the gate block carries the promotion decision + the (dis)qualification
+        # reasons so the agentic CLI can machine-check a skill edit like a deploy.
+        gate_detail = getattr(result, "gate_detail", None) or {}
+        _emit_simple_envelope(
+            "skillopt",
+            successful=(exit_code == 0),
+            summary={
+                "verb": verb,
+                "verdict": result.verdict,
+                "promoted": bool(result.promoted),
+                "applied": applied,
+                "sidecar": sidecar_written,
+                "apply": apply,
+                "n_candidates": gate_detail.get("n_candidates"),
+                "n_eligible": gate_detail.get("n_eligible"),
+                "n_disqualified": gate_detail.get("n_disqualified"),
+                "incumbent_total": getattr(
+                    getattr(result, "incumbent_score", None), "total", None
+                ),
+            },
+            verdict=result.verdict,
+            gate={
+                "decision": "promote" if result.promoted else "keep",
+                "reasons": list(gate_detail.get("reasons") or []),
+            },
+            error=None if exit_code == 0 else "skillopt could not write its output file",
+        )
     return exit_code
 
 
@@ -4745,6 +5269,55 @@ def _record_skillopt_learning(
         pass
 
 
+def _print_verbs_table(manifest: list[dict]) -> None:
+    """Print the verb MANIFEST as a human-readable table (the non-``--json`` path).
+
+    Args:
+        manifest: The manifest list from :func:`_build_verb_manifest`.
+    """
+    print(f"Loom verbs ({len(manifest)}):")
+    name_w = max((len(v["name"]) for v in manifest), default=4)
+    tier_w = max((len(v["tier"]) for v in manifest), default=4)
+    for v in manifest:
+        dmi = "  [no-model-invoke]" if v["disable_model_invocation"] else ""
+        print(
+            f"  {v['name']:<{name_w}}  {v['tier']:<{tier_w}}{dmi}  -- {v['summary']}"
+        )
+        req = ", ".join(f"--{a}" for a in v["required"]) or "(none)"
+        opt = ", ".join(f"--{a}" for a in v["optional"]) or "(none)"
+        print(f"  {'':<{name_w}}  required: {req}")
+        print(f"  {'':<{name_w}}  optional: {opt}")
+
+
+def _cmd_verbs(args: argparse.Namespace) -> int:
+    """Handle ``loom verbs``: emit the verb MANIFEST (the agentic-CLI contract).
+
+    Introspects the top-level parser to build one manifest entry per lifecycle
+    verb -- ``{name, summary, required[], optional[], tier,
+    disable_model_invocation}`` (see :func:`_build_verb_manifest`). With ``--json``
+    it emits the manifest as a single JSON ARRAY to stdout (the machine-readable
+    source of truth the Pi-based agentic CLI uses to generate one typed tool per
+    verb + the gate policy); without ``--json`` it prints a human table. Read-only:
+    it introspects the parser and touches nothing.
+
+    Args:
+        args: Parsed arguments for the ``verbs`` subcommand (carries the
+            ``_root_parser`` set by :func:`_build_parser`).
+
+    Returns:
+        ``0`` always (a pure introspection).
+    """
+    root_parser = getattr(args, "_root_parser", None) or _build_parser()
+    manifest = _build_verb_manifest(root_parser)
+
+    if _json_active(args):
+        # ONE JSON array (the manifest) to stdout so a tool can JSON.parse it.
+        _emit_json(manifest)
+    else:
+        _print_verbs_table(manifest)
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     """Handle ``loom run``: build a task + config, run it, print results.
 
@@ -4831,38 +5404,63 @@ def _cmd_run(args: argparse.Namespace) -> int:
         dataset_ref=dataset_ref,
     )
 
-    print(
-        f"Running task {experiment_id!r} "
-        f"(search={config.search_provider}, mlops={config.mlops_provider}, "
-        f"steps={config.budget.steps})..."
-    )
+    with _verb_prose(args):
+        print(
+            f"Running task {experiment_id!r} "
+            f"(search={config.search_provider}, mlops={config.mlops_provider}, "
+            f"steps={config.budget.steps})..."
+        )
 
-    try:
-        result = run_loom(task, config)
-    except Exception as exc:  # noqa: BLE001 - translate to an actionable message
-        if _looks_like_auth_error(exc):
-            print(
-                f"\nerror: the LLM call failed with what looks like an "
-                f"authentication problem:\n  {type(exc).__name__}: {exc}\n"
-                "Check that the API key for your configured model is set and "
-                "valid (see the README 'Configuration' section).",
-                file=sys.stderr,
-            )
-            return 1
-        raise
+        try:
+            result = run_loom(task, config)
+        except Exception as exc:  # noqa: BLE001 - translate to an actionable message
+            if _looks_like_auth_error(exc):
+                print(
+                    f"\nerror: the LLM call failed with what looks like an "
+                    f"authentication problem:\n  {type(exc).__name__}: {exc}\n"
+                    "Check that the API key for your configured model is set and "
+                    "valid (see the README 'Configuration' section).",
+                    file=sys.stderr,
+                )
+                if _json_active(args):
+                    _emit_simple_envelope(
+                        "run",
+                        successful=False,
+                        summary={"experiment_id": experiment_id},
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                return 1
+            raise
 
-    # Read the leaderboard from the execution provider (best-effort). Resolving
-    # the provider class again and instantiating it from config is cheap and
-    # keeps the controller's return type minimal (it returns only SearchResult).
-    leaderboard: list[dict] = []
-    try:
-        exec_cls = get_execution(config.mlops_provider)
-        leaderboard = exec_cls(config).runs(experiment_id)
-    except Exception:
-        # A leaderboard is informational only; never fail the run over it.
-        leaderboard = []
+        # Read the leaderboard from the execution provider (best-effort). Resolving
+        # the provider class again and instantiating it from config is cheap and
+        # keeps the controller's return type minimal (it returns only SearchResult).
+        leaderboard: list[dict] = []
+        try:
+            exec_cls = get_execution(config.mlops_provider)
+            leaderboard = exec_cls(config).runs(experiment_id)
+        except Exception:
+            # A leaderboard is informational only; never fail the run over it.
+            leaderboard = []
 
-    _print_result(result, leaderboard)
+        _print_result(result, leaderboard)
+
+    if _json_active(args):
+        # run's typed summary is the SearchResult (best metric + node count +
+        # artifact paths) + the short leaderboard. No VERDICT; run does not gate.
+        _emit_simple_envelope(
+            "run",
+            successful=True,
+            summary={
+                "experiment_id": experiment_id,
+                "best_metric": result.best_metric,
+                "node_count": result.node_count,
+                "journal_path": result.journal_path,
+                "tree_path": result.tree_path,
+                "has_best_code": result.best_code is not None,
+                "leaderboard": leaderboard[:_LEADERBOARD_LIMIT],
+            },
+        )
     return 0
 
 
