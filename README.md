@@ -76,57 +76,72 @@ plans unless `--apply` (and the gate must ALLOW); `collab` builds unless `--send
 
 ## Install (macOS)
 
-Loom ships as **`loom`** — an agentic CLI you talk to in plain English: it picks
-the right lifecycle verb, runs it, reads the structured result, and composes the
-next step. Today it's a small polyglot install — the **`loom` command** (Node) +
-the **data-science engine** (Python) it drives + a **local datastore** for the
-lifecycle verbs. One copy-paste on a Mac:
+Loom is a small polyglot install — the **`loom` command** (Node) + the
+**data-science engine** (Python) it drives + a **local datastore** for the
+lifecycle verbs. Run the steps in order; each block is clean and copy-paste-ready.
+
+**1 — Prerequisites** (Homebrew): Node ≥ 22.19 and Python 3.12.
 
 ```bash
-# 0. Prereqs (Homebrew): node ≥22.19, python 3.12. (The datastore stack —
-#    colima, minikube, kubectl, awscli — is installed/started for you in step 4;
-#    install it here too if you like, it's detect-before-install either way.)
 brew install node python@3.12
-
-# 1. Clone
-git clone git@github.com:ZKAI-Network/Loom.git && cd Loom
-
-# 2. The engine (Python) — the verbs `loom` drives
-python3.12 -m venv .venv && source .venv/bin/activate && pip install -e .
-export LOOM_PYTHON="$(pwd)/.venv/bin/python"  # REQUIRED: how `loom` finds the engine — add to your shell profile
-
-# 3. The `loom` command (Node) — the agentic CLI itself
-( cd cli && npm install && npm run build && npm link )   # → `loom` on your PATH
-
-# 4. The local Metaflow datastore (for the lifecycle verbs) — one gated command.
-#    The script installs/starts colima+minikube, applies minio, makes the bucket,
-#    and writes .env.metaflow. It does NOT hold the port-forward open — start that
-#    yourself (the datastore is only reachable while it runs).
-bash scripts/setup_metaflow_minikube.sh
-kubectl port-forward -n loom svc/minio 9000:9000 9001:9001 &   # keep this alive
-source .env.metaflow
-"$LOOM_PYTHON" -m loom doctor                 # health check — should end "VERDICT: PASS"
-
-# 5. (optional) a model key — only the natural-language turns need one
-export ANTHROPIC_API_KEY="sk-ant-..."         # or run `loom`, then /login
-
-# 6. Go
-loom --help                                   # confirm the install — branded help + verb list
-loom                                          # open the agent
 ```
 
-Type **`loom`** and ask for what you want — *"profile my data and flag leakage"*,
-*"validate this against a sealed holdout"*. The read-only / lifecycle verbs work
-**without a model key**; only the natural-language planning + the AIDE search need
-one (a missing key gives an actionable `/login` line, never a crash).
+**2 — Clone the repo.**
 
-> **Early-install honesty.** It's a multi-step polyglot install for now (Node CLI
-> + Python engine + a local datastore); a one-command installer / `npm i -g` is on
-> the roadmap. **`LOOM_PYTHON` is required:** it must point at the venv where
-> `pip install -e .` ran (`<repo>/.venv/bin/python`), and you must export it in your
-> shell profile so every new shell's `loom` resolves the engine — without it, the
-> CLI boots but the lifecycle verbs can't find the engine. Likewise, the datastore
-> verbs only work while the step-4 `kubectl port-forward` is running.
+```bash
+git clone git@github.com:ZKAI-Network/Loom.git && cd Loom
+```
+
+**3 — Install the engine (Python)** and point `loom` at it. `LOOM_PYTHON` is
+**required** — add the `export` to your shell profile so every new shell finds the
+engine.
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate && pip install -e .
+export LOOM_PYTHON="$(pwd)/.venv/bin/python"
+```
+
+**4 — Install the `loom` command (Node).** Puts `loom` on your PATH.
+
+```bash
+( cd cli && npm install && npm run build && npm link )
+```
+
+**5 — Stand up the local datastore** (for the lifecycle verbs). The script
+detect-before-installs the stack (colima, minikube, kubectl, awscli), starts the
+cluster, applies minio, and writes `.env.metaflow`. The port-forward must stay
+running — leave it in its own shell or background it as below.
+
+```bash
+bash scripts/setup_metaflow_minikube.sh
+kubectl port-forward -n loom svc/minio 9000:9000 9001:9001 &
+source .env.metaflow
+"$LOOM_PYTHON" -m loom doctor
+```
+
+`loom doctor` should end with `VERDICT: PASS`.
+
+**6 — Run it.**
+
+```bash
+loom --help
+loom
+```
+
+Then ask for what you want — *"profile my data and flag leakage"*, *"validate this
+against a sealed holdout"*. The read-only / lifecycle verbs work **without a model
+key**; only the natural-language planning + the AIDE search need one. To set a key
+(or just run `loom` and use `/login`):
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+> **Early-install honesty.** It's a multi-step polyglot install for now (Node CLI +
+> Python engine + a local datastore); a one-command installer / `npm i -g` is on the
+> roadmap. Two things to remember: **`LOOM_PYTHON`** must stay exported (point it at
+> `<repo>/.venv/bin/python`) or the lifecycle verbs can't find the engine, and the
+> datastore verbs only work while the **step-5 port-forward** is running.
 
 ---
 
