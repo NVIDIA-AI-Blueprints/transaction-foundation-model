@@ -442,6 +442,14 @@ kubectl port-forward -n loom svc/minio 9000:9000 9001:9001 &   # keep this alive
 source .env.metaflow && loom doctor        # read-only health check — must end "VERDICT: PASS"
 ```
 
+**Browse the datastore.** The store is a local **minio** (S3-compatible). Its web
+console is at **http://localhost:9001** — log in with **`minioadmin`** /
+**`minioadmin123`** to see the `metaflow` bucket where ingested data objects and run
+artifacts land. Port **9000** is the S3 API Metaflow uses (not a UI; a browser there
+just bounces to the console). These are **local-dev-only** credentials baked into the
+manifest — they never leave your machine and aren't secrets; they're the same values
+exported into `.env.metaflow` (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`).
+
 <details>
 <summary><b>Or set it up by hand</b> — the verified minikube + minio recipe (laptop, no cloud, no GPU)</summary>
 
