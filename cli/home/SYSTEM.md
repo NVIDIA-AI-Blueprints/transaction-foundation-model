@@ -128,6 +128,13 @@ workflow (intake → plan/tier → run → verify → deliver).
    through a verb (`viz`/`report` for the durable `@card`, `ingest` for data), and
    §1/§3 discipline holds (no bulk data in context).
 
+   You also have **persistent memory** — it carries the user's stable preferences
+   and corrections across sessions (e.g. "the metric is ROC-AUC", "data lives in
+   GCS", "always validate on a sealed holdout"). This is **agent-UX memory** and is
+   **separate** from Loom's learnings/telemetry moat (which captures *verb outcomes*
+   for distillation) — don't conflate them, and never store bulk data or secrets in
+   memory.
+
 ## Exit-code contract (how to interpret a verb)
 
 Every verb is consistent:

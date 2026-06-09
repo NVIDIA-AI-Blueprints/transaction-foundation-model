@@ -13,6 +13,7 @@
     "npm:@walterra/pi-charts",
     "npm:@kaiserlich-dev/pi-session-search",
     "npm:pi-markdown-preview",
-    "npm:pi-mermaid"
+    "npm:pi-mermaid",
+    "npm:@samfp/pi-memory"
   ]
 }

@@ -19,6 +19,9 @@ const LOOM_PI_PACKAGES: { spec: string; marker: string }[] = [
 	{ spec: "npm:@kaiserlich-dev/pi-session-search", marker: "npm/node_modules/@kaiserlich-dev/pi-session-search/package.json" },
 	{ spec: "npm:pi-markdown-preview", marker: "npm/node_modules/pi-markdown-preview/package.json" },
 	{ spec: "npm:pi-mermaid", marker: "npm/node_modules/pi-mermaid/package.json" },
+	// Agent-UX memory (user prefs/corrections across sessions) — distinct from the
+	// learnings/telemetry moat (which captures verb OUTCOMES); see SYSTEM.md §9.
+	{ spec: "npm:@samfp/pi-memory", marker: "npm/node_modules/@samfp/pi-memory/package.json" },
 ];
 
 /**

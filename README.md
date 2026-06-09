@@ -28,7 +28,7 @@ interface* — never a concrete backend — so any layer is drop-in replaceable.
 ## Contents
 
 - **Start here** — [Install (macOS)](#install-macos) · [Update](#update) · [Uninstall](#uninstall) · [Quick engine smoke](#quick-engine-smoke-no-infra) · [Two ways to run](#two-ways-to-run)
-- **Drive it** — [The `loom` CLI](#using-loom-the-agentic-cli) · [Lifecycle verbs](#the-lifecycle-commands) · [Data model](#the-data-model-your-input-is-a-metaflow-data-object) · [Plan mode](#plan-mode-plan) · [Subagents](#subagents-delegate-focused-work) · [MCP data access](#data-access--cloud-ops-mcp)
+- **Drive it** — [The `loom` CLI](#using-loom-the-agentic-cli) · [Lifecycle verbs](#the-lifecycle-commands) · [Data model](#the-data-model-your-input-is-a-metaflow-data-object) · [Plan mode](#plan-mode-plan) · [Subagents](#subagents-delegate-focused-work) · [MCP data access](#data-access--cloud-ops-mcp) · [Workbench](#built-in-workbench)
 - **Run the lifecycle** — [Set up the datastore](#set-up-the-metaflow-datastore) · [Examples / eval bed](#examples--the-eval-bed) · [Verb workflows](#the-verb-workflows--loom-auto)
 - **Reference** — [Configuration](#configuration) · [Model providers](#model-providers) · [How it's built](#how-its-built) · [Tests](#tests) · [Status](#status)
 - **The long game** — [The moat: data flywheel & LOOM-DS-1](#the-moat--the-data-flywheel--loom-ds-1)
@@ -587,6 +587,29 @@ Each runs **only its tier-safe verb set** — no persona can fire an expensive
 promotion always stay with you in the parent. The generic agents that come with the
 delegation layer (a reviewer, a scout, an oracle for second opinions) are available
 too, for code/repo work.
+
+---
+
+## Built-in workbench
+
+Loom is a **complete** agentic environment — you shouldn't have to drop to a generic
+coding agent mid-analysis. Beyond the verbs, the agent can:
+
+- **search & fetch the web** and **extract PDFs** — look up a library API, an error,
+  a dataset's docs, a paper (`pi-web-access`);
+- **parse documents** locally — a data dictionary, spec, or paper (`pi-docparser`);
+- **plot inline** — quick Vega-Lite charts while exploring (`@walterra/pi-charts`);
+- **render write-ups** — markdown + LaTeX (`pi-markdown-preview`);
+- **draw diagrams** — sketch a pipeline/DAG (`pi-mermaid`);
+- **search past sessions** — recall a prior run or decision (`pi-session-search`);
+- **remember your preferences** across sessions (`pi-memory`) — *agent-UX memory,
+  separate from the learnings/telemetry moat below*.
+
+These **complement** the verbs: anything that becomes a durable artifact or dataset
+still flows through a verb (`viz`/`report` for the `@card`, `ingest` for data), and
+your bulk data never enters the chat. All ship preinstalled; `loom update` keeps them
+current. (Web *search* may need an API key; inline charts/preview render best in an
+image-capable macOS terminal.)
 
 ---
 
