@@ -1,0 +1,24 @@
+{
+  "name": "@zkailabs.com/loom",
+  "version": "0.1.0",
+  "description": "Installer for Loom — an agentic CLI for data science. On first run it clones the Loom repo (private) and runs its installer, then delegates to the installed CLI.",
+  "bin": {
+    "loom": "bin/loom.js"
+  },
+  "files": [
+    "bin/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.19"
+  },
+  "preferGlobal": true,
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/ZKAI-Network/Loom.git"
+  }
+}

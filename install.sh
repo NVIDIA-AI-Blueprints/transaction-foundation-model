@@ -145,7 +145,13 @@ run_agent() {
       codex)  cmd+=(--full-auto) ;;
     esac
   fi
-  cmd+=("$AGENT_PROMPT")
+  local prompt="$AGENT_PROMPT"
+  if [ -n "${LOOM_BOOTSTRAP:-}" ]; then
+    # Under the npm bootstrapper, the launcher owns the global `loom` and manages
+    # PATH + LOOM_PYTHON — so the assistant must NOT `npm link` or edit the profile.
+    prompt="$prompt Do NOT run \`npm link\` or edit the shell profile — the loom launcher already provides the command and sets LOOM_PYTHON; just build with \`npm install && npm run build\` in cli/."
+  fi
+  cmd+=("$prompt")
 
   echo "==> Found '$agent' — installing Loom with minimal prompting."
   echo "    It follows INSTALL.md and verifies with 'loom doctor'; routine steps run"
@@ -182,7 +188,14 @@ run_shell() {
 
   echo "--> [2/3] the 'loom' command (Node)"
   command -v node >/dev/null 2>&1 || { echo "    node not found. Run: brew install node" >&2; exit 1; }
-  ( cd cli && npm install && npm run build && npm link )
+  if [ -n "${LOOM_BOOTSTRAP:-}" ]; then
+    # Invoked by the npm bootstrapper (@zkailabs.com/loom), which already owns the
+    # global `loom` and delegates to this build — so build but do NOT `npm link`
+    # (a second `loom` bin would collide with the bootstrapper's).
+    ( cd cli && npm install && npm run build )
+  else
+    ( cd cli && npm install && npm run build && npm link )
+  fi
 
   echo "--> [3/3] local datastore"
   bash scripts/setup_metaflow_minikube.sh
