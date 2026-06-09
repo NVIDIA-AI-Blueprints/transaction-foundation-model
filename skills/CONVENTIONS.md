@@ -117,8 +117,8 @@ transcript, or in any persisted artifact or learnings row.
 - **Flat, hyphenated, lifecycle-named verbs** (`/loom-eda`, not a nested
   `loom data list` grammar). The noun is a **single free-text arg**, not flag
   soup. Reserve a tiny meta flag set (`--from`, `--budget`, `--model`).
-- **Dual surface:** every verb is a Claude Code Skill now and the same catalog
-  becomes `loom <verb>` in the future binary — one verb table, both surfaces.
+- **Dual surface:** every verb is both a `loom <verb>` command (the `loom` CLI)
+  and a `/loom-<verb>` skill workflow — one verb table, both surfaces.
 - **Dual-invocation:** rich `description` + `when_to_use` so the model can
   auto-load the verb, while the user can also type it. Reserve
   `disable-model-invocation: true` for irreversible/costly verbs.

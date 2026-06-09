@@ -3,10 +3,11 @@
 Loom is **an agentic CLI for the full data-science lifecycle** —
 **not** an automated ML engine. It's a catalog of `/loom-*` verbs (`connect · eda ·
 features · pipeline · train · optimize · validate · viz · report · deploy · ops ·
-collab`) spanning the whole lifecycle; ML *modeling* (the `optimize` verb, AIDE's
-search) is the ~3% "brain", and the other **97%** — data access, EDA, features,
-pipelines, training, validation, viz, reporting, deployment, ops, collaboration —
-is the product. It is built as **ports and adapters** ("providers"), the same way
+collab`) spanning the **whole** lifecycle — data access, EDA, features, pipelines,
+**model search and training** (AIDE + NeMo), validation, viz, reporting, deployment,
+ops, collaboration. Modeling is one slice, **fully included**; most tools automate
+only that slice, whereas Loom is the operator for the *entire* lifecycle. It is
+built as **ports and adapters** ("providers"), the same way
 Kubernetes treats container runtimes as pluggable: `loom-core` defines the provider
 *interfaces* (the ports); concrete *adapters* implement them and are chosen purely
 by configuration. Adding a new brain, MLOps backend, or model-builder is a new

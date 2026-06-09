@@ -1,17 +1,17 @@
-# Loom skill-pack (v0.1)
+# Loom skill library (v0.1)
 
-Claude Code skills that drive Loom conversationally. Loom is an agentic CLI for the
-**full data-science lifecycle** (domain-neutral; the metric is the spec) — ML
-modeling (the `loom-optimize` verb) is one slice; the other 97% is data access,
-EDA, features, pipelines, training, validation, viz, reporting, deployment, ops,
-and collaboration. These skills are the human-facing front door — they plan, gate
+The `/loom-*` skill library that drives Loom's verbs as guided workflows. Loom is an
+agentic CLI for the **full data-science lifecycle** (domain-neutral; the metric is
+the spec) — data access, EDA, features, pipelines, **model search and training**
+(AIDE + NeMo), validation, viz, reporting, deployment, ops, and collaboration;
+modeling is one slice, **fully included**. These skills are a front door — they plan, gate
 on cost/data, invoke the `loom` CLI through its provider interfaces, and narrate
 lineage-grounded results. They do not reimplement any engine logic; they call the
 same `loom` entrypoints a human would.
 
 ## Authoring a new verb
 
-Every `/loom-*` verb is a Claude Code `SKILL.md`. Author one from
+Every `/loom-*` verb is a `SKILL.md` skill. Author one from
 [`_TEMPLATE/SKILL.md`](_TEMPLATE/SKILL.md) (the canonical template +
 its 7-point acceptance test) and obey [`CONVENTIONS.md`](CONVENTIONS.md) (the
 cost/data approval matrix, the provider-interface discipline, no-S3, learnings
@@ -57,7 +57,7 @@ default MLOps muscle is Metaflow.
 
 ## Interface (v0.1)
 
-Each verb is a plain Claude-Code `SKILL.md` file: YAML frontmatter
+Each verb is a plain `SKILL.md` file: YAML frontmatter
 (`name` + `description` + `when_to_use`) followed by markdown instructions. They
 shell out to the project's CLI (never importing a concrete backend):
 

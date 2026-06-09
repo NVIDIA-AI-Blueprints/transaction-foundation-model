@@ -4,9 +4,10 @@
 `/loom-*` verbs — `connect · eda · features · pipeline · train · optimize ·
 validate · viz · report · deploy · ops · collab` — spanning the **whole**
 data-science lifecycle, each an agentic skill you drive from the standalone
-**`loom`** CLI. ML *modeling* is the ~3%
-"brain"; the product is the other **97%** — data access, EDA, features,
-pipelines, training, validation, viz, reporting, deployment, ops, collaboration.
+**`loom`** CLI: data access, EDA, features, **model search and training**
+(AIDE + NeMo), validation, viz, reporting, deployment, ops, collaboration.
+Most tools automate only the modeling step; Loom is the agentic operator for the
+**entire lifecycle, end to end — modeling included.**
 
 Loom is **ports & adapters** (like Kubernetes' pluggable runtimes): three
 swappable interfaces, sensible defaults, and every verb runs *through an
