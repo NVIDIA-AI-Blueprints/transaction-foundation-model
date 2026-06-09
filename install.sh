@@ -131,11 +131,28 @@ run_agent() {
   # Clear the macOS pyexpat breakage up front so the assistant starts from a
   # python3.12 whose venv/pip actually work.
   ensure_macos_python_expat || true
-  echo "==> Found '$agent' — letting it install Loom for you."
-  echo "    It follows INSTALL.md, adapts to your machine, and verifies with 'loom doctor'."
-  echo "    Approve its steps as it goes (it will ask before anything destructive)."
+
+  # Run the routine install steps WITHOUT a prompt-per-command. Installing Loom is
+  # a bounded, reversible (./uninstall.sh), user-initiated local task, so we
+  # pre-approve the tools it actually needs (shell + file edits) rather than make
+  # you confirm every pip/npm/brew/kubectl call. Unexpected tools still prompt, and
+  # the prompt tells the assistant to ask before anything destructive or sudo.
+  # Set LOOM_INSTALL_SUPERVISED=1 to keep the per-step approvals.
+  local -a cmd=("$agent")
+  if [ -z "${LOOM_INSTALL_SUPERVISED:-}" ]; then
+    case "$agent" in
+      claude) cmd+=(--allowedTools Bash Edit Write Read --permission-mode acceptEdits) ;;
+      codex)  cmd+=(--full-auto) ;;
+    esac
+  fi
+  cmd+=("$AGENT_PROMPT")
+
+  echo "==> Found '$agent' — installing Loom with minimal prompting."
+  echo "    It follows INSTALL.md and verifies with 'loom doctor'; routine steps run"
+  echo "    without asking, and it still flags anything risky before doing it."
+  echo "    (Set LOOM_INSTALL_SUPERVISED=1 to approve every step instead.)"
   echo
-  exec "$agent" "$AGENT_PROMPT"
+  exec "${cmd[@]}"
 }
 
 run_shell() {

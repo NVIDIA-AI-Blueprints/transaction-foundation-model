@@ -84,8 +84,10 @@ git clone git@github.com:ZKAI-Network/Loom.git && cd Loom && ./install.sh
 
 **`./install.sh` prefers an AI assistant.** If **Claude** or **Codex** is on your
 `PATH`, it hands the install to that assistant — which follows
-[`INSTALL.md`](INSTALL.md), adapts to your machine, and fixes errors as it goes (you
-approve each step). With neither present, it runs the same steps as a plain script.
+[`INSTALL.md`](INSTALL.md), adapts to your machine, and fixes errors as it goes. The
+routine steps run without prompting (it still flags anything risky;
+`LOOM_INSTALL_SUPERVISED=1` keeps the per-step approvals). With neither present, it
+runs the same steps as a plain script.
 Either way it sets up the three pieces: the **`loom` command** (Node), the **engine**
 (Python) it drives, and a **local datastore** (minikube + minio) for the lifecycle
 verbs.
