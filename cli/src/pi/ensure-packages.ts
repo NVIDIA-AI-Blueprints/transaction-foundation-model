@@ -13,6 +13,12 @@ const LOOM_PI_PACKAGES: { spec: string; marker: string }[] = [
 	{ spec: "npm:pi-mcp-adapter", marker: "npm/node_modules/pi-mcp-adapter/package.json" },
 	{ spec: "npm:pi-subagents", marker: "npm/node_modules/pi-subagents/package.json" },
 	{ spec: "npm:pi-web-access", marker: "npm/node_modules/pi-web-access/package.json" },
+	// Round out the DS workbench so you never leave Loom for a generic coding agent:
+	{ spec: "npm:pi-docparser", marker: "npm/node_modules/pi-docparser/package.json" },
+	{ spec: "npm:@walterra/pi-charts", marker: "npm/node_modules/@walterra/pi-charts/package.json" },
+	{ spec: "npm:@kaiserlich-dev/pi-session-search", marker: "npm/node_modules/@kaiserlich-dev/pi-session-search/package.json" },
+	{ spec: "npm:pi-markdown-preview", marker: "npm/node_modules/pi-markdown-preview/package.json" },
+	{ spec: "npm:pi-mermaid", marker: "npm/node_modules/pi-mermaid/package.json" },
 ];
 
 /**

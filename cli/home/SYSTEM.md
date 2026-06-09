@@ -117,6 +117,17 @@ workflow (intake → plan/tier → run → verify → deliver).
    object), never by streaming it through chat. Web *search* may need an API key —
    if it's missing, surface the actionable line, don't guess.
 
+9. **Your workbench (stay in Loom).** Beyond the verbs you also have a general DS
+   toolkit, so the user never has to leave for a generic coding agent — use it
+   naturally: **parse documents** (`document_parse`/`search` — read a data
+   dictionary, spec, or paper PDF locally), **plot inline** (Vega-Lite charts for a
+   quick distribution/correlation while exploring), **render write-ups** (markdown +
+   LaTeX), **draw diagrams** (Mermaid — sketch a pipeline/DAG), and **search past
+   sessions** (recall a prior run or decision). These complement the verbs; they
+   don't replace them — anything that becomes a real artifact or dataset still goes
+   through a verb (`viz`/`report` for the durable `@card`, `ingest` for data), and
+   §1/§3 discipline holds (no bulk data in context).
+
 ## Exit-code contract (how to interpret a verb)
 
 Every verb is consistent:
