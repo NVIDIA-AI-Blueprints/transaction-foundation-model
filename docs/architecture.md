@@ -190,6 +190,15 @@ vocabulary, never backend nouns** — the adapter is a *compiler that lowers int
 backend config*, and every backend noun (`Megatron`, `.nemo`, `@resources(gpu=8)`)
 lives inside the adapter and nowhere else.
 
+This port is the **training-engine seam**, and its adapters are the peers that
+*compare here*: distributed training / optimization frameworks. **NeMo AutoModel**
+is the default; **[DeepSpeed](https://github.com/deepspeedai/deepspeed)**, PyTorch
+**FSDP**, **Megatron**, and HF **Accelerate** are drop-in alternatives behind the
+same `/loom-train` intent (a torch-free CPU `local` adapter stands in for dev). They
+do **not** compare with Metaflow: Metaflow is the *execution* port — it **orchestrates
+the GPU step** that runs whichever engine you pick, and the engine builds the weights
+inside it. Orchestration vs. training engine — different ports that compose.
+
 ```python
 OBJECTIVES = frozenset({"next-event", "masked-field", "contrastive"})
 BUDGETS    = frozenset({"probe", "small", "full"})

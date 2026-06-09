@@ -17,7 +17,7 @@ interface* — never a concrete backend — so any layer is drop-in replaceable.
 |---|---|---|
 | **Search** ("brain") | the `/loom-optimize` ML-iteration engine (one slice) | [AIDE](https://github.com/WecoAI/aideml) tree-search |
 | **MLOps** ("muscle") | data objects · flows · runs · `@card` · deploy/ops | [Metaflow](https://metaflow.org) (a Metaflow-free `local` path for quick trials) |
-| **Model-builder** ("training") | `/loom-train` — pretrain · finetune · embed · serve | [NeMo](https://github.com/NVIDIA-NeMo/Automodel) (a torch-free CPU `local` stand-in for dev) |
+| **Model-builder** ("training engine") | `/loom-train` — pretrain · finetune · embed · serve | [NeMo AutoModel](https://github.com/NVIDIA-NeMo/Automodel) — swappable seam (CPU `local` stand-in for dev; DeepSpeed/FSDP/Megatron planned) |
 
 > The **metric is the spec.** Anything you can state as *"here's the data,
 > here's the goal, here's how a solution is scored"* is a valid run. Loom is
@@ -419,6 +419,12 @@ For the real GPU pretrain (v0.2), point `LOOM_GPU_TARGET` at an on-demand GPU
 the gate, the cost-surface, and the `local` stand-in are documented in
 [`docs/architecture.md`](docs/architecture.md).
 
+The model-builder is a **swappable training-engine seam**: NeMo AutoModel is the
+default adapter, with [DeepSpeed](https://github.com/deepspeedai/deepspeed), PyTorch
+FSDP, Megatron, and HF Accelerate as planned peers. These engines compare *with each
+other* (distributed training/optimization) — **not** with Metaflow, which orchestrates
+the step that runs whichever one you choose.
+
 ---
 
 <a name="set-up-the-metaflow-datastore"></a>
@@ -584,7 +590,7 @@ a key on the command line.**
 |---|---|---|---|
 | `LOOM_SEARCH_PROVIDER` | `--search` | `aide` | search ("brain") provider |
 | `LOOM_MLOPS_PROVIDER` | `--mlops` | `metaflow` | execution ("muscle") provider |
-| `LOOM_MODEL_BUILDER_PROVIDER` | — | `nemo` | model-builder ("training") provider — `nemo` or `local` |
+| `LOOM_MODEL_BUILDER_PROVIDER` | — | `nemo` | training-engine provider — `nemo` (AutoModel) or `local` today; `deepspeed` / `fsdp` / `megatron` planned |
 | `LOOM_GPU_TARGET` | — | (none) | GPU target for `train --launch`; unset ⇒ a clean refusal, never a launch |
 | `LOOM_CODE_PROVIDER` | `--code-provider` | `anthropic-api` | model ("LLM backend") provider for the code role |
 | `LOOM_FEEDBACK_PROVIDER` | `--feedback-provider` | `anthropic-api` | model provider for the feedback/judge role |
@@ -816,7 +822,7 @@ no core changes.
 |---|---|---|
 | Search ("brain") | `SearchProvider` | `aide` |
 | Execution ("muscle") | `ExecutionProvider` | `metaflow`, `local` |
-| Model-builder ("training") | `ModelBuilderProvider` | `nemo`, `local` |
+| Model-builder ("training engine") | `ModelBuilderProvider` | `nemo` (AutoModel), `local` · planned: `deepspeed`, `fsdp`, `megatron`, `accelerate` |
 | Model ("LLM backend") | `ModelProvider` | `anthropic-api`, `openai-api`, `openrouter`, `nim`, `openai-compat`, `claude-subscription`, `codex-subscription`, `loom-proxy` |
 
 <details>
