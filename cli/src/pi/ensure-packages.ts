@@ -12,6 +12,7 @@ import { resolve } from "node:path";
 const LOOM_PI_PACKAGES: { spec: string; marker: string }[] = [
 	{ spec: "npm:pi-mcp-adapter", marker: "npm/node_modules/pi-mcp-adapter/package.json" },
 	{ spec: "npm:pi-subagents", marker: "npm/node_modules/pi-subagents/package.json" },
+	{ spec: "npm:pi-web-access", marker: "npm/node_modules/pi-web-access/package.json" },
 ];
 
 /**

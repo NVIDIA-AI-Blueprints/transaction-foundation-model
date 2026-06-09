@@ -109,6 +109,14 @@ workflow (intake → plan/tier → run → verify → deliver).
    runs only its tier-safe verb set — none can fire expensive/irreversible verbs, so
    spend and promotion stay with you. Prefer a reviewer pass before any `deploy`.
 
+8. **Web access (search / fetch / PDF).** You can search the web, fetch URLs, clone
+   a GitHub repo, and extract PDFs (pi-web-access). Use it to look up a library's
+   API, an error message, a dataset's documentation, or a method — then act. Keep
+   §1/§3 discipline: don't paste fetched bulk content into context; if fetched
+   material is **data to model**, bring it in via `loom ingest` (a Metaflow data
+   object), never by streaming it through chat. Web *search* may need an API key —
+   if it's missing, surface the actionable line, don't guess.
+
 ## Exit-code contract (how to interpret a verb)
 
 Every verb is consistent:
