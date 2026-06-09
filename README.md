@@ -379,6 +379,29 @@ A `train` fixture with a planted signal wants per-account event sequences
 
 ---
 
+## Examples & the eval bed
+
+[`examples/`](examples/) is six per-use-case walkthroughs that **double as a
+regression eval bed** — the core lifecycle, leakage detection, the sequence
+model-builder (CPU), gated deploy, ops/drift, and telemetry distillation. Each
+is self-contained and **self-checking**: a `run.sh` generates deterministic
+domain-neutral synthetic data, ingests it under a unique dataset name, runs a
+**keyless** verb sequence with `--json`, and asserts the outcomes inline
+(exiting nonzero on any drift in the `--json` contract).
+
+```bash
+source /tmp/loom-cluster-env.sh                       # the datastore env (above)
+bash examples/01-tabular-classification/run.sh        # one example
+for d in examples/[0-9]*/; do bash "$d/run.sh"; done  # the whole bed
+```
+
+`tests/test_examples.py` replays every `run.sh` and asserts exit 0, so a
+regressed verb outcome turns red in CI; it **skips cleanly** when no datastore is
+reachable. Start at [`examples/README.md`](examples/README.md) for the index and
+the keyless-vs-key-gated note.
+
+---
+
 ## Drive it conversationally (Claude Code)
 
 Prefer to talk to it? The [`skills/`](skills/) pack turns Loom into a Claude Code
