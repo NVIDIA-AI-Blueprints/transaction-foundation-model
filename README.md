@@ -17,7 +17,7 @@ interface* — never a concrete backend — so any layer is drop-in replaceable.
 |---|---|---|
 | **Search** ("brain") | the `/loom-optimize` ML-iteration engine (one slice) | [AIDE](https://github.com/WecoAI/aideml) tree-search |
 | **MLOps** ("muscle") | data objects · flows · runs · `@card` · deploy/ops | [Metaflow](https://metaflow.org) (a Metaflow-free `local` path for quick trials) |
-| **Model-builder** ("training") | `/loom-train` — pretrain · finetune · embed · serve | **NeMo** (a torch-free CPU `local` stand-in for dev) |
+| **Model-builder** ("training") | `/loom-train` — pretrain · finetune · embed · serve | [NeMo](https://github.com/NVIDIA/NeMo) (a torch-free CPU `local` stand-in for dev) |
 
 > The **metric is the spec.** Anything you can state as *"here's the data,
 > here's the goal, here's how a solution is scored"* is a valid run. Loom is
