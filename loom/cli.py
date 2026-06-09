@@ -118,6 +118,24 @@ Exposes the ``loom`` console script (wired in ``pyproject.toml`` as
     environment on the server; a missing server-side ``ANTHROPIC_API_KEY`` fails
     fast with an actionable message.
 
+``loom skillopt --verb <loom-eda|...> [--candidate PATH | --propose] [--apply]``
+    Run the self-improvement loop's **OPTIMIZE** stage over one verb's
+    ``SKILL.md`` -- the moat (design-spec §5). HiveMind captures the verb's
+    learnings corpus (:func:`loom.hivemind.capture_corpus`, filtered to the
+    ``owned_by=general`` IP boundary), then SkillOpt's deterministic scorer grades
+    the incumbent SKILL.md + any candidate on the 7-point acceptance contract
+    (HARD) + corpus failure-mode coverage (SOFT) and applies a never-worse
+    promotion GATE (the exact parallel of :func:`flows.deploy.deploy_gate`): the
+    best hard-valid candidate is promoted ONLY if it beats the incumbent by a
+    margin -- a contract violator or a regression can never win. **Safe by
+    default:** the default PROPOSES (writes a sidecar ``SKILL.candidate.md`` + prints
+    the corpus digest + the gate VERDICT + a unified diff); the real in-place
+    overwrite is behind ``--apply`` and runs ONLY when the gate PROMOTED (mirroring
+    ``loom deploy --apply``). Appends a ``command="skillopt"`` learnings audit row.
+    The loop is deterministic / LLM-free; ``--propose`` is an optional pluggable
+    proposer (a clearly-marked no-op when no model is configured). Read-only by
+    default; ``--apply`` is the gated mutate.
+
 This module is dependency-light at import time: it imports only the standard
 library and Loom core. The heavy optional dependencies (AIDE, Metaflow, ...)
 are pulled in only when the controller resolves a provider that needs them, at
@@ -867,6 +885,76 @@ def _build_parser() -> argparse.ArgumentParser:
     proxy_serve.set_defaults(func=_cmd_proxy_serve)
     # No action -> print the proxy help and exit non-zero (mirrors top-level).
     proxy_parser.set_defaults(func=_cmd_proxy, _proxy_parser=proxy_parser)
+
+    skillopt_parser = subparsers.add_parser(
+        "skillopt",
+        help="Optimize a /loom-* SKILL.md against the learnings corpus (gated; proposes by default).",
+        description=(
+            "Run the self-improvement loop's OPTIMIZE stage over one verb's "
+            "SKILL.md (the moat, design-spec §5). HiveMind captures the verb's "
+            "learnings corpus (`learnings/rollouts.jsonl`, filtered to the "
+            "`owned_by=general` IP boundary), then SkillOpt's deterministic scorer "
+            "grades the incumbent SKILL.md and any candidate(s) on the 7-point "
+            "acceptance contract (HARD) + corpus failure-mode coverage (SOFT) and "
+            "applies a never-worse promotion GATE (parallel to `loom deploy`): the "
+            "BEST hard-valid candidate is promoted ONLY if it beats the incumbent "
+            "by a margin -- a contract violator or a regression can NEVER win. "
+            "SAFE BY DEFAULT: with no --apply the command only PROPOSES -- it "
+            "prints the corpus digest + the gate VERDICT + a unified diff and "
+            "writes the winning text to a sidecar `skills/<verb>/SKILL.candidate.md`; "
+            "the real in-place overwrite happens ONLY with --apply AND only when the "
+            "gate ALLOWED (promoted). Every run appends a `command=\"skillopt\"` "
+            "learnings audit row. The whole loop is deterministic / LLM-free; "
+            "--propose is an OPTIONAL pluggable proposer that is a clearly-marked "
+            "no-op when no model is configured. Read-only by default; --apply is the "
+            "gated mutate (editing the shipped skill library)."
+        ),
+    )
+    skillopt_parser.add_argument(
+        "--verb",
+        required=True,
+        metavar="loom-eda|...",
+        help=(
+            "The /loom-* verb whose SKILL.md to optimize (with or without the "
+            "`loom-` prefix; resolved to skills/<verb>/SKILL.md)."
+        ),
+    )
+    skillopt_parser.add_argument(
+        "--candidate",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a candidate SKILL.md text to score against the incumbent "
+            "(the deterministic, LLM-free candidate source). Repeatable score "
+            "input; mutually exclusive with --propose."
+        ),
+    )
+    skillopt_parser.add_argument(
+        "--propose",
+        action="store_true",
+        help=(
+            "Ask the OPTIONAL pluggable LLM proposer for a candidate (a "
+            "clearly-marked no-op/stub when no model is configured). Mutually "
+            "exclusive with --candidate; with neither, the command just scores + "
+            "reports the incumbent and the corpus digest."
+        ),
+    )
+    skillopt_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Overwrite skills/<verb>/SKILL.md IN PLACE -- ONLY when the gate "
+            "PROMOTED a candidate (OFF by default; the default proposes a sidecar). "
+            "This is the gated mutate of the shipped skill library."
+        ),
+    )
+    skillopt_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the learnings path / owner).",
+    )
+    skillopt_parser.set_defaults(func=_cmd_skillopt)
 
     return parser
 
@@ -3670,6 +3758,415 @@ def _cmd_proxy_serve(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:  # pragma: no cover - interactive shutdown
         print("\nLoom gateway stopped.", file=sys.stderr)
     return 0
+
+
+# ---------------------------------------------------------------------------
+# `loom skillopt`: the self-improvement loop's OPTIMIZE stage (the moat v0.2).
+#
+# This is the one ops/meta verb that optimizes the OTHER /loom-* skills. It
+# captures a verb's learnings corpus (HiveMind), scores the incumbent SKILL.md +
+# any candidate against the 7-point acceptance contract (HARD) + corpus coverage
+# (SOFT), and applies the never-worse promotion GATE -- the exact parallel of
+# `loom deploy`'s exit gate. SAFE BY DEFAULT: it PROPOSES (writes a sidecar
+# candidate + prints the gate verdict + a diff); the in-place SKILL.md overwrite
+# is behind --apply and runs ONLY when the gate PROMOTED a candidate. The whole
+# loop is deterministic + LLM-free (the scorer + a file/identity candidate
+# source); --propose is an OPTIONAL pluggable adapter that is a clearly-marked
+# no-op when no model is configured.
+# ---------------------------------------------------------------------------
+
+# Where the in-repo skill library lives relative to this file (loom/cli.py ->
+# the repo root's skills/ dir). Resolved at call time, never a hardcoded abs path.
+def _skills_root() -> str:
+    """Return the absolute path of the in-repo ``skills/`` directory.
+
+    Anchored off this module's location (``loom/cli.py``) so it resolves the
+    same regardless of the launch cwd.
+
+    Returns:
+        The absolute ``skills/`` directory path.
+    """
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills")
+
+
+def _normalize_verb(verb: str) -> str:
+    """Normalize a ``--verb`` to the ``loom-<name>`` skill-folder convention.
+
+    Accepts ``eda`` / ``loom-eda`` / ``loom eda`` and returns ``loom-eda`` -- the
+    name of the skill folder under ``skills/``.
+
+    Args:
+        verb: The raw ``--verb`` value.
+
+    Returns:
+        The normalized ``loom-<name>`` verb string.
+    """
+    token = (verb or "").strip().lower().replace(" ", "-")
+    if not token:
+        return token
+    return token if token.startswith("loom-") else f"loom-{token}"
+
+
+def _skill_command(verb: str) -> str:
+    """The ``command`` learnings field a verb's rollouts carry (no ``loom-`` prefix).
+
+    The lifecycle CLI records rollout rows with ``command="eda"`` (the bare verb),
+    so the corpus capture must strip the ``loom-`` skill-folder prefix.
+
+    Args:
+        verb: The normalized ``loom-<name>`` verb.
+
+    Returns:
+        The bare command name (e.g. ``"eda"``).
+    """
+    return verb[len("loom-"):] if verb.startswith("loom-") else verb
+
+
+def _propose_candidate(verb: str, incumbent_text: str, corpus: object) -> Optional[str]:
+    """The OPTIONAL pluggable LLM proposer seam for ``--propose`` (a no-op stub by default).
+
+    The self-improvement loop is deterministic + LLM-free by design: the scorer +
+    gate need no model, and the load-bearing candidate source is a file
+    (``--candidate``) or the identity incumbent. ``--propose`` is the *optional*
+    adapter that would ask a model to draft a better SKILL.md. In v0.2 no model is
+    wired here, so this is a **clearly-marked no-op**: it returns ``None`` (no
+    candidate proposed) and the caller reports that the proposer is a stub. Wiring a
+    real proposer means returning a candidate text from this one function -- the
+    gate then scores + gates it exactly like a ``--candidate`` file, so a model's
+    draft can never bypass the never-worse contract gate.
+
+    Args:
+        verb: The normalized ``loom-<name>`` verb being optimized.
+        incumbent_text: The currently-shipped SKILL.md text.
+        corpus: The captured :class:`~loom.hivemind.VerbCorpus` digest.
+
+    Returns:
+        A proposed candidate SKILL.md text, or ``None`` when no proposer is
+        configured (the default).
+    """
+    return None
+
+
+def _print_skillopt_corpus(corpus: object) -> None:
+    """Print a compact HiveMind corpus digest for the verb being optimized.
+
+    Args:
+        corpus: The :class:`~loom.hivemind.VerbCorpus` digest.
+    """
+    n = getattr(corpus, "n_rollouts", 0)
+    print("Captured corpus (HiveMind):")
+    print(f"  owned_by    : {getattr(corpus, 'owned_by_filter', 'general')} (IP boundary)")
+    print(f"  rollouts    : {n}")
+    if not n:
+        print("  (empty corpus -- scoring against the contract only; the moat compounds from run #1)")
+        return
+    print(
+        f"  success     : {getattr(corpus, 'n_success', 0)}/{n} "
+        f"({getattr(corpus, 'success_rate', 0.0):.0%})"
+    )
+    metric = getattr(corpus, "metric", None)
+    if metric is not None and getattr(metric, "n", 0):
+        print(
+            f"  metric      : min={_format_metric(metric.min)} "
+            f"mean={_format_metric(metric.mean)} max={_format_metric(metric.max)} "
+            f"(n={metric.n})"
+        )
+    verdicts = getattr(corpus, "verdict_histogram", {}) or {}
+    if verdicts:
+        shown = ", ".join(f"{k}={v}" for k, v in list(verdicts.items())[:6])
+        print(f"  verdicts    : {shown}")
+    failures = getattr(corpus, "failure_modes", []) or []
+    if failures:
+        shown = ", ".join(f"{fm.label}={fm.count}" for fm in failures[:6])
+        print(f"  failures    : {shown}")
+
+
+def _print_skillopt_result(result: object) -> None:
+    """Print the gate VERDICT + the incumbent/candidate scores for a skillopt run.
+
+    Args:
+        result: The :class:`~loom.skillopt.SkillOptResult` to render.
+    """
+    inc = result.incumbent_score
+    print("SkillOpt gate:")
+    print(f"  verb        : {result.verb}")
+    print(f"  VERDICT     : {result.verdict} (promoted={result.promoted})")
+    inc_misses = inc.detail.get("hard_misses", []) if isinstance(inc.detail, dict) else []
+    print(
+        f"  incumbent   : hard_ok={inc.hard_ok} soft={inc.soft:.4g} total={inc.total:.6g}"
+        + (f"  hard_misses={inc_misses}" if inc_misses else "")
+    )
+    for idx, score in enumerate(result.candidate_scores):
+        misses = score.detail.get("hard_misses", []) if isinstance(score.detail, dict) else []
+        marker = "  <- WINNER" if (result.promoted and idx == result.winner_index) else ""
+        print(
+            f"  candidate {idx}: hard_ok={score.hard_ok} soft={score.soft:.4g} "
+            f"total={score.total:.6g}"
+            + (f"  hard_misses={misses}" if misses else "")
+            + marker
+        )
+    gate = result.gate_detail or {}
+    if gate.get("n_disqualified"):
+        print(
+            f"  disqualified: {gate.get('n_disqualified')} candidate(s) violated a "
+            "hard contract constraint (excluded before selection)"
+        )
+
+
+def _cmd_skillopt(args: argparse.Namespace) -> int:
+    """Handle ``loom skillopt``: capture -> score -> gate -> propose (or gated --apply).
+
+    Resolves the verb's ``skills/<verb>/SKILL.md`` (the trainable artifact),
+    captures the verb's learnings corpus through HiveMind
+    (:func:`loom.hivemind.capture_corpus`, filtered to the ``owned_by=general`` IP
+    boundary), gathers candidate texts (from ``--candidate`` files; or ``--propose``
+    -- the optional LLM proposer stub; or none = score+report the incumbent), runs
+    the pure :func:`loom.skillopt.optimize_skill` never-worse GATE, and prints the
+    corpus digest + the gate VERDICT + a unified diff of the winner vs. the
+    incumbent. SAFE BY DEFAULT: the default PROPOSES -- it writes the winning text to
+    a sidecar ``skills/<verb>/SKILL.candidate.md`` and reports; ``--apply`` overwrites
+    ``skills/<verb>/SKILL.md`` IN PLACE only when the gate PROMOTED a candidate
+    (mirroring ``loom deploy --apply``). Every run appends a ``command="skillopt"``
+    learnings audit row.
+
+    Args:
+        args: Parsed arguments for the ``skillopt`` subcommand.
+
+    Returns:
+        Process exit code (0 on success, non-zero on a usage/IO error). A clean run
+        whose gate KEPT the incumbent still returns 0 -- KEEP is the correct,
+        machine-checkable outcome, surfaced in the VERDICT.
+    """
+    from loom.hivemind import capture_corpus
+    from loom.skillopt import ContractCorpusScorer, optimize_skill, unified_diff
+
+    config = _build_config(args)
+    verb = _normalize_verb(getattr(args, "verb", "") or "")
+    candidate_path = (getattr(args, "candidate", None) or "").strip() or None
+    propose = bool(getattr(args, "propose", False))
+    apply = bool(getattr(args, "apply", False))
+
+    if not verb:
+        print("error: --verb is required (e.g. --verb loom-eda).", file=sys.stderr)
+        return 2
+    if candidate_path and propose:
+        print(
+            "error: pass at most one candidate source: --candidate PATH or "
+            "--propose (not both).",
+            file=sys.stderr,
+        )
+        return 2
+
+    skills_root = _skills_root()
+    skill_path = os.path.join(skills_root, verb, "SKILL.md")
+    if not os.path.isfile(skill_path):
+        print(
+            f"error: no incumbent skill found at {skill_path} (is --verb {verb!r} a "
+            "real /loom-* verb under skills/?).",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        with open(skill_path, "r", encoding="utf-8") as fh:
+            incumbent_text = fh.read()
+    except OSError as exc:
+        print(f"error: could not read the incumbent skill {skill_path}: {exc}", file=sys.stderr)
+        return 2
+
+    # Gather candidate texts. Deterministic, LLM-free by default: a --candidate
+    # file, an optional --propose stub, or none (score + report the incumbent).
+    candidate_texts: list[str] = []
+    if candidate_path:
+        if not os.path.isfile(candidate_path):
+            print(
+                f"error: --candidate path does not exist: {candidate_path}",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            with open(candidate_path, "r", encoding="utf-8") as fh:
+                candidate_texts.append(fh.read())
+        except OSError as exc:
+            print(f"error: could not read the candidate {candidate_path}: {exc}", file=sys.stderr)
+            return 2
+
+    # Capture the verb's learnings corpus (HiveMind). The command field the
+    # lifecycle CLI records is the bare verb (e.g. "eda"), and the IP boundary keeps
+    # ONLY owned_by="general" rows. Tolerant of a missing/empty corpus.
+    command = _skill_command(verb)
+    corpus = capture_corpus(command, config.learnings_path, owned_by_filter="general")
+
+    proposer_note = ""
+    if propose:
+        proposed = _propose_candidate(verb, incumbent_text, corpus)
+        if proposed is not None:
+            candidate_texts.append(proposed)
+        else:
+            proposer_note = (
+                "  (--propose: no LLM proposer configured -- this is a no-op stub; "
+                "scoring the incumbent only. Supply --candidate PATH for a real "
+                "candidate.)"
+            )
+
+    print(
+        f"Optimizing skill {verb!r} (SKILL.md is the trainable artifact; "
+        f"apply={'ON' if apply else 'OFF — proposes a sidecar candidate'})..."
+    )
+    if proposer_note:
+        print(proposer_note)
+    _print_skillopt_corpus(corpus)
+
+    scorer = ContractCorpusScorer()
+    result = optimize_skill(verb, incumbent_text, candidate_texts, scorer, corpus)
+
+    print("")
+    _print_skillopt_result(result)
+
+    # Show what would change (winner vs. incumbent). Empty when the incumbent is kept.
+    if result.promoted:
+        diff = unified_diff(incumbent_text, result.winner_text, verb)
+        if diff:
+            print("")
+            print("Winner vs. incumbent (unified diff):")
+            # Cap the inline diff defensively; large output spills nowhere here, so
+            # just truncate the rendered text rather than flood the transcript.
+            if len(diff) > 20000:
+                diff = diff[:20000] + "\n... (diff truncated)\n"
+            print(diff)
+
+    # SAFE BY DEFAULT: default PROPOSES (sidecar), --apply is the gated mutate.
+    exit_code = 0
+    if apply:
+        if result.promoted:
+            try:
+                with open(skill_path, "w", encoding="utf-8") as fh:
+                    fh.write(result.winner_text)
+                print("")
+                print(f"--apply: gate PROMOTED -> overwrote {skill_path} in place.")
+            except OSError as exc:
+                print(f"error: could not overwrite {skill_path}: {exc}", file=sys.stderr)
+                exit_code = 1
+        else:
+            print("")
+            print(
+                f"--apply: gate did NOT promote (VERDICT={result.verdict}); "
+                "the incumbent is kept UNCHANGED (never deploy a worse skill)."
+            )
+    elif result.promoted:
+        sidecar = os.path.join(skills_root, verb, "SKILL.candidate.md")
+        try:
+            with open(sidecar, "w", encoding="utf-8") as fh:
+                fh.write(result.winner_text)
+            print("")
+            print(
+                f"Proposed: wrote the winning candidate to {sidecar} "
+                "(review it, then re-run with --apply to overwrite in place)."
+            )
+        except OSError as exc:
+            print(f"error: could not write the sidecar {sidecar}: {exc}", file=sys.stderr)
+            exit_code = 1
+    else:
+        print("")
+        print(
+            f"Proposed nothing to promote (VERDICT={result.verdict}); "
+            "the incumbent stands."
+        )
+
+    _record_skillopt_learning(config, verb, candidate_path, propose, apply, result)
+    return exit_code
+
+
+def _record_skillopt_learning(
+    config: LoomConfig,
+    verb: str,
+    candidate_path: Optional[str],
+    propose: bool,
+    apply: bool,
+    result: object,
+) -> None:
+    """Append one ``command="skillopt"`` learnings audit row for this optimize run.
+
+    Best-effort and sanitized: the row carries only the verb, the gate decision +
+    verdict, the incumbent/candidate scores (the audit blob the gate produced), and
+    the apply/propose flags -- never raw skill text or secrets. A failure to record
+    never fails the command. The row is itself owned_by=general (a skill edit is a
+    cross-tenant moat artifact), feeding the flywheel that drives the next round.
+
+    Args:
+        config: The active Loom configuration.
+        verb: The normalized ``loom-<name>`` verb optimized.
+        candidate_path: The ``--candidate`` path, or ``None``.
+        propose: Whether the optional proposer was requested.
+        apply: Whether the gated in-place overwrite was requested.
+        result: The :class:`~loom.skillopt.SkillOptResult`.
+    """
+    try:
+        from loom.learnings import Learnings, LearningRecord, Outcome, TaskSpec
+
+        audit = getattr(result, "audit", None) or {}
+        promoted = bool(getattr(result, "promoted", False))
+        verdict = str(getattr(result, "verdict", "") or "")
+        inc_score = getattr(result, "incumbent_score", None)
+        # A skillopt rollout "succeeds" as a flywheel signal only when it actually
+        # promoted a better skill; a clean KEEP is a correct refusal, not a win
+        # (mirrors the deploy BLOCK posture). The metric is the winner's total score.
+        winner_total = None
+        winner_index = getattr(result, "winner_index", None)
+        if promoted and winner_index is not None:
+            scores = getattr(result, "candidate_scores", []) or []
+            if 0 <= winner_index < len(scores):
+                winner_total = scores[winner_index].total
+        elif inc_score is not None:
+            winner_total = inc_score.total
+
+        record = LearningRecord(
+            command="skillopt",
+            task=TaskSpec(
+                data_ref=None,
+                goal=f"optimize the {verb} SKILL.md against the learnings corpus (gated)",
+                metric="skill total (hard contract + soft corpus coverage)",
+                experiment_id=verb,
+            ),
+            inputs={
+                "verb": verb,
+                "candidate_path": candidate_path,
+                "propose": propose,
+                "apply": apply,
+                "promoted": promoted,
+                "verdict": verdict,
+                "n_candidates": (result.gate_detail or {}).get("n_candidates"),
+                "n_eligible": (result.gate_detail or {}).get("n_eligible"),
+                "n_disqualified": (result.gate_detail or {}).get("n_disqualified"),
+                "incumbent_hard_ok": getattr(inc_score, "hard_ok", None),
+                "incumbent_total": getattr(inc_score, "total", None),
+                "audit": audit,
+            },
+            outcome=Outcome(
+                best_metric=float(winner_total)
+                if isinstance(winner_total, (int, float))
+                else None,
+                # Promoted only counts as a "submission" when --apply actually wrote
+                # it; a proposed sidecar is staged, not shipped (deploy --apply parity).
+                submission_ok=promoted and apply,
+                node_count=len(getattr(result, "candidate_scores", []) or []),
+            ),
+            artifacts=[],
+            success=promoted,
+            model=None,
+            tenant=config.tenant,
+            # A general-method skill edit is a cross-tenant moat artifact; the audit
+            # carries no tenant facts (only scores + the contract verdict).
+            owned_by="general",
+            reflection=(
+                f"skillopt KEPT the incumbent ({verdict}); never deploy a worse skill"
+                if not promoted
+                else None
+            ),
+        )
+        Learnings(config).record(record)
+    except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
+        pass
 
 
 def _cmd_run(args: argparse.Namespace) -> int:

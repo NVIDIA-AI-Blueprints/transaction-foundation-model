@@ -407,9 +407,19 @@ loom run --data ./task --goal "..." --metric "..." --model-provider loom-proxy
 
 That central capture feeds two loops:
 
-- **Now — text-space (zero GPU):** **SkillOpt** optimizes each `/loom-*` `SKILL.md`
-  against Loom's sealed-holdout metric (a strict held-out gate — never deploy a
-  worse skill). The cheap inner loop.
+- **Now — text-space (zero GPU), wired in v0.2:** **HiveMind + SkillOpt** is the
+  built inner loop — `loom skillopt` (the `loom-skillopt` verb). HiveMind captures
+  each `/loom-*` verb's `learnings/rollouts.jsonl` corpus (`owned_by=general` only —
+  the IP boundary; tenant rows are excluded from the cross-tenant moat), then
+  SkillOpt's deterministic, LLM-free scorer grades the incumbent `SKILL.md` + any
+  candidate on Loom's mixed metric (HARD = the 7-point acceptance contract; SOFT =
+  corpus failure-mode coverage) and applies a **held-out, never-worse promotion gate**
+  — the exact parallel of `loom-deploy`'s exit gate: the best hard-valid candidate is
+  promoted only if it beats the incumbent by a margin, so a contract violator or a
+  regression **can never deploy a worse skill**. **Safe by default:** it PROPOSES a
+  `SKILL.candidate.md` sidecar + the gate VERDICT + a diff; the in-place overwrite is
+  behind `--apply` and runs ONLY when the gate PROMOTED (mirroring `loom deploy
+  --apply`). Each `/loom-*` command IS a `SKILL.md` — the *trainable artifact*.
 - **Later — weights:** distill **LOOM-DS-1**, an open-weights, Loom-owned
   **data-science model** fine-tuned (via NeMo) on the accumulated teacher traces —
   *the way Claude has a coding model, Loom has a data-science one.* The outer loop,
@@ -464,13 +474,15 @@ loom/
   corpus.py       append-only JSONL of every node (multi-tenant IP boundary)
   proxy/          the Loom gateway — Anthropic passthrough that logs every call (the moat capture)
   cli.py          the `loom` command (doctor · ingest · datasets · eda · viz · features · run ·
-                  train · validate · pipeline · deploy · ops · collab · report · proxy serve)
+                  train · validate · pipeline · deploy · ops · collab · report · proxy serve · skillopt)
+  hivemind.py     capture: learnings traces -> a per-verb VerbCorpus digest (the flywheel's left half)
+  skillopt.py     the deterministic SKILL.md scorer + the never-worse promotion GATE (the moat's heart)
 flows/
   ingest_dataset.py  the external->Metaflow boundary (dir/CSV -> data object)
   eval_candidate.py  the one static evaluation flow (candidate = data)
   eda · viz · features · validate · pipeline · deploy · ops · collab · report · train .py
                      one static lifecycle flow per verb -> a Metaflow run + @card
-skills/           the Claude Code skill-pack — one /loom-* skill per verb (incl. loom-train)
+skills/           the Claude Code skill-pack — one /loom-* skill per verb (incl. loom-train, loom-skillopt)
 tasks/generic_demo/   the bundled smoke-test task
 ```
 
@@ -483,7 +495,7 @@ Repository invariants: [`CLAUDE.md`](CLAUDE.md).
 
 ```bash
 pip install -e ".[dev]"   # or: pip install pytest
-pytest                    # 308 passed, 1 skipped
+pytest                    # 374 passed, 1 skipped
 ```
 
 Pure-Python tests (registry, corpus, the `local` paths, the model-builder
@@ -495,10 +507,14 @@ torch-free; the optional torch fidelity mode is behind the `model-local` extra.
 
 ## Status
 
-**v0.1.** The whole lifecycle verb-catalog is built behind three swappable ports —
-AIDE (search), Metaflow (orchestrate), NeMo (train). The `local` MLOps + `local`
-model-builder paths run on a laptop with no GPU and only an LLM key; the real GPU
-pretrain is launch-and-track and deferred to v0.2 (the seam, gate, and cost-surface
-are in place — it refuses cleanly with no GPU target). AIDE is pinned by commit for
-reproducibility. Loom is intentionally general-purpose — point it at any dataset
-with a measurable goal.
+**v0.1 + the v0.2 text-space moat.** The whole lifecycle verb-catalog is built behind
+three swappable ports — AIDE (search), Metaflow (orchestrate), NeMo (train). The
+`local` MLOps + `local` model-builder paths run on a laptop with no GPU and only an
+LLM key; the real GPU pretrain is launch-and-track and deferred to v0.2 (the seam,
+gate, and cost-surface are in place — it refuses cleanly with no GPU target). The
+**self-improvement loop's text-space half is now wired** — HiveMind capture +
+SkillOpt's never-worse held-out gate (`loom skillopt`) close the flywheel on the
+`learnings.jsonl` corpus (deterministic, LLM-free, safe-by-default `--apply`); the
+weights-space outer loop (distilling LOOM-DS-1 via NeMo) stays on the v0.2+ roadmap.
+AIDE is pinned by commit for reproducibility. Loom is intentionally general-purpose —
+point it at any dataset with a measurable goal.

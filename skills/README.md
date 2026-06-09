@@ -40,6 +40,7 @@ default MLOps muscle is Metaflow.
 | [`loom-ops`](loom-ops/SKILL.md) | **built** | **Read-only** monitoring **through the MLOps interface** (`loom ops`) — recent run health (successes/failures, recency), the leaderboard, schedule/run health, and a simple data-object DRIFT check (vs a reference) — emitted as a Metaflow run + `@card`. Reads are free; never prompts. | You want to see what passed/failed, read the leaderboard, or check whether the data drifted. |
 | [`loom-collab`](loom-collab/SKILL.md) | **built** | **Workspace-write to build / irreversible-external to send** a sanitized shareable bundle **through the MLOps interface** (`loom collab`) — report/card + a lineage manifest (pathspecs + fingerprints + commit) as a run + `@card`. Build-only by default (no data leaves the box); the off-box SEND is behind `--send` (OFF by default), gated, to an env/config-driven sink. `disable-model-invocation: true`. | You want to share or hand off a run/report to a teammate, lineage-grounded and sanitized. |
 | [`loom-auto`](loom-auto/SKILL.md) | **built** | **Graduated — read-only/workspace-write → expensive at the optimize step.** Meta-skill (no new flow): orchestrates the existing verbs end-to-end — (ingest if a raw source) → `loom eda` → [leakage gate] `loom features` → `loom run`/optimize → `loom validate` → `loom report` — threading each artifact (`--from`/`--dataset`/`--solution`/`--runs`) and asserting each prior VERDICT, gating at the EXPENSIVE optimize step; a sub-threshold/leaky validate STOPS the chain. **Never auto-fires `loom-deploy` or `loom-collab --send`.** | You want the standard chain end-to-end without memorizing the verbs. |
+| [`loom-skillopt`](loom-skillopt/SKILL.md) | **built** | **Workspace-write to propose → expensive/mutate + always-gate to `--apply`.** The self-improvement **moat** verb (design-spec §5) — the one meta verb that optimizes the OTHER `/loom-*` skills **through the `loom` CLI** (`loom skillopt`). HiveMind captures the verb's `learnings/rollouts.jsonl` corpus (`owned_by=general` only — the IP boundary), then SkillOpt's deterministic scorer grades the incumbent + any `--candidate`/`--propose` text on the 7-point acceptance contract (HARD) + corpus failure-mode coverage (SOFT) and applies a **never-worse promotion gate** (the parallel of `loom-deploy`'s exit gate): the best hard-valid candidate is promoted ONLY if it beats the incumbent by a margin — a contract violator or a regression can never win. Safe by default — it PROPOSES a `SKILL.candidate.md` sidecar + the gate VERDICT + a diff; the in-place `SKILL.md` overwrite is behind `--apply` and ONLY when the gate PROMOTED. Deterministic/LLM-free (`--propose` is an optional no-op stub when no model is configured). `disable-model-invocation: true`; NEVER auto-promotes. | You want to improve a `/loom-*` skill from accumulated usage traces, or get a machine-checkable verdict on whether a candidate SKILL.md is safe to ship. |
 
 ## Typical flow
 
@@ -77,6 +78,7 @@ loom collab (--run PATHSPEC | --experiment ID) [--send]  # loom-collab: sanitize
 loom report (--experiment ID | --runs PATHSPEC,...)  # loom-report: assemble runs+metrics+lineage -> run + @card
 loom viz (--dataset PATHSPEC | --run PATHSPEC) [--target COL] [--kind ...]  # loom-viz: standard plots -> run + @card images
 loom run --dataset PATHSPEC --goal STR --metric STR [--steps N] [--mlops metaflow|local] [--search aide]
+loom skillopt --verb loom-eda|... [--candidate PATH | --propose] [--apply]  # loom-skillopt: capture corpus -> score incumbent+candidate (7-pt contract + corpus coverage) -> never-worse gate; PROPOSES a SKILL.candidate.md by default, --apply overwrites in place ONLY when PROMOTED
 # loom-auto: NO new CLI verb — the meta-skill orchestrates the verbs above in sequence
 #   (ingest if a raw source) -> eda -> [leakage gate] features -> run/optimize -> validate -> report,
 #   threading --from/--dataset/--solution/--runs and asserting each VERDICT; gates at the optimize step;
@@ -89,9 +91,12 @@ loom run --dataset PATHSPEC --goal STR --metric STR [--steps N] [--mlops metaflo
 `loom-train` backbone → `loom-train --capability embed` (via `--backbone`), and its
 `IngestDataset`-shaped embeddings → `loom-validate`/`loom-optimize` (via `--dataset`); a
 `loom-validate` `VERDICT==PASS` → `loom-deploy` (via `--validate`, a sub-threshold validate BLOCKS);
-a `loom-report`/`loom-validate` run → `loom-collab` (via `--run`). Each gate ships an executable
-self-test (train local-lift + nemo no-GPU refusal; deploy BLOCK-on-sub-threshold; pipeline stage-gate
-ordering; collab send-off + sanitize; ops drift; features leakage-drop).
+a `loom-report`/`loom-validate` run → `loom-collab` (via `--run`); and the **flywheel loop closes** when
+every verb's `learnings/rollouts.jsonl` rows (`owned_by=general` only) → `loom-skillopt` (via HiveMind
+capture, `--verb`), whose never-worse promotion gate optimizes that verb's own `SKILL.md`. Each gate ships
+an executable self-test (train local-lift + nemo no-GPU refusal; deploy BLOCK-on-sub-threshold; pipeline
+stage-gate ordering; collab send-off + sanitize; ops drift; features leakage-drop; skillopt
+never-promote-a-worse-skill — a contract violator or regression is BLOCKED).
 
 Providers are selected by name (search brain default `aide`; MLOps muscle default
 `metaflow`, with `local` as a Metaflow-free dev path). See the repo
