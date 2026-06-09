@@ -3,8 +3,9 @@
 **Loom is an agentic CLI for data science.** It's a catalog of
 `/loom-*` verbs — `connect · eda · features · pipeline · train · optimize ·
 validate · viz · report · deploy · ops · collab` — spanning the **whole**
-data-science lifecycle, each an agentic skill (a [Claude Code](https://claude.com/claude-code)
-skill today; `loom <verb>` in the binary later). ML *modeling* is the ~3%
+data-science lifecycle, each an agentic skill you drive from the standalone
+**`loom`** CLI (or as a [Claude Code](https://claude.com/claude-code) skill-pack).
+ML *modeling* is the ~3%
 "brain"; the product is the other **97%** — data access, EDA, features,
 pipelines, training, validation, viz, reporting, deployment, ops, collaboration.
 
@@ -63,9 +64,56 @@ plans unless `--apply` (and the gate must ALLOW); `collab` builds unless `--send
 
 ---
 
-## Quickstart — the 60-second smoke test (no infra)
+## Install (macOS)
 
-You need **Python 3.10–3.12** and an **LLM API key** — the brain writes code with
+Loom ships as **`loom`** — an agentic CLI you talk to in plain English: it picks
+the right lifecycle verb, runs it, reads the structured result, and composes the
+next step. Today it's a small polyglot install — the **`loom` command** (Node) +
+the **data-science engine** (Python) it drives + a **local datastore** for the
+lifecycle verbs. One copy-paste on a Mac:
+
+```bash
+# 0. Prereqs (Homebrew): node ≥22, python 3.10–3.12, + the local-datastore stack.
+brew install node python@3.12 colima minikube kubectl awscli
+colima start                                  # the container runtime minikube uses
+
+# 1. Clone
+git clone git@github.com:ZKAI-Network/Loom.git && cd Loom
+
+# 2. The engine (Python) — the verbs `loom` drives
+python3.12 -m venv .venv && source .venv/bin/activate && pip install -e .
+export LOOM_PYTHON="$(pwd)/.venv/bin/python"  # how `loom` finds the engine — add to your shell profile
+
+# 3. The `loom` command (Node) — the agentic CLI itself
+( cd cli && npm install && npm run build && npm link )   # → `loom` on your PATH
+
+# 4. The local Metaflow datastore (for the lifecycle verbs) — one gated command
+bash scripts/setup_metaflow_minikube.sh && source .env.metaflow
+"$LOOM_PYTHON" -m loom doctor                 # health check — should end VERDICT: PASS
+
+# 5. (optional) a model key — only the natural-language turns need one
+export ANTHROPIC_API_KEY="sk-ant-..."         # or run `loom`, then /login
+
+# 6. Go
+loom
+```
+
+Type **`loom`** and ask for what you want — *"profile my data and flag leakage"*,
+*"validate this against a sealed holdout"*. The read-only / lifecycle verbs work
+**without a model key**; only the natural-language planning + the AIDE search need
+one (a missing key gives an actionable `/login` line, never a crash).
+
+> **Early-install honesty.** It's a multi-step polyglot install for now (Node CLI
+> + Python engine + a local datastore); a one-command installer / `npm i -g` is on
+> the roadmap. `LOOM_PYTHON` must point at the venv where `pip install -e .` ran —
+> set it in your shell profile so `loom` always resolves the engine.
+
+---
+
+## Quick engine smoke (no infra)
+
+Prefer to poke the **engine** directly first (no datastore, no Node)? You need
+**Python 3.10–3.12** and an **LLM API key** — the brain writes code with
 an LLM. The default model is Claude, so the quickest path is an `ANTHROPIC_API_KEY`
 (see [Model providers](#model-providers) for OpenAI / NVIDIA NIM / your Claude or
 Codex subscription). Forget the key and the CLI tells you exactly which to set.
@@ -88,7 +136,7 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 python tasks/generic_demo/prepare_data.py
 
 # 5. Run the AIDE search — the engine behind /loom-optimize
-loom run \
+python -m loom run \
   --data tasks/generic_demo/input \
   --goal  "Train on train.csv and predict the target for each row in test.csv; write ./working/submission.csv with columns id,target (probability of class 1)." \
   --metric "Maximize ROC-AUC between the predicted probability and the true target on a held-out split." \
@@ -131,19 +179,19 @@ Metaflow datastore) — they run *flows*, not in-process candidates.
 
 ---
 
-## Interactive CLI (the `loom` REPL)
+## Using `loom` (the agentic CLI)
 
-Run `loom` with **no subcommand** (or the explicit alias `loom chat`) to drop into
-a branded interactive shell — a thin loop over the *same* verbs, with
-a themed render layer, interactive approval gates, and a streaming search. It is a
-shell over the lifecycle, not an "automated ML engine": every line routes through
-the exact same parser and handlers the one-shot `loom <verb>` commands use, so the
-REPL can never drift from the CLI.
+`loom` is the agentic CLI: **talk to it in plain English** and it picks the right
+lifecycle verb, runs it, reads the structured `VERDICT`/summary, and composes the
+next step — a shell over the lifecycle, not an "automated ML engine." It runs in a
+branded **black/magenta** terminal UI with interactive approval gates and a
+streaming search. Under the hood the agent drives the very same verbs you can run
+directly (below), so the conversation can never do something a verb can't.
 
 ```bash
-loom            # no subcommand -> the REPL
-loom chat       # the same thing, explicitly
-loom --no-ui    # plain, color-stripped output (also via LOOM_NO_UI=1) — for CI/pipes
+loom                      # open the agent (interactive)
+loom "profile my data"    # start with a one-shot goal, in plain English
+loom <verb> [--flags]     # jump straight to a verb workflow (e.g. loom eda --dataset …)
 ```
 
 **Slash-commands.** Type a verb with or without a leading `/`; tab-completion
@@ -155,8 +203,10 @@ offers every verb plus a small meta set:
 - meta — `/help` (the verb table), `/status` (the banner + active providers),
   `/doctor` (the stack health check), `/clear`, `/exit` (and `/quit`).
 
-A bare natural-language line isn't free-form chat — it returns a hint listing the
-verbs. Quoted free-text args survive (`/run --goal "predict churn" --metric auc`).
+**Run the verbs directly, too.** Everything the agent does is a verb you can run
+yourself — keyless and scriptable — via the engine: `python -m loom <verb> … --json`
+(exactly what [`examples/`](examples/) and CI use). The agent's natural-language
+planning is the layer on top.
 
 **Streaming + approval UX.** A running verb is wrapped in a spinner; `/run` and
 `/pipeline` drive the AIDE search and stream the leaderboard as it fills, falling
@@ -696,7 +746,7 @@ Repository invariants: [`CLAUDE.md`](CLAUDE.md).
 
 ```bash
 pip install -e ".[dev]"   # or: pip install pytest
-pytest                    # 411 passed, 1 skipped
+pytest                    # 529 passed, 1 skipped  (+ the examples eval bed when a datastore is up)
 ```
 
 Pure-Python tests (registry, corpus, the `local` paths, the model-builder
