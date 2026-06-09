@@ -60,14 +60,23 @@ export function installLoomHeader(pi: ExtensionAPI, ctx: ExtensionContext): void
 			const modelLabel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "not set (use /model or /login)";
 			const dirLabel = formatPath(ctx.cwd);
 
+			const labelW = 13; // widest label is "model-builder"
 			const labeled = (label: string, value: string) =>
-				row(`${theme.fg("dim", padRight(label, 9))}${theme.fg("text", truncate(value, contentW - 9))}`);
+				row(`${theme.fg("dim", padRight(label, labelW + 1))}${theme.fg("text", truncate(value, contentW - labelW - 1))}`);
 
-			push(labeled("version", `v${version}`));
+			// The active provider stack (the three swappable ports + the agent model),
+			// from env with the engine's documented defaults. Cf. Feynman's header,
+			// which surfaces the active model/context up front.
+			const env = process.env;
+			push(labeled("search", env.LOOM_SEARCH_PROVIDER?.trim() || "aide"));
+			push(labeled("mlops", env.LOOM_MLOPS_PROVIDER?.trim() || "metaflow"));
+			push(labeled("model-builder", env.LOOM_MODEL_BUILDER_PROVIDER?.trim() || "nemo"));
 			push(labeled("model", modelLabel));
 			push(labeled("cwd", dirLabel));
 			push(labeled("verbs", `${loomVerbToolCount} data-science verbs · ${commandCount} commands`));
+			push(labeled("version", `v${version}`));
 			push(bottom());
+			push(theme.fg("dim", "  type /help for the verbs · /plan to plan · /exit to quit"));
 
 			return lines;
 		},
