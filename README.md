@@ -76,7 +76,17 @@ plans unless `--apply` (and the gate must ALLOW); `collab` builds unless `--send
 
 ## Install (macOS)
 
-Clone, then run the installer:
+```bash
+npm install -g @zkailabs.com/loom
+loom
+```
+
+`npm i -g @zkailabs.com/loom` installs a tiny launcher; the **first `loom` run**
+clones the repo (with your own git credentials — Loom is private) and runs the
+installer, then delegates every command to the installed CLI. You need git access
+to `ZKAI-Network/Loom` — that access is the gate.
+
+**Or, if you've already cloned the repo,** run the installer directly:
 
 ```bash
 git clone git@github.com:ZKAI-Network/Loom.git && cd Loom && ./install.sh

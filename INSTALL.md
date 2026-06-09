@@ -1,9 +1,12 @@
 # Installing Loom (macOS)
 
-This is the canonical install playbook. The easy path is **`./install.sh`** — it
-hands these steps to **Claude** or **Codex** when either is installed (the assistant
-adapts to your machine and fixes errors as it goes) and otherwise runs them as a
-script. You can also follow them by hand below.
+This is the canonical install playbook. The one-command path is **`npm install -g
+@zkailabs.com/loom`** then `loom` — the npm package is a launcher whose first run
+clones this repo and runs the steps below (you need git access; Loom is private).
+With the repo already cloned, **`./install.sh`** runs the same steps — it hands them
+to **Claude** or **Codex** when either is installed (the assistant adapts to your
+machine and fixes errors as it goes) and otherwise runs them as a script. You can
+also follow them by hand below.
 
 Loom is three pieces:
 
