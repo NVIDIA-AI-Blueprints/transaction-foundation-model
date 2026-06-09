@@ -3857,21 +3857,21 @@ def _doctor_check(name: str, status: str, detail: str, fix: str = "") -> dict:
 
 
 def _doctor_check_loom() -> dict:
-    """Check (a): the Python venv is usable and ``import loom`` works.
+    """Check (a): the Python venv is usable, ``import loom`` works, AND the
+    package is actually pip-installed.
 
-    This handler is itself running inside ``loom``, so reaching this code means
-    ``import loom`` already succeeded; we re-import defensively to surface the
-    interpreter + package location for the line.
+    Reaching this code means ``import loom`` succeeded — but that alone passes
+    even when run from the repo working dir with NO install completed (the
+    ``loom/`` package sits right there on ``sys.path[0]``). That masks an
+    incomplete ``pip install -e .``, which is the usual reason the dependency
+    checks below (``import metaflow``, AIDE) FAIL. So we also confirm the
+    distribution is registered, and downgrade to WARN with an actionable fix when
+    it isn't.
     """
     try:
         import loom as _loom  # noqa: F401 - imported for the location/version
 
         where = getattr(_loom, "__file__", "?")
-        return _doctor_check(
-            "python/venv + import loom",
-            _DOCTOR_PASS,
-            f"python {sys.version.split()[0]} @ {sys.executable}; loom @ {where}",
-        )
     except Exception as exc:  # noqa: BLE001 - effectively unreachable; defensive
         return _doctor_check(
             "python/venv + import loom",
@@ -3882,6 +3882,32 @@ def _doctor_check_loom() -> dict:
                 "`source .venv/bin/activate && pip install -e .` from the repo root."
             ),
         )
+
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _dist_version
+
+    try:
+        dist = _dist_version("loom")
+    except PackageNotFoundError:
+        return _doctor_check(
+            "python/venv + import loom",
+            _DOCTOR_WARN,
+            f"python {sys.version.split()[0]} @ {sys.executable}; loom imported from "
+            f"the repo dir ({where}) but NOT pip-installed — `pip install -e .` has "
+            "not completed in this venv, so its dependencies (Metaflow, AIDE, …) are "
+            "likely missing too (that's the FAIL below).",
+            fix=(
+                "from the repo root with the venv active, run `pip install -e .` and "
+                "READ the output for the first error — it pulls a heavy ML stack, so a "
+                "build failure there aborts the install before Metaflow lands."
+            ),
+        )
+
+    return _doctor_check(
+        "python/venv + import loom",
+        _DOCTOR_PASS,
+        f"python {sys.version.split()[0]} @ {sys.executable}; loom {dist} @ {where}",
+    )
 
 
 def _doctor_check_metaflow() -> dict:
@@ -3906,8 +3932,10 @@ def _doctor_check_metaflow() -> dict:
             _DOCTOR_FAIL,
             f"metaflow is not importable: {type(exc).__name__}: {exc}",
             fix=(
-                "install Metaflow into the active venv (it ships with Loom's "
-                "deps): `pip install -e .` (or `pip install metaflow`)."
+                "Metaflow ships with Loom's deps, so this usually means "
+                "`pip install -e .` didn't complete — re-run it from the repo root "
+                "and watch for the first error, or `pip install metaflow` to unblock "
+                "just this check."
             ),
         )
 
