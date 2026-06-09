@@ -383,6 +383,12 @@ The boundary is domain-neutral: the corpus knows nothing about any customer or
 vertical, only the generic `owned_by` tag. Secrets are never persisted — a
 `NodeRecord` has no field for key material.
 
+Telemetry (`loom/telemetry/`) keeps the same posture and two **separate** planes:
+the **training corpus** (complete, append-only, transcript-style — every
+trajectory in full, no sampling) vs **ops telemetry** (the optional, sampled OTel
+mirror behind `LOOM_TELEMETRY_OTEL_OPS`) — kept separate so the corpus never
+flows through a sampling/aggregating backend.
+
 ## Request lifecycle
 
 0. (metaflow path) `loom ingest --source <path>` runs `IngestDataset` once via

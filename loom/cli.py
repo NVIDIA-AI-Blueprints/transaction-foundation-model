@@ -1020,6 +1020,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output JSONL path for the dataset (default telemetry/loom-ds-1.jsonl).",
     )
     telemetry_export.add_argument(
+        "--to-dataset",
+        dest="to_dataset",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Also INGEST the assembled corpus as a VERSIONED, content-addressed "
+            "Metaflow data object under NAME (via the same IngestDataset seam as "
+            "`loom ingest`) and print its pathspec -- the durable, lossless, "
+            "no-sampling sink for scale. The --out JSONL is still written. Needs "
+            "the metaflow MLOps provider."
+        ),
+    )
+    telemetry_export.add_argument(
         "--with-content",
         action="store_true",
         help=(
@@ -1324,23 +1337,58 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         return 2
 
     config = _build_config(args)
+    name = (args.name or "").strip()
 
+    print(f"Ingesting {source!r} into a Metaflow data object...")
+    pathspec, error = _ingest_source(source, name, config)
+    if error is not None:
+        print(f"error: {error}", file=sys.stderr)
+        # Metaflow-absent is a setup/config problem (exit 2); a flow failure is a
+        # runtime failure (exit 1), preserving the original exit codes.
+        return 2 if "Metaflow is required" in error else 1
+
+    print("Ingest complete.")
+    print(f"  dataset_ref : {pathspec}")
+    print("")
+    print("Run a task against it with:")
+    print(f"  loom run --dataset {pathspec} --mlops metaflow --goal '...' --metric '...'")
+    return 0
+
+
+def _ingest_source(
+    source: str, name: str, config: LoomConfig
+) -> tuple[Optional[str], Optional[str]]:
+    """Run :class:`flows.ingest_dataset.IngestDataset` on ``source`` (the seam).
+
+    The single, reusable external->Metaflow ingest boundary -- shared by
+    ``loom ingest`` and ``loom telemetry export --to-dataset`` so the corpus is
+    persisted as a **versioned, content-addressed Metaflow data object** through
+    exactly the path :func:`_cmd_ingest` uses (``metaflow.Runner`` +
+    ``IngestDataset`` + the resulting pathspec). Metaflow owns the datastore; Loom
+    never touches it.
+
+    Args:
+        source: Absolute path to the local dir/CSV to ingest once.
+        name: Optional dataset name (also applied as a ``loom_dataset:<name>`` tag).
+        config: The active configuration (for the Metaflow profile).
+
+    Returns:
+        ``(pathspec, None)`` on success, or ``(None, error_message)`` on failure
+        (Metaflow absent, the Runner raising, or a non-successful flow status).
+    """
     # Lazy import: Metaflow is an optional dependency, pulled in only when an
     # operation that needs it (ingest) is actually invoked.
     try:
         from metaflow import Runner
     except Exception as exc:  # noqa: BLE001 - actionable hint, no traceback
-        print(
-            f"error: Metaflow is required for `loom ingest` but could not be "
+        return None, (
+            f"Metaflow is required to ingest a data object but could not be "
             f"imported: {exc}\nInstall it (it ships with Loom's deps) and try "
-            "again.",
-            file=sys.stderr,
+            "again."
         )
-        return 2
 
     from flows import INGEST_DATASET_FLOW_PATH
 
-    name = (args.name or "").strip()
     runner_kwargs: dict[str, object] = {}
     if config.metaflow_profile:
         runner_kwargs["profile"] = config.metaflow_profile
@@ -1352,7 +1400,6 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         run_kwargs["dataset_name"] = name
         run_kwargs["tags"] = [f"loom_dataset:{name}"]
 
-    print(f"Ingesting {source!r} into a Metaflow data object...")
     try:
         with Runner(
             INGEST_DATASET_FLOW_PATH,
@@ -1363,31 +1410,21 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
             status = getattr(executing, "status", None)
             run = executing.run
     except Exception as exc:  # noqa: BLE001 - surface as an actionable message
-        print(
-            f"error: failed to run IngestDataset flow: "
-            f"{type(exc).__name__}: {exc}",
-            file=sys.stderr,
+        return None, (
+            f"failed to run IngestDataset flow: {type(exc).__name__}: {exc}"
         )
-        return 1
 
     # The Runner returns once the subprocess exits; a failed flow still yields an
     # ExecutingRun, so check status before claiming success (otherwise we would
-    # print a pathspec whose run has no data object).
+    # return a pathspec whose run has no data object).
     if status is not None and status != "successful":
-        print(
-            f"error: IngestDataset did not complete successfully (status="
-            f"{status!r}). Re-run with the Metaflow logs for details.",
-            file=sys.stderr,
+        return None, (
+            f"IngestDataset did not complete successfully (status={status!r}). "
+            "Re-run with the Metaflow logs for details."
         )
-        return 1
 
     pathspec = getattr(run, "pathspec", None) or str(run)
-    print("Ingest complete.")
-    print(f"  dataset_ref : {pathspec}")
-    print("")
-    print("Run a task against it with:")
-    print(f"  loom run --dataset {pathspec} --mlops metaflow --goal '...' --metric '...'")
-    return 0
+    return pathspec, None
 
 
 def _print_eda_summary(dataset_ref: str, result: object) -> None:
@@ -3983,7 +4020,7 @@ def _cmd_telemetry_status(args: argparse.Namespace) -> int:
     Returns:
         ``0`` always (a pure read).
     """
-    from loom.telemetry import bootstrap_otel, read_events
+    from loom.telemetry import bootstrap_ops_telemetry, read_events
     from loom.telemetry.events import content_logging_enabled, telemetry_enabled
 
     config = _build_config(args)
@@ -3993,9 +4030,9 @@ def _cmd_telemetry_status(args: argparse.Namespace) -> int:
     general = sum(1 for t in trajectories if t.owned_by == "general")
     tenant_owned = len(trajectories) - general
 
-    otel = bootstrap_otel(config)
+    otel = bootstrap_ops_telemetry(config)
 
-    print("Loom telemetry -- distillation-grade trajectory corpus (read-only):")
+    print("Loom telemetry -- COMPLETE training-data corpus, not observability (read-only):")
     print(f"  events path      : {config.telemetry_path}")
     print(f"  trajectories path: {config.trajectories_path}")
     print(f"  proxy calls path : {config.proxy_log_path}")
@@ -4012,10 +4049,11 @@ def _cmd_telemetry_status(args: argparse.Namespace) -> int:
         "(LOOM_LOG_CONTENT)"
     )
     print(
-        f"  OTel exporter    : "
+        f"  OTel ops mirror  : "
         f"{'on' if otel.enabled else 'off'} / "
         f"{'available' if otel.available else 'sdk-absent'}"
         + (f" [{', '.join(otel.exporters)}]" if otel.exporters else "")
+        + " (LOOM_TELEMETRY_OTEL_OPS; ops-only, NOT the corpus)"
     )
     return 0
 
@@ -4029,11 +4067,17 @@ def _cmd_telemetry_export(args: argparse.Namespace) -> int:
     (default ``telemetry/loom-ds-1.jsonl``, anchored next to the trajectories
     path). Workspace-write: the export file is the only thing written.
 
+    With ``--to-dataset NAME`` it ALSO ingests the same assembled corpus as a
+    **versioned, content-addressed Metaflow data object** (the durable, lossless,
+    no-sampling sink for scale) through the same ``IngestDataset`` seam
+    ``loom ingest`` uses, and prints the produced pathspec. The corpus is NEVER
+    routed through an observability/metrics endpoint.
+
     Args:
         args: Parsed arguments for the ``telemetry export`` action.
 
     Returns:
-        ``0`` on success.
+        ``0`` on success (or when ``--to-dataset`` ingest fails, a non-zero code).
     """
     import dataclasses as _dc
 
@@ -4043,6 +4087,7 @@ def _cmd_telemetry_export(args: argparse.Namespace) -> int:
     config = _build_config(args)
     owned_by = (getattr(args, "owned_by", None) or "general").strip() or "general"
     with_content = bool(getattr(args, "with_content", False))
+    to_dataset = (getattr(args, "to_dataset", None) or "").strip()
 
     out_path = getattr(args, "out", None)
     if out_path:
@@ -4063,13 +4108,15 @@ def _cmd_telemetry_export(args: argparse.Namespace) -> int:
     # Excluded count: trajectories the IP boundary kept out of the export.
     excluded = len(trajectories) - len(examples)
 
-    # Truncate any prior export, then append each example as one JSONL row.
+    # Truncate any prior export, then append each example as one JSONL row. The
+    # --out file export is always produced (kept regardless of --to-dataset).
     parent = os.path.dirname(out_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     open(out_path, "w", encoding="utf-8").close()
-    for ex in examples:
-        append_trajectory(out_path, _dc.asdict(ex))
+    rows = [_dc.asdict(ex) for ex in examples]
+    for row in rows:
+        append_trajectory(out_path, row)
 
     print("Loom telemetry export complete (the LOOM-DS-1 distillation dataset).")
     print(f"  owned_by filter : {owned_by} (the IP boundary)")
@@ -4081,6 +4128,100 @@ def _cmd_telemetry_export(args: argparse.Namespace) -> int:
     print(f"  examples written: {len(examples)}")
     print(f"  excluded (IP)   : {excluded} (owned_by != {owned_by})")
     print(f"  out             : {out_path}")
+
+    # The durable, lossless, no-sampling sink for scale: ingest the corpus as a
+    # versioned Metaflow data object via the SAME seam `loom ingest` uses, on
+    # Loom's "data is a Metaflow artifact" thesis. Never an observability sink.
+    if to_dataset:
+        return _telemetry_export_to_dataset(config, rows, to_dataset, out_path)
+
+    return 0
+
+
+def _telemetry_export_to_dataset(
+    config: LoomConfig,
+    rows: list[dict],
+    name: str,
+    out_path: str,
+) -> int:
+    """Ingest the assembled SFT corpus as a versioned Metaflow data object.
+
+    Writes the corpus losslessly to a CSV staging file (the nested ``context`` /
+    ``tools_trajectory`` / ``teacher_output`` fields JSON-encoded so they
+    round-trip), then runs it through the SAME ``IngestDataset`` seam
+    :func:`_cmd_ingest` uses (:func:`_ingest_source`) so it becomes a durable,
+    content-addressed, versioned data object addressable by pathspec -- a
+    first-class ``dataset_ref``. The corpus never touches an observability/metrics
+    endpoint. Needs the metaflow MLOps provider (guarded like the other lifecycle
+    paths).
+
+    Args:
+        config: The active configuration (for the Metaflow profile).
+        rows: The assembled SFT examples as plain dicts.
+        name: The dataset name for the produced data object.
+        out_path: The already-written ``--out`` JSONL (for the staging dir).
+
+    Returns:
+        ``0`` when the data object was produced, else a non-zero exit code.
+    """
+    import csv as _csv
+    import json as _json
+    import tempfile
+
+    # The metaflow MLOps provider is required for a data object, exactly as the
+    # other lifecycle paths guard it.
+    if config.mlops_provider != "metaflow":
+        print(
+            f"error: --to-dataset produces a Metaflow data object and needs the "
+            f"metaflow MLOps provider, but mlops_provider is "
+            f"{config.mlops_provider!r}. Re-run with --mlops metaflow (or set "
+            "LOOM_MLOPS_PROVIDER=metaflow).",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Stage the corpus as a CSV IngestDataset can read. Nested fields are
+    # JSON-encoded strings so the data object is a LOSSLESS round-trip of the
+    # JSONL export (the whole corpus, never sampled).
+    field_names = [
+        "trajectory_id",
+        "verb",
+        "context",
+        "teacher_output",
+        "tools_trajectory",
+        "reward",
+        "weight",
+        "owned_by",
+        "metric",
+        "success",
+    ]
+    staging_dir = tempfile.mkdtemp(prefix="loom-ds-ingest-")
+    train_csv = os.path.join(staging_dir, "train.csv")
+    with open(train_csv, "w", encoding="utf-8", newline="") as fh:
+        writer = _csv.DictWriter(fh, fieldnames=field_names)
+        writer.writeheader()
+        for row in rows:
+            encoded = {}
+            for key in field_names:
+                value = row.get(key)
+                if isinstance(value, (list, dict)):
+                    encoded[key] = _json.dumps(value, ensure_ascii=False)
+                else:
+                    encoded[key] = value
+            writer.writerow(encoded)
+
+    print(f"  to-dataset      : ingesting {len(rows)} example(s) as {name!r}...")
+    pathspec, error = _ingest_source(staging_dir, name, config)
+    if error is not None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2 if "Metaflow is required" in error else 1
+
+    print("  data object     : a versioned, content-addressed Metaflow data object")
+    print(f"  dataset_ref     : {pathspec}")
+    print("")
+    print("This is the durable, lossless, no-sampling corpus sink (a dataset_ref).")
+    print("Inspect it with:")
+    print(f"  loom eda --dataset {pathspec} --mlops metaflow")
     return 0
 
 

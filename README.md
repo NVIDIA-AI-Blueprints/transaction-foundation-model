@@ -469,8 +469,18 @@ default included) is local dev, **not** hosting, so it never flips the default.
 
 ### Telemetry & distillation — trajectories → LOOM-DS-1
 
+**Telemetry here is COMPLETE training-data collection for LOOM-DS-1, NOT
+observability.** No sampling, no batch-drop, no TTL, no aggregation — **every
+trajectory, in full** (modeled on a transcript, not a metrics pipeline). The
+corpus is the **complete append-only JSONL** → a **versioned Metaflow data
+object** (`loom telemetry export --to-dataset`) for durable scale. OTel is an
+**optional ops-dashboards mirror ONLY** (`LOOM_TELEMETRY_OTEL_OPS`) — **do NOT
+send the training corpus to a sampling observability/metrics backend** (they
+sample + aggregate + expire — even first-party analytics pipelines do).
+
 The capture above scatters a run's signal across three stores; the **telemetry
-layer** (`loom/telemetry/`, modeled on Claude Code's telemetry) stitches them into
+layer** (`loom/telemetry/`, modeled on Claude Code's append-only session
+**transcript**, not its sampling analytics plane) stitches them into
 **distillation-grade trajectories** — the training examples LOOM-DS-1 distills from.
 It does **not** re-log; it **correlates**. Three signal types feed one trajectory:
 
@@ -488,29 +498,41 @@ are correlated by one stable **`trajectory_id`** written onto every signal.
 `assemble_trajectory` is the pure JOIN that re-materializes one ordered trajectory
 (`context → [llm_request → response → tool/exec → observation]* → outcome{reward}`).
 
-**Content is redacted by default** to `<REDACTED:kind>` (CC's `redactIfDisabled`)
-unless `LOOM_LOG_CONTENT` is set — only schema/preview/metrics enter telemetry, never
-raw rows, never keys. The **IP boundary** is the same as the corpus/learnings: the
-distillation export trains **only on `owned_by: general`** trajectories; a
-tenant-owned one is excluded. The **OpenTelemetry exporter is optional** — lazily
-imported, gated by `LOOM_TELEMETRY` + `OTEL_*_EXPORTER` (console/otlp,
-CC-compatible), a clean no-op (never a hard dep) when the SDK is absent; the local
-JSONL capture is always available.
+**Content is redacted by default** to `<REDACTED:kind>` unless `LOOM_LOG_CONTENT`
+is set — only schema/preview/metrics enter the corpus, never raw rows, never keys.
+The **IP boundary** is the same as the corpus/learnings: the distillation export
+trains **only on `owned_by: general`** trajectories; a tenant-owned one is
+excluded.
+
+The corpus capture (`LOOM_TELEMETRY`) is **decoupled** from the **optional OTel
+ops mirror**: that mirror is a *separate* explicit opt-in, gated by
+`LOOM_TELEMETRY_OTEL_OPS` **in addition to** `OTEL_*_EXPORTER` (console/otlp),
+lazily imported and a clean no-op (never a hard dep) when the SDK is absent.
+Enabling capture never implies the ops mirror. ⚠ The ops mirror is **ops-only,
+NOT the corpus** — never route the training corpus to a sampling
+observability/metrics backend; they sample + aggregate + expire. The complete
+append-only JSONL corpus is always available and never flows through an exporter.
 
 ```bash
-loom telemetry status                       # read-only: counts, the general/tenant split, OTel state, paths
+loom telemetry status                       # read-only: counts, the general/tenant split, ops-mirror state, paths
 loom telemetry export                        # assemble trajectories -> telemetry/loom-ds-1.jsonl (general-only, redacted)
+loom telemetry export --to-dataset loom-ds-1 # ALSO ingest the corpus as a VERSIONED Metaflow data object (durable, lossless) -> prints its pathspec
 loom telemetry export --owned-by general --with-content   # opt in to raw content (off by default)
 loom telemetry trace --trajectory loom-abc123             # show one assembled trajectory
 ```
 
 `loom telemetry export` is the bridge to the **LOOM-DS-1** corpus: each kept
 trajectory becomes one reward-weighted SFT/teacher example (`context`,
-`teacher_output`, `tools_trajectory`, `reward`/`weight`). Telemetry is **off unless
-`LOOM_TELEMETRY` is set**; `LOOM_TELEMETRY_PATH` / `LOOM_TRAJECTORIES_PATH` (defaults
-under `telemetry/`) and `LOOM_TELEMETRY_INCLUDE_SESSION_ID` (cardinality) configure
-it. This is the full-lifecycle data discipline — *capture → correlate → distill* —
-not an automated black box.
+`teacher_output`, `tools_trajectory`, `reward`/`weight`). The `--out` JSONL is
+always written; **`--to-dataset NAME`** additionally ingests that same corpus
+through the same `IngestDataset` seam `loom ingest` uses, so it becomes a
+**durable, content-addressed, versioned, lossless Metaflow data object** — a
+first-class `dataset_ref` for scale (needs `--mlops metaflow`). Telemetry is
+**off unless `LOOM_TELEMETRY` is set**; `LOOM_TELEMETRY_PATH` /
+`LOOM_TRAJECTORIES_PATH` (defaults under `telemetry/`) and
+`LOOM_TELEMETRY_INCLUDE_SESSION_ID` (cardinality) configure it. This is the
+full-lifecycle data discipline — *capture → correlate → distill* — not an
+automated black box.
 
 ---
 

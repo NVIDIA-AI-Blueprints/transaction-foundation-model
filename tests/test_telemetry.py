@@ -7,10 +7,16 @@ OpenTelemetry SDK, no network):
   MONOTONIC ``event.sequence`` orders events within a process, and content is
   REDACTED BY DEFAULT (un-redacted only when ``LOOM_LOG_CONTENT`` is set);
   ``log_event`` is a safe no-op (returns ``None``) when ``LOOM_TELEMETRY`` is off.
-* :func:`loom.telemetry.bootstrap_otel` -- degrades cleanly to a no-op with an
-  actionable message when the SDK is absent (which it is in the venv); it never
-  raises and never makes the SDK a hard import.
-* ``loom telemetry status|export|trace`` -- the CLI arg-parse wiring.
+* :func:`loom.telemetry.bootstrap_ops_telemetry` (alias :func:`bootstrap_otel`)
+  -- the OPTIONAL ops-only mirror, a SEPARATE opt-in gated by
+  ``LOOM_TELEMETRY_OTEL_OPS`` (capture via ``LOOM_TELEMETRY`` does NOT enable it);
+  it degrades cleanly to a no-op with an actionable message when the SDK is
+  absent (which it is in the venv); it never raises and never makes the SDK a
+  hard import.
+* the COMPLETE corpus sink -- every logged event lands (no sampling/drop) with
+  the ops mirror OFF, so capture has no dependence on opentelemetry.
+* ``loom telemetry status|export|trace`` -- the CLI arg-parse wiring, including
+  ``export --to-dataset`` (the versioned-Metaflow-data-object sink).
 
 All file I/O is confined to ``tmp_path`` via a :class:`LoomConfig` whose
 ``telemetry_path`` points there, so the tests never touch the repo's corpus.
@@ -19,12 +25,14 @@ All file I/O is confined to ``tmp_path`` via a :class:`LoomConfig` whose
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from loom.config import LoomConfig
 from loom.telemetry import (
+    bootstrap_ops_telemetry,
     bootstrap_otel,
     log_event,
     read_events,
@@ -179,33 +187,81 @@ def test_telemetry_attributes_carry_no_secrets_and_gate_cardinality() -> None:
 
 
 # ---------------------------------------------------------------------------
-# OTel bootstrap: degrades cleanly when the SDK is absent (no hard dep).
+# Completeness: the corpus captures EVERY event with the ops mirror OFF.
 # ---------------------------------------------------------------------------
 
 
-def test_bootstrap_otel_disabled_is_clean_noop() -> None:
-    """With telemetry off / no exporter requested, bootstrap is a clean no-op."""
-    boot = bootstrap_otel(env={})
+def test_corpus_capture_is_complete_no_sampling_no_otel(
+    tmp_path: Path, telemetry_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The corpus is COMPLETE: every logged event lands -- no sampling/drop, no OTel.
+
+    With the ops mirror explicitly OFF (LOOM_TELEMETRY_OTEL_OPS unset) and the
+    OpenTelemetry SDK absent from the venv, logging many events must persist EVERY
+    one of them in order. This is the training-corpus completeness guarantee: the
+    append-only JSONL never samples, never batch-drops, and never depends on otel.
+    """
+    monkeypatch.delenv("LOOM_TELEMETRY_OTEL_OPS", raising=False)
+    cfg = _config(tmp_path)
+
+    n = 500
+    for i in range(n):
+        log_event("llm_request", "traj-complete", cfg, attrs={"i": i})
+
+    rows = read_events(cfg)
+    # EVERY event landed (no sampling / no overflow drop).
+    assert len(rows) == n
+    # In order, none missing -- a faithful, lossless record.
+    assert [r["i"] for r in rows] == list(range(n))
+
+
+# ---------------------------------------------------------------------------
+# Ops mirror: a SEPARATE opt-in; LOOM_TELEMETRY alone does NOT start it.
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_ops_disabled_is_clean_noop() -> None:
+    """With the ops mirror off / no exporter requested, bootstrap is a clean no-op."""
+    boot = bootstrap_ops_telemetry(env={})
     assert boot.enabled is False
     assert boot.available is False
     assert boot.exporters == []
     assert "disabled" in boot.message.lower()
 
 
-def test_bootstrap_otel_requested_but_sdk_absent_degrades(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Requested-but-absent SDK => available=False + an actionable pip message; never raises.
+def test_capture_alone_does_not_start_the_ops_mirror() -> None:
+    """LOOM_TELEMETRY (capture) alone must NOT enable the OTel ops mirror.
 
-    The SDK is not installed in the venv, so requesting an exporter must NOT raise
-    and must surface a pip hint while keeping the local JSONL capture working.
+    The two planes are decoupled: enabling the complete corpus capture must not
+    imply routing it to a sampling observability backend. The ops mirror requires
+    its OWN explicit LOOM_TELEMETRY_OTEL_OPS opt-in in addition to an exporter.
     """
+    # Capture on + an exporter set, but the ops opt-in is NOT present.
     env = {
         "LOOM_TELEMETRY": "1",
         "OTEL_LOGS_EXPORTER": "otlp",
         "OTEL_METRICS_EXPORTER": "console",
     }
-    boot = bootstrap_otel(env=env)
+    boot = bootstrap_ops_telemetry(env=env)
+    assert boot.enabled is False  # capture alone did not start the ops mirror
+    assert boot.exporters == []
+    # The alias points at the same gate.
+    assert bootstrap_otel(env=env).enabled is False
+
+
+def test_bootstrap_ops_requested_but_sdk_absent_degrades() -> None:
+    """The ops opt-in + an exporter, SDK absent => available=False + a pip hint; never raises.
+
+    The SDK is not installed in the venv, so requesting the ops mirror must NOT
+    raise and must surface a pip hint while keeping the complete JSONL corpus
+    working. The ops mirror is its OWN opt-in (LOOM_TELEMETRY_OTEL_OPS).
+    """
+    env = {
+        "LOOM_TELEMETRY_OTEL_OPS": "1",
+        "OTEL_LOGS_EXPORTER": "otlp",
+        "OTEL_METRICS_EXPORTER": "console",
+    }
+    boot = bootstrap_ops_telemetry(env=env)
     assert boot.enabled is True
     assert boot.available is False  # SDK absent in the venv
     assert "pip install" in boot.message
@@ -250,12 +306,151 @@ def test_cli_parses_telemetry_export_flags() -> None:
 
 
 def test_cli_export_defaults_redacted_general() -> None:
-    """The export defaults are the safe ones: general-only + redacted."""
+    """The export defaults are the safe ones: general-only + redacted + no data object."""
     from loom.cli import _build_parser
 
     args = _build_parser().parse_args(["telemetry", "export"])
     assert args.owned_by == "general"
     assert args.with_content is False
+    assert args.to_dataset is None  # --to-dataset is opt-in
+
+
+def test_cli_parses_telemetry_export_to_dataset() -> None:
+    """`loom telemetry export --to-dataset NAME` parses the data-object sink flag."""
+    from loom.cli import _build_parser
+
+    args = _build_parser().parse_args(
+        ["telemetry", "export", "--to-dataset", "loom-ds-1"]
+    )
+    assert args.to_dataset == "loom-ds-1"
+
+
+def test_export_default_out_still_works_without_data_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without --to-dataset, export writes ONLY the --out JSONL (no ingest seam hit).
+
+    The existing file export must keep working and must NOT touch the Metaflow
+    ingest seam when --to-dataset is absent.
+    """
+    import loom.cli as cli
+
+    out_path = tmp_path / "ds.jsonl"
+    cfg = LoomConfig(
+        telemetry_path=str(tmp_path / "telemetry" / "events.jsonl"),
+        trajectories_path=str(tmp_path / "telemetry" / "trajectories.jsonl"),
+        owned_by="general",
+        tenant="default",
+    )
+    monkeypatch.setattr(cli, "_build_config", lambda args: cfg)
+    monkeypatch.setattr(cli, "_telemetry_collect_trajectories", lambda config: [])
+
+    # If the ingest seam is reached without --to-dataset, fail loudly.
+    def _no_ingest(*a, **k):  # pragma: no cover - asserts it is NOT called
+        raise AssertionError("the ingest seam must not be hit without --to-dataset")
+
+    monkeypatch.setattr(cli, "_ingest_source", _no_ingest)
+
+    args = cli._build_parser().parse_args(
+        ["telemetry", "export", "--out", str(out_path)]
+    )
+    rc = cli._cmd_telemetry_export(args)
+
+    assert rc == 0
+    assert out_path.exists()  # the --out file export still produced
+
+
+def test_export_to_dataset_ingests_versioned_data_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`export --to-dataset` routes the corpus through the IngestDataset seam -> a pathspec.
+
+    Mocks the ingest/dataio seam (:func:`loom.cli._ingest_source`) to a data-object
+    pathspec and asserts the corpus is staged + handed to it (NOT to any
+    observability endpoint), and that the --out JSONL is still produced.
+    """
+    import loom.cli as cli
+    from loom.telemetry.distill import DistillExample
+
+    out_path = tmp_path / "ds.jsonl"
+    cfg = LoomConfig(
+        mlops_provider="metaflow",
+        telemetry_path=str(tmp_path / "telemetry" / "events.jsonl"),
+        trajectories_path=str(tmp_path / "telemetry" / "trajectories.jsonl"),
+        owned_by="general",
+        tenant="default",
+    )
+    monkeypatch.setattr(cli, "_build_config", lambda args: cfg)
+
+    # A general-only example with nested fields, to prove the lossless staging.
+    example = DistillExample(
+        trajectory_id="traj-1",
+        verb="aide",
+        context=[{"role": "system", "content": "Loom verb: aide"}],
+        teacher_output="<REDACTED:output>",
+        tools_trajectory=[{"index": 0, "kind": "llm_call"}],
+        reward=1.0,
+        weight=1.0,
+        owned_by="general",
+    )
+
+    # Stub trajectory assembly + the distill build to one example.
+    monkeypatch.setattr(cli, "_telemetry_collect_trajectories", lambda config: [object()])
+    import loom.telemetry as tele
+
+    monkeypatch.setattr(tele, "build_distillation_dataset", lambda *a, **k: [example])
+
+    captured: dict[str, object] = {}
+
+    def _fake_ingest(source: str, name: str, config) -> tuple:
+        captured["source"] = source
+        captured["name"] = name
+        # The staged CSV the seam would ingest must exist + contain the corpus.
+        assert os.path.isfile(os.path.join(source, "train.csv"))
+        return "IngestDataset/4242", None
+
+    monkeypatch.setattr(cli, "_ingest_source", _fake_ingest)
+
+    args = cli._build_parser().parse_args(
+        ["telemetry", "export", "--out", str(out_path), "--to-dataset", "loom-ds-1"]
+    )
+    rc = cli._cmd_telemetry_export(args)
+
+    assert rc == 0
+    assert captured["name"] == "loom-ds-1"
+    assert out_path.exists()  # the --out file export is still produced
+
+
+def test_export_to_dataset_requires_metaflow_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--to-dataset` is guarded: a non-metaflow MLOps provider is refused cleanly."""
+    import loom.cli as cli
+    from loom.telemetry.distill import DistillExample
+
+    cfg = LoomConfig(
+        mlops_provider="local",
+        telemetry_path=str(tmp_path / "telemetry" / "events.jsonl"),
+        trajectories_path=str(tmp_path / "telemetry" / "trajectories.jsonl"),
+        owned_by="general",
+        tenant="default",
+    )
+    monkeypatch.setattr(cli, "_build_config", lambda args: cfg)
+    monkeypatch.setattr(cli, "_telemetry_collect_trajectories", lambda config: [object()])
+    import loom.telemetry as tele
+
+    monkeypatch.setattr(
+        tele,
+        "build_distillation_dataset",
+        lambda *a, **k: [DistillExample(trajectory_id="t", verb="aide", owned_by="general")],
+    )
+
+    args = cli._build_parser().parse_args(
+        ["telemetry", "export", "--out", str(tmp_path / "ds.jsonl"),
+         "--to-dataset", "loom-ds-1"]
+    )
+    rc = cli._cmd_telemetry_export(args)
+    assert rc == 2  # guarded like the other lifecycle paths
 
 
 def test_cli_parses_telemetry_trace_requires_id() -> None:

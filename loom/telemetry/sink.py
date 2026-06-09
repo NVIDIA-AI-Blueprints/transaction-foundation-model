@@ -1,21 +1,46 @@
-"""Telemetry sinks: the JSONL store + the OPTIONAL, lazy OTel bootstrap.
+"""The CANONICAL training-data sink (append-only JSONL) + an OPTIONAL ops mirror.
 
-Two sinks, both deliberately decoupled from the OpenTelemetry SDK so that
-``import loom.telemetry`` works in any environment (the SDK is **never** a hard
-dependency):
+THE CORPUS IS A TRANSCRIPT, NOT OBSERVABILITY
+=============================================
+This module's append-only JSONL functions (:func:`append_event` /
+:func:`append_trajectory`) are the **canonical training-data sink** for
+distilling LOOM-DS-1. Its purpose is collecting a **COMPLETE** dataset, not
+operational observability. The completeness guarantees are load-bearing:
 
-* :func:`append_event` / :func:`append_trajectory` -- the always-available local
-  JSONL sink (dir-created, flushed, abspath-anchored), matching
+* **Append-only.** Every call appends one whole, flushed line; nothing is ever
+  rewritten or compacted. A crash mid-run leaves a valid prefix of whole lines.
+* **EVERY event / trajectory, in full.** There is **NO sampling**, **NO
+  batch-with-drop / overflow queue**, **NO retention TTL / expiry**, and **NO
+  aggregation / rollup**. Each logged signal lands on disk verbatim. This is what
+  makes the store a faithful training corpus rather than a lossy metrics feed.
+
+This is modeled on the way Claude Code keeps the COMPLETE record: the append-only
+**session transcript JSONL** (a write stream opened in append mode -- every
+message, never sampled), NOT on its telemetry/analytics plane. Even a
+*first-party* analytics pipeline samples (a per-event sample rate, a random draw
+below it keeps the event and the rest are dropped) and batches with a bounded
+queue (overflow drops); OTel metrics additionally aggregate. None of those
+lossy behaviors are acceptable for a corpus we distill a model from, so the
+corpus sink deliberately copies the transcript discipline and nothing else.
+
+THE TWO PLANES ARE DECOUPLED
+============================
+* :func:`append_event` / :func:`append_trajectory` -- the always-available,
+  dependency-light corpus sink (dir-created, flushed, abspath-anchored), matching
   :meth:`loom.corpus.Corpus.record` / :func:`loom.proxy.server.log_call`. This is
-  what actually persists the trajectory corpus the distillation export reads.
+  what actually persists the COMPLETE trajectory corpus the distillation export
+  reads. Enabled by ``LOOM_TELEMETRY`` (the capture signal).
 
-* :func:`bootstrap_otel` -- the OPTIONAL bridge to an external OTel collector,
-  modeled on Claude Code's ``instrumentation.ts`` ``bootstrapTelemetry``: gated by
-  ``LOOM_TELEMETRY`` + ``OTEL_*_EXPORTER``, it LAZILY imports the OpenTelemetry
-  SDK (MeterProvider + LoggerProvider) only when actually invoked, supports the
-  ``console`` and ``otlp`` exporters, and degrades to a clean no-op with an
-  ACTIONABLE message when the SDK is not installed. It is never imported at module
-  load and never required for the core capture path.
+* :func:`bootstrap_ops_telemetry` (back-compat alias :func:`bootstrap_otel`) --
+  an **OPTIONAL OPS-MONITORING mirror ONLY**, NOT the corpus. It is a SEPARATE,
+  explicit opt-in: it requires ``LOOM_TELEMETRY_OTEL_OPS`` **in addition to** an
+  ``OTEL_*_EXPORTER``, so enabling capture (``LOOM_TELEMETRY``) never implies the
+  ops mirror. ⚠ Observability/metrics backends **SAMPLE, AGGREGATE, and EXPIRE**
+  data; they MUST NOT carry the training corpus. This bridge exists only to feed
+  ops dashboards, lazily imports the OpenTelemetry SDK (MeterProvider +
+  LoggerProvider) when invoked, supports the ``console`` and ``otlp`` exporters,
+  and degrades to a clean no-op with an ACTIONABLE message when the SDK is
+  absent. It is never imported at module load and never required for capture.
 """
 
 from __future__ import annotations
@@ -29,9 +54,14 @@ from typing import Any, Mapping
 def _append_jsonl(path: str, row: Mapping[str, Any]) -> None:
     """Append one JSON object as a line to ``path`` (dir-created, flushed).
 
-    The shared write primitive for both telemetry sinks, identical in discipline
-    to :meth:`loom.corpus.Corpus.record`: the parent dir is created lazily and the
-    line is flushed so a crash mid-run still leaves a valid prefix of whole lines.
+    The shared write primitive for the canonical corpus sink, identical in
+    discipline to :meth:`loom.corpus.Corpus.record` and to a transcript write
+    stream opened in append mode: the parent dir is created lazily and the line is
+    flushed so a crash mid-run still leaves a valid prefix of whole lines.
+
+    COMPLETENESS: this is a pure append of the WHOLE row -- no sampling, no
+    bounded queue / overflow drop, no TTL, no aggregation. Every call lands one
+    line on disk, so the corpus is a lossless record of every signal.
     """
     parent = os.path.dirname(path)
     if parent:
@@ -43,12 +73,20 @@ def _append_jsonl(path: str, row: Mapping[str, Any]) -> None:
 
 
 def append_event(path: str, row: Mapping[str, Any]) -> None:
-    """Append one telemetry event row to the events JSONL at ``path``."""
+    """Append one event row to the COMPLETE, append-only corpus at ``path``.
+
+    The canonical training-data sink: every event is captured in full, never
+    sampled or dropped (see the module docstring's completeness guarantees).
+    """
     _append_jsonl(path, row)
 
 
 def append_trajectory(path: str, row: Mapping[str, Any]) -> None:
-    """Append one assembled-trajectory row to the trajectories JSONL at ``path``."""
+    """Append one assembled-trajectory row to the COMPLETE corpus at ``path``.
+
+    The canonical training-data sink: every trajectory is captured in full, never
+    sampled or dropped (see the module docstring's completeness guarantees).
+    """
     _append_jsonl(path, row)
 
 
@@ -78,15 +116,17 @@ def read_jsonl(path: str) -> list[dict[str, Any]]:
 
 @dataclass
 class OtelBootstrap:
-    """The outcome of an :func:`bootstrap_otel` attempt (a status report).
+    """The outcome of a :func:`bootstrap_ops_telemetry` attempt (a status report).
 
     Always returned (never raised), so a caller can log/inspect the outcome and
-    keep running whether or not the SDK was present. The local JSONL sink is
-    unaffected by this entirely.
+    keep running whether or not the SDK was present. The OPS mirror this reports
+    on is NOT the corpus: the complete append-only JSONL corpus is unaffected by
+    this entirely and never flows through any wired exporter.
 
     Attributes:
-        enabled: Whether telemetry export was requested (``LOOM_TELEMETRY`` +
-            an ``OTEL_*_EXPORTER`` set).
+        enabled: Whether the OPS mirror was requested -- i.e. the explicit
+            ``LOOM_TELEMETRY_OTEL_OPS`` opt-in AND an ``OTEL_*_EXPORTER`` set.
+            (``LOOM_TELEMETRY`` capture alone does NOT enable it.)
         available: Whether the OpenTelemetry SDK was importable.
         exporters: The exporter protocols that were wired (e.g.
             ``["console"]`` / ``["otlp"]``), empty when none.
@@ -120,25 +160,34 @@ def _is_truthy(value: str | None) -> bool:
     return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def bootstrap_otel(
+def bootstrap_ops_telemetry(
     config: LoomConfig | None = None,
     env: Mapping[str, str] | None = None,
 ) -> OtelBootstrap:
-    """Optionally bring up an OpenTelemetry export bridge -- LAZY + no hard dep.
+    """Optionally bring up the OPS-MONITORING OTel mirror -- LAZY + no hard dep.
 
-    The Loom analogue of CC's ``bootstrapTelemetry`` + ``initializeTelemetry``,
-    pared to the engine essentials:
+    ⚠ This is **NOT the training corpus.** Observability/metrics backends SAMPLE,
+    AGGREGATE, and EXPIRE data, so they must never carry the complete corpus we
+    distill LOOM-DS-1 from. This bridge exists ONLY to feed ops dashboards; the
+    canonical corpus is the append-only JSONL written by :func:`append_event` /
+    :func:`append_trajectory`, which is unaffected by anything here.
 
-    1. **Gate.** Does nothing unless ``LOOM_TELEMETRY`` is truthy AND at least one
-       of ``OTEL_METRICS_EXPORTER`` / ``OTEL_LOGS_EXPORTER`` names an exporter.
+    The Loom analogue of CC's ops ``instrumentation.ts`` bootstrap, pared to the
+    engine essentials:
+
+    1. **Separate, explicit gate.** Does nothing unless the ops mirror is
+       explicitly opted into via ``LOOM_TELEMETRY_OTEL_OPS`` AND at least one of
+       ``OTEL_METRICS_EXPORTER`` / ``OTEL_LOGS_EXPORTER`` names an exporter. The
+       capture signal ``LOOM_TELEMETRY`` does **NOT** enable this -- corpus
+       capture never implies the ops mirror, and the two planes stay decoupled.
     2. **Lazy import.** Only then does it attempt ``import opentelemetry`` (+ the
        SDK). The import lives inside this function, never at module load, so
        ``import loom.telemetry`` works with the SDK absent.
     3. **No-op on absence.** If the SDK is not installed it returns a report with
        ``available=False`` and an ACTIONABLE message (how to install / that the
-       local JSONL capture is unaffected) -- it never raises.
+       complete JSONL corpus is unaffected) -- it never raises.
     4. **Exporters.** Supports ``console`` and ``otlp`` (the OTLP exporter package
-       is itself lazily imported per protocol, as CC does).
+       is itself lazily imported per protocol).
 
     Args:
         config: The active configuration (unused beyond future resource attrs;
@@ -154,15 +203,19 @@ def bootstrap_otel(
     logs_exporters = _parse_exporters(e.get("OTEL_LOGS_EXPORTER"))
     requested = sorted(set(metrics_exporters) | set(logs_exporters))
 
-    if not _is_truthy(e.get("LOOM_TELEMETRY")) or not requested:
+    # SEPARATE OPS GATE: the ops mirror is its own explicit opt-in
+    # (LOOM_TELEMETRY_OTEL_OPS), distinct from the LOOM_TELEMETRY capture signal,
+    # so enabling the corpus never implies routing it to a sampling backend.
+    if not _is_truthy(e.get("LOOM_TELEMETRY_OTEL_OPS")) or not requested:
         return OtelBootstrap(
             enabled=False,
             available=False,
             exporters=[],
             message=(
-                "OTel export disabled (set LOOM_TELEMETRY=1 and an "
-                "OTEL_METRICS_EXPORTER / OTEL_LOGS_EXPORTER to enable). Local "
-                "JSONL telemetry capture is unaffected."
+                "OTel ops mirror disabled (set LOOM_TELEMETRY_OTEL_OPS=1 and an "
+                "OTEL_METRICS_EXPORTER / OTEL_LOGS_EXPORTER to enable the "
+                "ops-dashboards mirror). This is ops-only and NOT the training "
+                "corpus; the complete append-only JSONL corpus is unaffected."
             ),
         )
 
@@ -177,11 +230,12 @@ def bootstrap_otel(
             available=False,
             exporters=[],
             message=(
-                "OTel export was requested (LOOM_TELEMETRY + OTEL_*_EXPORTER) but "
-                "the OpenTelemetry SDK is not installed. Install it to enable the "
-                "external exporter:\n"
+                "The OTel ops mirror was requested (LOOM_TELEMETRY_OTEL_OPS + "
+                "OTEL_*_EXPORTER) but the OpenTelemetry SDK is not installed. "
+                "Install it to enable the ops-dashboards exporter:\n"
                 "  pip install opentelemetry-sdk opentelemetry-exporter-otlp\n"
-                "Loom's local JSONL telemetry capture continues unaffected."
+                "This mirror is ops-only and NOT the corpus; Loom's complete "
+                "append-only JSONL corpus continues unaffected."
             ),
         )
 
@@ -257,12 +311,19 @@ def bootstrap_otel(
         available=True,
         exporters=wired,
         message=(
-            f"OTel export active (exporters: {', '.join(wired) or 'none wired'}). "
-            "Loom's local JSONL telemetry capture also continues."
+            f"OTel ops mirror active (exporters: {', '.join(wired) or 'none wired'}). "
+            "This is the ops-only mirror, NOT the corpus -- it samples/aggregates; "
+            "Loom's complete append-only JSONL corpus is captured separately."
         ),
         meter_provider=meter_provider,
         logger_provider=logger_provider,
     )
+
+
+# Back-compat alias. The function was historically named ``bootstrap_otel``; it
+# is now ``bootstrap_ops_telemetry`` to make clear it is the OPS mirror, not the
+# corpus. The old name is kept so existing callers/imports keep working.
+bootstrap_otel = bootstrap_ops_telemetry
 
 
 # Late import to avoid a cycle at module top (config imports nothing from here).
@@ -273,6 +334,7 @@ __all__ = [
     "append_event",
     "append_trajectory",
     "read_jsonl",
+    "bootstrap_ops_telemetry",
     "bootstrap_otel",
     "OtelBootstrap",
 ]

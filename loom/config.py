@@ -150,9 +150,19 @@ class LoomConfig:
             ``LOOM_TELEMETRY_PATH``; default ``telemetry/events.jsonl``. Anchored
             absolute at load time exactly like ``learnings_path``/``proxy_log_path``
             so events written after a provider ``chdir`` land in one stable file,
-            not a doomed ephemeral workspace. Telemetry is OFF unless ``LOOM_TELEMETRY``
-            is set (read at the point of use); content (prompts/outputs) is REDACTED
-            BY DEFAULT unless ``LOOM_LOG_CONTENT`` is set.
+            not a doomed ephemeral workspace. The capture is COMPLETE -- every
+            event in full, NO sampling/batch-drop/TTL/aggregation (it is a training
+            corpus modeled on a transcript, not an observability feed). Telemetry
+            is OFF unless ``LOOM_TELEMETRY`` is set (read at the point of use);
+            content (prompts/outputs) is REDACTED BY DEFAULT unless
+            ``LOOM_LOG_CONTENT`` is set. ``LOOM_TELEMETRY_OTEL_OPS`` (default
+            **off**, read at the point of use in
+            :func:`loom.telemetry.bootstrap_ops_telemetry`) is a SEPARATE opt-in
+            that, together with an ``OTEL_*_EXPORTER``, mirrors signals to an
+            OpenTelemetry OPS-monitoring backend. ⚠ That mirror is **ops-only and
+            NOT the training corpus** (observability backends sample + aggregate +
+            expire); enabling ``LOOM_TELEMETRY`` capture does NOT enable it, so the
+            complete corpus never flows through a sampling endpoint.
         trajectories_path: Path to the JSONL assembled-trajectory store
             (:mod:`loom.telemetry`) -- one row per assembled
             :class:`~loom.telemetry.TrajectoryRecord`, the interaction-root join of
