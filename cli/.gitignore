@@ -1,0 +1,12 @@
+# Node deps + build output (reproducible via `npm install && npm run build`)
+node_modules/
+dist/
+
+# Pi runtime data written into the branded agent home
+home/sessions/
+home/auth.json
+home/.cache/
+
+# misc
+*.log
+.DS_Store
