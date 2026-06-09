@@ -26,6 +26,43 @@ from typing import Any, Mapping
 _DEFAULT_CODE_MODEL = "claude-sonnet-4-5"
 _DEFAULT_FEEDBACK_MODEL = "claude-sonnet-4-5"
 
+# The native-Claude default model provider, used when no hosted gateway is
+# detected and the user did not explicitly choose a provider.
+_DEFAULT_MODEL_PROVIDER = "anthropic-api"
+# The gateway (moat) model provider, made the default once a HOSTED gateway is
+# detected (see :meth:`LoomConfig._resolve_default_providers`).
+_PROXY_MODEL_PROVIDER = "loom-proxy"
+# The loopback gateway base the ``loom-proxy`` provider points at by default.
+# A ``LOOM_API_BASE`` left at (or set to) this loopback value is NOT a hosted
+# gateway, so it must NOT flip the provider default.
+_DEFAULT_LOOM_API_BASE = "http://127.0.0.1:8088"
+
+
+def _is_truthy(value: str | None) -> bool:
+    """Return ``True`` for the usual truthy env spellings (``1``/``true``/...)."""
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_hosted_base(base: str | None) -> bool:
+    """Return ``True`` if ``base`` looks like a HOSTED (non-loopback) gateway.
+
+    A hosted gateway is one a client points at over the network: a non-empty
+    ``LOOM_API_BASE`` that is neither the loopback default nor any other
+    localhost/loopback address. Local dev (``127.0.0.1`` / ``localhost`` /
+    ``::1`` / ``0.0.0.0``) is explicitly NOT hosting, so running a gateway on the
+    same box does not silently flip the moat path on.
+    """
+    if not base:
+        return False
+    base = base.strip()
+    if not base or base == _DEFAULT_LOOM_API_BASE:
+        return False
+    lowered = base.lower()
+    loopback_markers = ("127.0.0.1", "localhost", "[::1]", "://::1", "0.0.0.0")
+    return not any(marker in lowered for marker in loopback_markers)
+
 
 @dataclass
 class BudgetConfig:
@@ -74,9 +111,17 @@ class LoomConfig:
         code_provider: Name of the model ("LLM backend") provider for the code
             role -- which model and how it is authenticated. Default
             ``"anthropic-api"`` (native Claude), preserving historical behavior.
+            DEFAULT-ONCE-HOSTED: when a HOSTED gateway is detected at
+            :meth:`load` time (``LOOM_API_BASE`` set to a non-loopback URL, or
+            ``LOOM_PROXY_DEFAULT`` truthy) and the user did NOT explicitly choose
+            a provider, this defaults to ``"loom-proxy"`` instead — so a hosted
+            deployment captures the moat corpus by default. An explicit choice
+            (``--code/feedback/model-provider`` or ``LOOM_CODE/FEEDBACK_PROVIDER``)
+            ALWAYS wins; see :meth:`_resolve_default_providers`.
         feedback_provider: Name of the model provider for the feedback/judge
             role. Default ``"anthropic-api"``. The judge always uses tool calling,
-            so this provider's resolved route must be judge-capable.
+            so this provider's resolved route must be judge-capable. Follows the
+            same DEFAULT-ONCE-HOSTED rule as ``code_provider``.
         nim_base_url: OpenAI-compatible base URL for model routing (env
             ``OPENAI_BASE_URL``; e.g. an NVIDIA NIM endpoint). The matching API
             key is read from the environment at call time, never stored here.
@@ -138,11 +183,11 @@ class LoomConfig:
     model_builder_base_url: str | None = None
     code_model: str = _DEFAULT_CODE_MODEL
     feedback_model: str = _DEFAULT_FEEDBACK_MODEL
-    code_provider: str = "anthropic-api"
-    feedback_provider: str = "anthropic-api"
+    code_provider: str = _DEFAULT_MODEL_PROVIDER
+    feedback_provider: str = _DEFAULT_MODEL_PROVIDER
     nim_base_url: str | None = None
     model_base_url: str | None = None
-    loom_api_base: str = "http://127.0.0.1:8088"
+    loom_api_base: str = _DEFAULT_LOOM_API_BASE
     proxy_log_path: str = "learnings/proxy_calls.jsonl"
     telemetry_path: str = "telemetry/events.jsonl"
     trajectories_path: str = "telemetry/trajectories.jsonl"
@@ -191,16 +236,33 @@ class LoomConfig:
 
         cfg = cls()
 
+        # Track which keys were set EXPLICITLY (by YAML, env, or overrides) so the
+        # post-merge provider resolution can tell a deliberate provider choice
+        # apart from the dataclass default — a value that merely equals the default
+        # is not "explicit". This drives DEFAULT-ONCE-HOSTED below.
+        explicit: set[str] = set()
+
         # 1) YAML file (optional, lowest precedence above defaults).
         if yaml_path and os.path.isfile(yaml_path):
-            cfg = cls._apply_mapping(cfg, cls._read_yaml(yaml_path))
+            yaml_data = cls._read_yaml(yaml_path)
+            explicit.update(yaml_data)
+            cfg = cls._apply_mapping(cfg, yaml_data)
 
         # 2) Environment / .env.
-        cfg = cls._apply_mapping(cfg, cls._from_env(env))
+        env_data = cls._from_env(env)
+        explicit.update(env_data)
+        cfg = cls._apply_mapping(cfg, env_data)
 
         # 3) Explicit overrides (highest precedence).
         if overrides:
+            explicit.update(overrides)
             cfg = cls._apply_mapping(cfg, overrides)
+
+        # DEFAULT-ONCE-HOSTED: flip code/feedback providers to the gateway
+        # (``loom-proxy``) when a HOSTED gateway is detected and the user did not
+        # explicitly choose a provider. Done AFTER the full merge so it sees the
+        # final ``loom_api_base`` and only fills in the providers left at default.
+        cfg = cls._resolve_default_providers(cfg, env, explicit)
 
         # Anchor the corpus path to an ABSOLUTE location at load time (the launch
         # cwd), BEFORE any execution provider chdir's into an ephemeral workspace.
@@ -239,6 +301,56 @@ class LoomConfig:
             )
 
         return cfg
+
+    @staticmethod
+    def _resolve_default_providers(
+        cfg: "LoomConfig",
+        env: Mapping[str, str],
+        explicit: set[str],
+    ) -> "LoomConfig":
+        """Apply the DEFAULT-ONCE-HOSTED rule to the model providers.
+
+        Precedence (highest first):
+
+        1. An EXPLICIT provider choice always wins. That is any of
+           ``--code-provider`` / ``--feedback-provider`` / ``--model-provider``
+           (which the CLI passes through as ``overrides``) or the
+           ``LOOM_CODE_PROVIDER`` / ``LOOM_FEEDBACK_PROVIDER`` env vars — anything
+           that put ``code_provider`` / ``feedback_provider`` in ``explicit``.
+        2. Else, if a HOSTED gateway is detected — ``LOOM_API_BASE`` set to a
+           non-loopback URL, OR ``LOOM_PROXY_DEFAULT`` truthy — the role defaults
+           to ``loom-proxy`` (the moat capture path).
+        3. Else the role keeps the historical ``anthropic-api`` default.
+
+        Only roles left at the dataclass default are touched; an explicitly set
+        role is returned unchanged (even if it equals the default), so opting
+        back into ``anthropic-api`` on a hosted box is always honored. No secret
+        material is read; only the non-secret hosting *signal* is inspected.
+
+        Args:
+            cfg: The fully merged config (post YAML/env/overrides).
+            env: The environment mapping (for ``LOOM_PROXY_DEFAULT``).
+            explicit: The set of config keys that were set explicitly by any
+                source (YAML, env, or overrides).
+
+        Returns:
+            ``cfg`` with the gateway provider filled into any role left at the
+            native default when hosting is detected; otherwise ``cfg`` unchanged.
+        """
+        hosted = _is_hosted_base(cfg.loom_api_base) or _is_truthy(
+            env.get("LOOM_PROXY_DEFAULT")
+        )
+        if not hosted:
+            return cfg
+
+        updates: dict[str, Any] = {}
+        if "code_provider" not in explicit:
+            updates["code_provider"] = _PROXY_MODEL_PROVIDER
+        if "feedback_provider" not in explicit:
+            updates["feedback_provider"] = _PROXY_MODEL_PROVIDER
+        if not updates:
+            return cfg
+        return replace(cfg, **updates)
 
     @staticmethod
     def _read_yaml(yaml_path: str) -> dict[str, Any]:

@@ -447,6 +447,26 @@ logged**. `loom-proxy` is **opt-in today** (the gateway isn't hosted yet) and
 becomes the default once hosted. `LOOM_API_BASE` (default `http://127.0.0.1:8088`)
 and `LOOM_PROXY_LOG_PATH` (default `learnings/proxy_calls.jsonl`) configure it.
 
+### Hosting the gateway (flip `loom-proxy` to default)
+
+The hosted gateway is the **primary distillation-capture seam** — it's the one
+place every routed call is logged centrally, so it feeds the telemetry layer (the
+`trajectory_id`-correlated `llm_request` events) and, through it, LOOM-DS-1.
+`deploy/gateway/` containerizes `loom proxy serve` (Dockerfile + Compose + a k8s
+Deployment/Service); host it, set `ANTHROPIC_API_KEY` (the real vendor key, stays
+server-side) and `LOOM_API_KEYS` (the caller allowlist) as **runtime secrets**
+(never baked into the image), and point clients at it with `LOOM_API_BASE`. See
+[`deploy/gateway/README.md`](deploy/gateway/README.md).
+
+Once hosted, `loom-proxy` becomes the **default** model provider automatically:
+when a **hosted** gateway is detected — `LOOM_API_BASE` set to a **non-loopback**
+URL, or `LOOM_PROXY_DEFAULT` truthy — and the user hasn't explicitly chosen a
+provider, Loom defaults `code_provider` / `feedback_provider` to `loom-proxy`
+instead of `anthropic-api`. Precedence: an explicit `--code/feedback/model-provider`
+(or `LOOM_CODE/FEEDBACK_PROVIDER`) **always wins**; else a hosted gateway ⇒
+`loom-proxy`; else `anthropic-api`. A loopback base (`127.0.0.1` / `localhost`, the
+default included) is local dev, **not** hosting, so it never flips the default.
+
 ### Telemetry & distillation — trajectories → LOOM-DS-1
 
 The capture above scatters a run's signal across three stores; the **telemetry
