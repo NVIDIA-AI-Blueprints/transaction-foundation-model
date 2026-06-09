@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 
+import { LOOM_ASCII_LOGO, LOOM_TAGLINE } from "./branding/logo.js";
 import { materializeAgentPersonas, syncBundledAssets } from "./bootstrap/sync.js";
 import { runLoomUpdate } from "./update.js";
 import { ensureLoomPackages } from "./pi/ensure-packages.js";
@@ -51,32 +52,52 @@ function loadPackageVersion(appRoot: string): string | undefined {
 	}
 }
 
+// ── `loom --help` styling ─────────────────────────────────────────────────────
+// ZKAI brand: magenta accent #e01396 (bold headings/logo) + light #ff3eb0 (commands)
+// + dim descriptions. Color is suppressed when stdout isn't a TTY or NO_COLOR is set,
+// so piped/redirected `--help` stays plain. No pi-tui dependency — just ANSI.
+const HELP_COLOR = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
+const sgr = (code: string, text: string): string => (HELP_COLOR ? `\x1b[${code}m${text}\x1b[0m` : text);
+const accent = (text: string): string => sgr("1;38;2;224;19;150", text); // bold magenta
+const cmdc = (text: string): string => sgr("38;2;255;62;176", text); //     light pink
+const dimc = (text: string): string => sgr("2", text); //                    dim
+
 function printHelp(version: string | undefined): void {
-	const lines = [
-		"",
-		"  loom — an agentic CLI for data science",
-		version ? `  v${version}` : "",
-		"",
-		"  Usage:",
-		"    loom                      Open the Loom agent (interactive)",
-		"    loom <goal in words>      Start with a one-shot goal",
-		"    loom <verb> [--flags]     Jump straight to a verb workflow (/loom-<verb>)",
-		"    loom update               Pull + rebuild the CLI + refresh the engine",
-		"    loom --help               Show this help",
-		"    loom --version            Show version",
-		"",
-		"  Verbs:",
-		"    understand:  ingest  eda  validate  viz  datasets  doctor",
-		"    build:       features  pipeline  run",
-		"    operate:     report  ops",
-		"    gated:       deploy  train  collab  skillopt   (require explicit confirm)",
-		"",
-		"  Env:",
-		"    --model <p/m> pick the LLM (or set ANTHROPIC_API_KEY etc.)",
-		"    LOOM_PYTHON   advanced — override the engine runtime path",
-		"",
-	];
-	console.log(lines.filter((l) => l !== undefined).join("\n"));
+	const out: string[] = [""];
+	for (const line of LOOM_ASCII_LOGO) out.push(`  ${accent(line)}`);
+	out.push(`  ${dimc(LOOM_TAGLINE)}${version ? dimc(`   v${version}`) : ""}`, "");
+
+	const section = (title: string, rows: Array<[string, string]>): void => {
+		out.push(accent(`◆ ${title}`));
+		for (const [left, right] of rows) out.push(`  ${cmdc(left.padEnd(24))}${dimc(right)}`);
+		out.push("");
+	};
+
+	section("Getting started", [
+		["loom", "open the agent (interactive)"],
+		['loom "profile my data"', "start with a goal, in plain English"],
+		["loom doctor", "health-check the local stack"],
+		["loom doctor --fix", "let Claude or Codex resolve any issues"],
+		["loom update", "pull + rebuild the CLI + refresh the engine"],
+	]);
+	section("Verbs", [
+		["understand", "ingest  eda  validate  viz  datasets  doctor"],
+		["build", "features  pipeline  run"],
+		["operate", "report  ops"],
+		["gated", "deploy  train  collab  skillopt   (explicit confirm)"],
+	]);
+	section("Commands", [
+		["loom <verb> [--flags]", "jump to a verb workflow (/loom-<verb>)"],
+		["loom <goal in words>", "start with a one-shot goal"],
+		["loom --help", "show this help"],
+		["loom --version", "show version"],
+	]);
+	section("Tips", [
+		["--model <provider/id>", "pick the LLM (or set ANTHROPIC_API_KEY etc.)"],
+		["LOOM_PYTHON", "advanced — override the engine runtime path"],
+	]);
+
+	console.log(out.join("\n"));
 }
 
 /**
