@@ -37,11 +37,14 @@ from loom.cli import (
     _DOCTOR_WARN,
     _build_parser,
     _cmd_doctor,
+    _detect_repair_assistant,
     _doctor_check_datastore_env,
     _doctor_check_metaflow,
     _doctor_client_api_smoke,
     _doctor_parse_host_port,
     _doctor_probe_endpoint,
+    _doctor_repair_prompt,
+    _doctor_try_agentic_fix,
     _doctor_verdict,
 )
 from loom.config import LoomConfig
@@ -370,3 +373,73 @@ def test_cli_existing_subcommands_still_parse() -> None:
         ).command
         == "run"
     )
+
+
+# ---------------------------------------------------------------------------
+# `--fix`: agentic-first repair (claude/codex), scripted fallback.
+# ---------------------------------------------------------------------------
+_ISSUE = {
+    "status": _DOCTOR_FAIL,
+    "name": "import metaflow",
+    "detail": "metaflow is not importable",
+    "fix": "re-run pip install -e .",
+}
+
+
+def test_repair_assistant_prefers_claude_then_codex(monkeypatch) -> None:
+    """Detection prefers `claude`, falls back to `codex`, else None."""
+    monkeypatch.setattr("loom.cli.shutil.which", lambda n: f"/bin/{n}" if n in ("claude", "codex") else None)
+    assert _detect_repair_assistant() == "claude"
+    monkeypatch.setattr("loom.cli.shutil.which", lambda n: "/bin/codex" if n == "codex" else None)
+    assert _detect_repair_assistant() == "codex"
+    monkeypatch.setattr("loom.cli.shutil.which", lambda _n: None)
+    assert _detect_repair_assistant() is None
+
+
+def test_repair_prompt_carries_the_issue_and_guidance() -> None:
+    """The prompt hands the assistant the failing check + INSTALL.md + the goal."""
+    prompt = _doctor_repair_prompt([_ISSUE])
+    assert "import metaflow" in prompt
+    assert "INSTALL.md" in prompt
+    assert "VERDICT: PASS" in prompt
+
+
+def test_fix_without_assistant_prints_manual_note(monkeypatch, capsys) -> None:
+    """No claude/codex on PATH -> the scripted/manual fallback, never an exec."""
+    monkeypatch.setattr("loom.cli._detect_repair_assistant", lambda: None)
+    called = {"exec": False}
+    monkeypatch.setattr("loom.cli.os.execvp", lambda *a, **k: called.update(exec=True))
+    _doctor_try_agentic_fix([_ISSUE])
+    out = capsys.readouterr().out
+    assert "No `claude` or `codex`" in out and "INSTALL.md" in out
+    assert called["exec"] is False
+
+
+def test_fix_with_assistant_execs_it(monkeypatch) -> None:
+    """An available assistant is handed the repair via execvp(assistant, prompt)."""
+    monkeypatch.setattr("loom.cli._detect_repair_assistant", lambda: "claude")
+    captured = {}
+
+    def _fake_execvp(file, argv):
+        captured["file"] = file
+        captured["argv"] = argv
+
+    monkeypatch.setattr("loom.cli.os.execvp", _fake_execvp)
+    _doctor_try_agentic_fix([_ISSUE])
+    assert captured["file"] == "claude"
+    assert captured["argv"][0] == "claude"
+    assert "import metaflow" in captured["argv"][1]
+
+
+def test_fix_is_ignored_in_json_mode(monkeypatch) -> None:
+    """SAFETY: `--json --fix` must emit the envelope and NEVER exec an assistant
+    (the agent tool always runs doctor with --json)."""
+    monkeypatch.setattr("loom.cli._detect_repair_assistant", lambda: "claude")
+
+    def _boom(*_a, **_k):  # pragma: no cover - must not be reached
+        raise AssertionError("execvp must not run in --json mode")
+
+    monkeypatch.setattr("loom.cli.os.execvp", _boom)
+    args = _build_parser().parse_args(["doctor", "--json", "--fix"])
+    # Returns a 0/1 exit code (env-dependent) without raising — i.e. no exec.
+    assert _cmd_doctor(args) in (0, 1)

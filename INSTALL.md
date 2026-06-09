@@ -57,6 +57,10 @@ source .env.metaflow
 "$LOOM_PYTHON" -m loom doctor      # must end: VERDICT: PASS
 ```
 
+If a check FAILs, run **`loom doctor --fix`** — it hands the failures to Claude or
+Codex to resolve (following this file), and prints the manual fixes only when
+neither assistant is installed.
+
 **5 — (optional) Model key** — only the natural-language turns need one:
 
 ```bash

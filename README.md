@@ -97,6 +97,9 @@ kubectl port-forward -n loom svc/minio 9000:9000 9001:9001 &
 source .env.metaflow && loom doctor          # expect VERDICT: PASS
 ```
 
+If `doctor` reports a failure, **`loom doctor --fix`** hands it to Claude or Codex to
+resolve (falling back to manual fix hints when neither is installed).
+
 Then run **`loom`** and ask for what you want — *"profile my data and flag leakage"*,
 *"validate this against a sealed holdout"*. The read-only / lifecycle verbs work
 **without a model key**; only the natural-language planning + the AIDE search need

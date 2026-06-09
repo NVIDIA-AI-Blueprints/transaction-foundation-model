@@ -148,6 +148,7 @@ import argparse
 import contextlib
 import json
 import os
+import shutil
 import sys
 import uuid
 from typing import Mapping, Optional, Sequence
@@ -1205,9 +1206,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "(a socket probe to the METAFLOW_S3_ENDPOINT_URL host:port and/or a "
             "Metaflow Client API listing); and a `loom datasets`-style Client-API "
             "smoke that counts ingested data objects (zero is fine). Diagnoses "
-            "only -- it never installs, mutates, or prompts, and never touches the "
-            "datastore except through the Metaflow Client API or a TCP socket "
-            "probe to the configured endpoint. Exit code 0 when no check FAILs."
+            "only by default -- it never installs, mutates, or prompts, and never "
+            "touches the datastore except through the Metaflow Client API or a TCP "
+            "socket probe to the configured endpoint. With `--fix` it additionally "
+            "hands any FAIL/WARN to a local AI assistant (claude, else codex) to "
+            "resolve following INSTALL.md, or prints the manual hints when neither "
+            "is installed. Exit code 0 when no check FAILs."
         ),
     )
     doctor_parser.add_argument(
@@ -1215,6 +1219,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="YAML",
         help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    doctor_parser.add_argument(
+        "--fix",
+        action="store_true",
+        help=(
+            "After diagnosing, hand any FAIL/WARN to a local AI assistant (claude, "
+            "else codex) to resolve following INSTALL.md; falls back to the manual "
+            "fix hints when neither is installed. Interactive (ignored with --json)."
+        ),
     )
     _add_json_flag(doctor_parser)
     doctor_parser.set_defaults(func=_cmd_doctor)
@@ -4205,14 +4218,75 @@ def _doctor_verdict(checks: Sequence[dict]) -> tuple[str, bool]:
     return (f"PASS -- all {total} checks green; the local stack is ready.", True)
 
 
+# Assistant CLIs `loom doctor --fix` will hand a repair task to, in preference
+# order. Mirrors the agentic-first installer (install.sh): prefer a real assistant
+# that can read the repo + adapt over re-printing brittle, static fix steps.
+_DOCTOR_REPAIR_ASSISTANTS = ("claude", "codex")
+
+
+def _detect_repair_assistant() -> Optional[str]:
+    """Return the first repair-assistant CLI found on PATH, or ``None``."""
+    for name in _DOCTOR_REPAIR_ASSISTANTS:
+        if shutil.which(name):
+            return name
+    return None
+
+
+def _doctor_repair_prompt(issues: Sequence[dict]) -> str:
+    """Build the prompt handed to the assistant: the failing checks + how to fix."""
+    report = "\n".join(
+        f"- [{c['status']}] {c['name']} -- {c['detail']}"
+        + (f"\n    suggested fix: {c['fix']}" if c.get("fix") else "")
+        for c in issues
+    )
+    return (
+        "You are resolving `loom doctor` failures on this macOS machine. The "
+        "read-only health check reported these issues:\n\n"
+        f"{report}\n\n"
+        "Resolve them by following ./INSTALL.md (especially its Troubleshooting "
+        "section), then re-run `loom doctor` and iterate until it prints "
+        '"VERDICT: PASS". The most common root cause is a partial '
+        "`pip install -e .` (Metaflow won't import) -- re-run it from the repo "
+        "root and read the first error. Ask me before anything destructive or sudo."
+    )
+
+
+def _doctor_try_agentic_fix(issues: Sequence[dict]) -> None:
+    """``--fix``: hand the issues to claude/codex, else point at the manual fixes.
+
+    On finding an assistant this REPLACES the current process with it
+    (``os.execvp``) so the interactive session takes over the terminal; it returns
+    only on the fallback (no assistant) or a launch error.
+    """
+    assistant = _detect_repair_assistant()
+    if assistant is None:
+        print(
+            "\nNo `claude` or `codex` CLI found on PATH -- fix the line(s) above by "
+            "hand (see INSTALL.md), or install Claude Code / Codex and re-run "
+            "`loom doctor --fix` for guided repair."
+        )
+        return
+    print(
+        f"\nHanding the {len(issues)} issue(s) to `{assistant}` to resolve "
+        "(it follows INSTALL.md; approve its steps as it goes)..."
+    )
+    sys.stdout.flush()
+    try:
+        os.execvp(assistant, [assistant, _doctor_repair_prompt(issues)])
+    except OSError as exc:  # noqa: BLE001 - actionable, no traceback
+        print(f"\nCould not launch `{assistant}`: {exc}. Fix by hand (see INSTALL.md).")
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """Handle ``loom doctor``: a read-only diagnosis of the local stack.
 
     Runs the factored check functions in order, prints a ``[STATUS] name --
     detail`` line per check (with a ``fix:`` line for each non-PASS), then a
-    one-line VERDICT. Diagnoses only: it never installs, mutates, prompts, or
-    touches the datastore except through the Metaflow Client API or a TCP socket
-    probe to the configured endpoint. Exit code is 0 when no check FAILs.
+    one-line VERDICT. Diagnoses only by default: it never installs, mutates,
+    prompts, or touches the datastore except through the Metaflow Client API or a
+    TCP socket probe. With ``--fix`` (human mode only) it then hands any FAIL/WARN
+    to a local AI assistant (claude, else codex) to resolve, or prints the manual
+    hints when neither is installed. Exit code is 0 when no check FAILs.
 
     Args:
         args: Parsed arguments for the ``doctor`` subcommand.
@@ -4252,6 +4326,22 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             summary={"checks": checks, "verdict_line": verdict},
             verdict="PASS" if ok else "FAIL",
             error=None if ok else verdict,
+        )
+        return 0 if ok else 1
+
+    # Human (non-JSON) mode only: optional agentic repair of any FAIL/WARN.
+    # `--fix` prefers a real assistant (claude, else codex) that can read the repo
+    # and adapt, over re-printing the brittle static fix steps.
+    issues = [c for c in checks if c["status"] != _DOCTOR_PASS]
+    if getattr(args, "fix", False):
+        if issues:
+            _doctor_try_agentic_fix(issues)  # replaces this process on success
+        else:
+            print("\nNothing to fix -- all checks pass.")
+    elif issues:
+        print(
+            "\nTip: `loom doctor --fix` lets Claude or Codex resolve these for you "
+            "(falls back to the manual fixes above if neither is installed)."
         )
     return 0 if ok else 1
 
