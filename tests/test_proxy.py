@@ -323,6 +323,77 @@ def test_messages_injects_prompt_uses_vendor_key_and_logs(tmp_path: Path) -> Non
     assert "loom-good" not in lines[0]
 
 
+def test_messages_logs_trajectory_id_from_header(tmp_path: Path) -> None:
+    """The x-loom-trajectory header is stamped onto the proxy_calls row (additive).
+
+    The telemetry-layer join key: a caller that drives one trajectory passes its id
+    as ``x-loom-trajectory`` so :func:`loom.telemetry.assemble_trajectory` can
+    stitch this LLM call into the owning trajectory. A call WITHOUT the header still
+    logs (with ``trajectory_id == None``), proving the field is purely additive.
+    """
+    log_path = tmp_path / "proxy_calls.jsonl"
+    client = _client(_proxy_config(log_path), _fake_unary_forwarder({}))
+
+    resp = client.post(
+        "/v1/messages",
+        headers={"x-api-key": "loom-good", "x-loom-trajectory": "loom-exp-7"},
+        json={"model": "claude-x", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["trajectory_id"] == "loom-exp-7"
+
+
+def test_messages_without_trajectory_header_logs_none(tmp_path: Path) -> None:
+    """No trajectory header (and no env) -> the row carries trajectory_id=None."""
+    log_path = tmp_path / "proxy_calls.jsonl"
+    client = _client(_proxy_config(log_path), _fake_unary_forwarder({}))
+
+    resp = client.post(
+        "/v1/messages",
+        headers={"x-api-key": "loom-good"},
+        json={"model": "claude-x", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+
+    row = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["trajectory_id"] is None
+
+
+def test_build_log_row_trajectory_id_defaults_none() -> None:
+    """build_log_row(): trajectory_id is an additive, defaulted field."""
+    row = proxy_server.build_log_row(
+        model="claude-x",
+        request_system=None,
+        request_messages=[],
+        response_payload=None,
+        latency_ms=1.0,
+        streamed=False,
+        status=200,
+        error=None,
+        skill=None,
+        tenant="default",
+        owned_by="general",
+    )
+    assert row["trajectory_id"] is None
+    row2 = proxy_server.build_log_row(
+        model="claude-x",
+        request_system=None,
+        request_messages=[],
+        response_payload=None,
+        latency_ms=1.0,
+        streamed=False,
+        status=200,
+        error=None,
+        skill=None,
+        tenant="default",
+        owned_by="general",
+        trajectory_id="t-9",
+    )
+    assert row2["trajectory_id"] == "t-9"
+
+
 def test_messages_rejects_bad_key_without_forwarding(tmp_path: Path) -> None:
     """A wrong/missing Loom key -> 401 and the upstream is never called or logged."""
     captured: dict[str, Any] = {}

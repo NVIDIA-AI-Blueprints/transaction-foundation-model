@@ -35,6 +35,7 @@ so an optional-dep gap here cannot break core import.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import time
@@ -275,6 +276,7 @@ def build_log_row(
     skill: str | None,
     tenant: str,
     owned_by: str,
+    trajectory_id: str | None = None,
 ) -> dict[str, Any]:
     """Assemble one JSONL call-log row (the moat corpus record).
 
@@ -298,6 +300,10 @@ def build_log_row(
         skill: Optional ``x-loom-skill`` value (which Loom skill made the call).
         tenant: The ``x-loom-tenant`` tag (or the server default).
         owned_by: The ``x-loom-owned-by`` tag (or the server default).
+        trajectory_id: Optional telemetry trajectory join key (from the
+            ``x-loom-trajectory`` header or ``LOOM_TRAJECTORY_ID`` env). Lets
+            :func:`loom.telemetry.assemble_trajectory` stitch this LLM call into the
+            owning trajectory. Purely additive; ``None`` when the caller sent none.
 
     Returns:
         A JSON-serializable dict for one JSONL row.
@@ -324,6 +330,7 @@ def build_log_row(
         "skill": skill,
         "tenant": tenant,
         "owned_by": owned_by,
+        "trajectory_id": trajectory_id,
     }
 
 
@@ -345,6 +352,55 @@ def log_call(log_path: str, row: Mapping[str, Any]) -> None:
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
         fh.flush()
+
+
+def _emit_llm_request_event(
+    trajectory_id: str,
+    model: str,
+    skill: str | None,
+    tenant: str,
+    owned_by: str,
+) -> None:
+    """Emit a redacted telemetry ``llm_request`` event for this proxied call.
+
+    The trajectory-correlation side-channel that complements the proxy_calls row:
+    a small, low-cardinality event tagged with the ``trajectory_id`` so
+    :func:`loom.telemetry.assemble_trajectory` can order this LLM call within the
+    owning trajectory. A no-op when ``LOOM_TELEMETRY`` is off (``log_event``
+    returns ``None``), and entirely best-effort -- any failure (a missing optional
+    dep, a config edge) is swallowed so a telemetry hiccup never blocks the
+    gateway's real job of forwarding the call. Carries the model name only; the
+    request/response bytes live in the proxy_calls row, not in telemetry.
+
+    Args:
+        trajectory_id: The trajectory join key (header/env derived).
+        model: The model name from the request body.
+        skill: The optional ``x-loom-skill`` provenance tag.
+        tenant: The resolved tenant tag.
+        owned_by: The resolved IP-boundary owner tag.
+    """
+    try:
+        from loom.config import LoomConfig
+        from loom.telemetry import log_event
+
+        # Reflect the proxy call's IP-boundary tags onto the config so the event's
+        # standard attributes carry the same owned_by/tenant the proxy_calls row
+        # does (the distillation export filters on owned_by).
+        cfg = LoomConfig.load()
+        cfg = dataclasses.replace(cfg, tenant=tenant, owned_by=owned_by)
+        log_event(
+            "llm_request",
+            trajectory_id,
+            cfg,
+            attrs={
+                k: v
+                for k, v in (("model", model), ("skill", skill))
+                if v
+            },
+            run_id=trajectory_id,
+        )
+    except Exception:  # noqa: BLE001 - telemetry is best-effort, never blocks
+        pass
 
 
 def _upstream_headers(headers: Mapping[str, str], vendor_key: str) -> dict[str, str]:
@@ -455,6 +511,19 @@ def create_app(
         skill = headers.get("x-loom-skill")
         tenant = headers.get("x-loom-tenant") or cfg.default_tenant
         owned_by = headers.get("x-loom-owned-by") or cfg.default_owned_by
+        # Telemetry trajectory join key: prefer the per-call header, else the
+        # server-process env (set by a caller that drives one trajectory). Lets
+        # the telemetry layer stitch this LLM call into the owning trajectory.
+        trajectory_id = (
+            headers.get("x-loom-trajectory") or os.environ.get("LOOM_TRAJECTORY_ID")
+        )
+
+        # Emit a redacted-by-default telemetry llm_request event correlated by the
+        # trajectory id (a no-op when LOOM_TELEMETRY is off, and never raises so the
+        # forward is never blocked by a telemetry hiccup). Content is the model name
+        # only; the request/response bytes stay in the proxy_calls row, not here.
+        if trajectory_id:
+            _emit_llm_request_event(trajectory_id, model, skill, tenant, owned_by)
 
         up_headers = _upstream_headers(headers, cfg.upstream_key)
 
@@ -484,6 +553,7 @@ def create_app(
                     skill=skill,
                     tenant=tenant,
                     owned_by=owned_by,
+                    trajectory_id=trajectory_id,
                 ),
             )
             return _error(
@@ -510,6 +580,7 @@ def create_app(
                     skill=skill,
                     tenant=tenant,
                     owned_by=owned_by,
+                    trajectory_id=trajectory_id,
                 ),
             )
 
@@ -555,6 +626,7 @@ def create_app(
                 skill=skill,
                 tenant=tenant,
                 owned_by=owned_by,
+                trajectory_id=trajectory_id,
             ),
         )
 

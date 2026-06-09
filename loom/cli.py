@@ -956,6 +956,119 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     skillopt_parser.set_defaults(func=_cmd_skillopt)
 
+    telemetry_parser = subparsers.add_parser(
+        "telemetry",
+        help="Inspect + export the distillation-grade trajectory telemetry corpus.",
+        description=(
+            "Operate Loom's telemetry layer -- the distillation-grade trajectory "
+            "capture (events + the interaction-root trajectory model + the proxy "
+            "LLM I/O), correlated by a trajectory_id and bridged to the LOOM-DS-1 "
+            "corpus. The 'status' action is a read-only summary (event/trajectory "
+            "counts, general-vs-tenant split, the OTel exporter state, the paths); "
+            "'export' assembles the trajectories and writes a LOOM-DS-1 SFT/teacher "
+            "dataset (general-only + content REDACTED BY DEFAULT); 'trace' shows one "
+            "assembled trajectory. Content is redacted unless --with-content; the "
+            "export trains ONLY on owned_by=general (the IP boundary)."
+        ),
+    )
+    telemetry_sub = telemetry_parser.add_subparsers(
+        dest="telemetry_action", metavar="<action>"
+    )
+
+    telemetry_status = telemetry_sub.add_parser(
+        "status",
+        help="Read-only telemetry summary (counts, IP split, OTel state, paths).",
+        description=(
+            "Print a read-only summary of the telemetry corpus: the telemetry / "
+            "trajectories paths, the event count, the assembled-trajectory count, "
+            "the general-vs-tenant-owned split (the IP boundary), and whether the "
+            "optional OTel exporter is enabled/available. Reads only; never emits, "
+            "exports, or prompts."
+        ),
+    )
+    telemetry_status.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the telemetry paths).",
+    )
+    telemetry_status.set_defaults(func=_cmd_telemetry_status)
+
+    telemetry_export = telemetry_sub.add_parser(
+        "export",
+        help="Assemble trajectories -> a LOOM-DS-1 dataset JSONL (general-only, redacted).",
+        description=(
+            "Assemble the correlated telemetry events + proxy LLM calls + "
+            "command-level rollouts into ordered trajectories, then build the "
+            "LOOM-DS-1 SFT/teacher distillation dataset and write it as JSONL. The "
+            "IP boundary is enforced: only owned_by==general trajectories are "
+            "included (--owned-by overrides the filter). Content (prompts/outputs) "
+            "is REDACTED BY DEFAULT to typed sentinels unless --with-content is "
+            "passed. Workspace-write: the only thing it writes is the export file."
+        ),
+    )
+    telemetry_export.add_argument(
+        "--owned-by",
+        default="general",
+        metavar="OWNER",
+        help="IP-owner tag a trajectory must carry to be exported (default general).",
+    )
+    telemetry_export.add_argument(
+        "--out",
+        default=None,
+        metavar="PATH",
+        help="Output JSONL path for the dataset (default telemetry/loom-ds-1.jsonl).",
+    )
+    telemetry_export.add_argument(
+        "--with-content",
+        action="store_true",
+        help=(
+            "Emit raw prompt/output content instead of the redaction sentinels "
+            "(OFF by default; the operator must opt in)."
+        ),
+    )
+    telemetry_export.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the telemetry paths).",
+    )
+    telemetry_export.set_defaults(func=_cmd_telemetry_export)
+
+    telemetry_trace = telemetry_sub.add_parser(
+        "trace",
+        help="Show one assembled trajectory by id (read-only).",
+        description=(
+            "Assemble and print a single trajectory by its trajectory_id (the "
+            "experiment id when pinned): the task context, the ordered steps "
+            "(LLM calls / tool / exec), and the terminal outcome + reward. "
+            "Read-only; content stays redacted unless --with-content."
+        ),
+    )
+    telemetry_trace.add_argument(
+        "--trajectory",
+        required=True,
+        metavar="ID",
+        help="The trajectory id to show (e.g. an experiment id like loom-abc123).",
+    )
+    telemetry_trace.add_argument(
+        "--with-content",
+        action="store_true",
+        help="Show raw content instead of the redaction sentinels (OFF by default).",
+    )
+    telemetry_trace.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the telemetry paths).",
+    )
+    telemetry_trace.set_defaults(func=_cmd_telemetry_trace)
+
+    # No action -> print the telemetry help and exit non-zero (mirrors proxy).
+    telemetry_parser.set_defaults(
+        func=_cmd_telemetry, _telemetry_parser=telemetry_parser
+    )
+
     return parser
 
 
@@ -3757,6 +3870,298 @@ def _cmd_proxy_serve(args: argparse.Namespace) -> int:
         return int(message or 0)
     except KeyboardInterrupt:  # pragma: no cover - interactive shutdown
         print("\nLoom gateway stopped.", file=sys.stderr)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# `loom telemetry`: inspect + export the distillation-grade trajectory corpus.
+#
+# The telemetry layer ADDS trajectory correlation on top of Loom's existing
+# captures: it stamps one stable trajectory_id across the telemetry events
+# (telemetry/events.jsonl), the proxy LLM calls (learnings/proxy_calls.jsonl),
+# and the command-level rollouts (learnings/rollouts.jsonl), so a full agent
+# trajectory can be re-stitched and distilled into the LOOM-DS-1 corpus. These
+# handlers are read-only / workspace-write (only `export` writes -- the dataset
+# file). They never emit telemetry, run a flow, or touch the datastore.
+# ---------------------------------------------------------------------------
+
+
+def _telemetry_collect_trajectories(config: LoomConfig, *, verbose: bool = False):
+    """Assemble every trajectory in the corpus by JOINing the three signals.
+
+    Reads the telemetry events, the proxy LLM call rows, and the command-level
+    rollouts, groups them by ``trajectory_id`` (falling back to a rollout's
+    ``task.experiment_id`` when it carries no explicit id, mirroring the additive
+    integration), and calls the pure :func:`loom.telemetry.assemble_trajectory`
+    per id. Pure read: no telemetry is emitted, no flow runs.
+
+    Args:
+        config: The active configuration (the telemetry / proxy / learnings paths).
+        verbose: Unused placeholder for symmetry; kept off the hot path.
+
+    Returns:
+        A list of assembled :class:`~loom.telemetry.TrajectoryRecord`, one per id.
+    """
+    from loom.learnings import Learnings
+    from loom.telemetry import assemble_trajectory, read_events
+    from loom.telemetry.sink import read_jsonl
+
+    events = read_events(config)
+    proxy_calls = read_jsonl(config.proxy_log_path)
+    rollouts = [_dataclass_asdict_safe(r) for r in Learnings(config).all()]
+
+    # Index the rollouts by their join key: the explicit trajectory_id when set,
+    # else the task.experiment_id (the additive fallback).
+    rollout_by_id: dict[str, dict] = {}
+    for roll in rollouts:
+        tid = roll.get("trajectory_id") or (roll.get("task") or {}).get("experiment_id")
+        if tid is not None:
+            rollout_by_id.setdefault(str(tid), roll)
+
+    # The set of all trajectory ids appearing anywhere across the three signals.
+    ids: set[str] = set()
+    for row in events:
+        tid = row.get("trajectory_id")
+        if tid:
+            ids.add(str(tid))
+    for call in proxy_calls:
+        tid = call.get("trajectory_id")
+        if tid:
+            ids.add(str(tid))
+    ids.update(rollout_by_id.keys())
+
+    trajectories = []
+    for tid in sorted(ids):
+        trajectories.append(
+            assemble_trajectory(
+                tid,
+                events,
+                proxy_calls,
+                rollout_by_id.get(tid),
+            )
+        )
+    return trajectories
+
+
+def _dataclass_asdict_safe(obj: object) -> dict:
+    """Convert a LearningRecord (a dataclass) into a plain dict for the JOIN."""
+    import dataclasses as _dc
+
+    if _dc.is_dataclass(obj):
+        return _dc.asdict(obj)
+    return dict(obj) if isinstance(obj, dict) else {}
+
+
+def _cmd_telemetry(args: argparse.Namespace) -> int:
+    """Handle a bare ``loom telemetry`` (no action): print help, return non-zero.
+
+    Mirrors :func:`_cmd_proxy` so a bare ``loom telemetry`` is discoverable.
+
+    Args:
+        args: Parsed arguments for the ``telemetry`` subcommand.
+
+    Returns:
+        ``1`` (no action chosen).
+    """
+    parser = getattr(args, "_telemetry_parser", None)
+    if parser is not None:
+        parser.print_help()
+    return 1
+
+
+def _cmd_telemetry_status(args: argparse.Namespace) -> int:
+    """Handle ``loom telemetry status``: a read-only telemetry-corpus summary.
+
+    Prints the telemetry/trajectories paths, the event count, the
+    assembled-trajectory count, the general-vs-tenant-owned split (the IP
+    boundary), and the optional OTel exporter state. Reads only -- it never emits
+    telemetry, exports, or prompts.
+
+    Args:
+        args: Parsed arguments for the ``telemetry status`` action.
+
+    Returns:
+        ``0`` always (a pure read).
+    """
+    from loom.telemetry import bootstrap_otel, read_events
+    from loom.telemetry.events import content_logging_enabled, telemetry_enabled
+
+    config = _build_config(args)
+
+    events = read_events(config)
+    trajectories = _telemetry_collect_trajectories(config)
+    general = sum(1 for t in trajectories if t.owned_by == "general")
+    tenant_owned = len(trajectories) - general
+
+    otel = bootstrap_otel(config)
+
+    print("Loom telemetry -- distillation-grade trajectory corpus (read-only):")
+    print(f"  events path      : {config.telemetry_path}")
+    print(f"  trajectories path: {config.trajectories_path}")
+    print(f"  proxy calls path : {config.proxy_log_path}")
+    print(f"  learnings path   : {config.learnings_path}")
+    print(f"  events           : {len(events)}")
+    print(f"  trajectories     : {len(trajectories)}")
+    print(f"  IP boundary      : {general} general · {tenant_owned} tenant-owned")
+    print(
+        f"  capture enabled  : {'on' if telemetry_enabled() else 'off'} "
+        "(LOOM_TELEMETRY)"
+    )
+    print(
+        f"  content logging  : {'on' if content_logging_enabled() else 'off (redacted)'} "
+        "(LOOM_LOG_CONTENT)"
+    )
+    print(
+        f"  OTel exporter    : "
+        f"{'on' if otel.enabled else 'off'} / "
+        f"{'available' if otel.available else 'sdk-absent'}"
+        + (f" [{', '.join(otel.exporters)}]" if otel.exporters else "")
+    )
+    return 0
+
+
+def _cmd_telemetry_export(args: argparse.Namespace) -> int:
+    """Handle ``loom telemetry export``: assemble trajectories -> a LOOM-DS-1 JSONL.
+
+    Assembles the correlated signals into trajectories, builds the LOOM-DS-1
+    SFT/teacher dataset (general-only by default -- the IP boundary; content
+    REDACTED BY DEFAULT unless ``--with-content``), and writes it to ``--out``
+    (default ``telemetry/loom-ds-1.jsonl``, anchored next to the trajectories
+    path). Workspace-write: the export file is the only thing written.
+
+    Args:
+        args: Parsed arguments for the ``telemetry export`` action.
+
+    Returns:
+        ``0`` on success.
+    """
+    import dataclasses as _dc
+
+    from loom.telemetry import build_distillation_dataset
+    from loom.telemetry.sink import append_trajectory
+
+    config = _build_config(args)
+    owned_by = (getattr(args, "owned_by", None) or "general").strip() or "general"
+    with_content = bool(getattr(args, "with_content", False))
+
+    out_path = getattr(args, "out", None)
+    if out_path:
+        out_path = os.path.abspath(out_path)
+    else:
+        # Default beside the trajectories path so it lives in the telemetry dir.
+        out_path = os.path.join(
+            os.path.dirname(config.trajectories_path) or ".", "loom-ds-1.jsonl"
+        )
+
+    trajectories = _telemetry_collect_trajectories(config)
+    examples = build_distillation_dataset(
+        trajectories,
+        owned_by_filter=owned_by,
+        with_content=with_content,
+    )
+
+    # Excluded count: trajectories the IP boundary kept out of the export.
+    excluded = len(trajectories) - len(examples)
+
+    # Truncate any prior export, then append each example as one JSONL row.
+    parent = os.path.dirname(out_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    open(out_path, "w", encoding="utf-8").close()
+    for ex in examples:
+        append_trajectory(out_path, _dc.asdict(ex))
+
+    print("Loom telemetry export complete (the LOOM-DS-1 distillation dataset).")
+    print(f"  owned_by filter : {owned_by} (the IP boundary)")
+    print(
+        f"  content         : "
+        f"{'raw (--with-content)' if with_content else 'REDACTED (default)'}"
+    )
+    print(f"  trajectories    : {len(trajectories)} assembled")
+    print(f"  examples written: {len(examples)}")
+    print(f"  excluded (IP)   : {excluded} (owned_by != {owned_by})")
+    print(f"  out             : {out_path}")
+    return 0
+
+
+def _cmd_telemetry_trace(args: argparse.Namespace) -> int:
+    """Handle ``loom telemetry trace``: show one assembled trajectory by id.
+
+    Assembles and prints a single trajectory (task context, ordered steps,
+    terminal outcome + reward). Read-only; content stays redacted unless
+    ``--with-content``.
+
+    Args:
+        args: Parsed arguments for the ``telemetry trace`` action.
+
+    Returns:
+        ``0`` when the trajectory was found, else ``1``.
+    """
+    from loom.learnings import Learnings
+    from loom.telemetry import assemble_trajectory, read_events
+    from loom.telemetry.sink import read_jsonl
+
+    config = _build_config(args)
+    tid = (getattr(args, "trajectory", None) or "").strip()
+    with_content = bool(getattr(args, "with_content", False))
+
+    if not tid:
+        print("error: --trajectory <id> is required.", file=sys.stderr)
+        return 2
+
+    events = read_events(config)
+    proxy_calls = read_jsonl(config.proxy_log_path)
+
+    rollout = None
+    for roll in Learnings(config).all():
+        roll_tid = roll.trajectory_id or (
+            roll.task.experiment_id if roll.task else None
+        )
+        if roll_tid == tid:
+            rollout = _dataclass_asdict_safe(roll)
+            break
+
+    traj = assemble_trajectory(tid, events, proxy_calls, rollout)
+
+    if traj.event_count == 0 and not traj.steps and rollout is None:
+        print(
+            f"No trajectory found for id {tid!r}. Known ids come from "
+            "`loom telemetry status` (or run with LOOM_TELEMETRY=1 to capture).",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"Trajectory {traj.trajectory_id}")
+    print(f"  verb        : {traj.verb}")
+    print(f"  owned_by    : {traj.owned_by}  ·  tenant: {traj.tenant}")
+    print(f"  events      : {traj.event_count}")
+    if traj.duration_ms is not None:
+        print(f"  duration_ms : {traj.duration_ms}")
+    if traj.task:
+        for key in ("goal", "metric", "data_ref", "experiment_id"):
+            if key in traj.task:
+                value = traj.task[key]
+                if not with_content and key in ("goal", "metric"):
+                    value = f"<REDACTED:task.{key}>"
+                print(f"  task.{key:<7}: {value}")
+
+    print(f"  steps       : {len(traj.steps)}")
+    for step in traj.steps:
+        attrs = step.attributes or {}
+        bits = "  ".join(f"{k}={v}" for k, v in attrs.items())
+        print(f"    {step.index:>2}. [{step.kind}] {bits}")
+        if step.llm_response is not None:
+            text = step.llm_response.get("response_text")
+            if text is not None:
+                shown = text if with_content else "<REDACTED:output>"
+                print(f"        response: {shown}")
+
+    out = traj.outcome
+    print(
+        f"  outcome     : metric={_format_metric(out.metric)} "
+        f"verdict={out.verdict or 'n/a'} success={out.success} "
+        f"reward={_format_metric(out.reward)}"
+    )
     return 0
 
 

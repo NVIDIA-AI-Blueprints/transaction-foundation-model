@@ -97,6 +97,24 @@ class LoomConfig:
             corpus the gateway writes server-side; anchored absolute at load time
             (like ``corpus_path``/``learnings_path``) so it survives a provider
             ``chdir`` into an ephemeral workspace.
+        telemetry_path: Path to the JSONL telemetry event log
+            (:mod:`loom.telemetry`) -- one row per emitted telemetry event
+            (``trajectory.start``/``llm_request``/``trajectory.end`` ...), each
+            stamped with a monotonic ``event.sequence`` and a ``trajectory_id`` so
+            the distillation layer can stitch a full agent trajectory. Env
+            ``LOOM_TELEMETRY_PATH``; default ``telemetry/events.jsonl``. Anchored
+            absolute at load time exactly like ``learnings_path``/``proxy_log_path``
+            so events written after a provider ``chdir`` land in one stable file,
+            not a doomed ephemeral workspace. Telemetry is OFF unless ``LOOM_TELEMETRY``
+            is set (read at the point of use); content (prompts/outputs) is REDACTED
+            BY DEFAULT unless ``LOOM_LOG_CONTENT`` is set.
+        trajectories_path: Path to the JSONL assembled-trajectory store
+            (:mod:`loom.telemetry`) -- one row per assembled
+            :class:`~loom.telemetry.TrajectoryRecord`, the interaction-root join of
+            telemetry events + proxy LLM calls + the rollout outcome that the
+            LOOM-DS-1 distillation export consumes. Env ``LOOM_TRAJECTORIES_PATH``;
+            default ``telemetry/trajectories.jsonl``. Anchored absolute at load time
+            like the other capture paths.
         budget: Search budget knobs (see :class:`BudgetConfig`).
         corpus_path: Path to the JSONL corpus the controller appends node
             records to.
@@ -126,6 +144,8 @@ class LoomConfig:
     model_base_url: str | None = None
     loom_api_base: str = "http://127.0.0.1:8088"
     proxy_log_path: str = "learnings/proxy_calls.jsonl"
+    telemetry_path: str = "telemetry/events.jsonl"
+    trajectories_path: str = "telemetry/trajectories.jsonl"
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     corpus_path: str = "corpus/nodes.jsonl"
     learnings_path: str = "learnings/rollouts.jsonl"
@@ -205,6 +225,19 @@ class LoomConfig:
         if cfg.proxy_log_path and not os.path.isabs(cfg.proxy_log_path):
             cfg = replace(cfg, proxy_log_path=os.path.abspath(cfg.proxy_log_path))
 
+        # Anchor the telemetry paths absolute for the same reason as
+        # corpus_path/learnings_path/proxy_log_path: the telemetry layer emits
+        # events + assembled trajectories from the launch cwd, but a provider may
+        # have chdir'd into an ephemeral workspace by write time, so a relative
+        # path would scatter the trajectory corpus into doomed workspaces instead
+        # of one stable file the distillation export can read.
+        if cfg.telemetry_path and not os.path.isabs(cfg.telemetry_path):
+            cfg = replace(cfg, telemetry_path=os.path.abspath(cfg.telemetry_path))
+        if cfg.trajectories_path and not os.path.isabs(cfg.trajectories_path):
+            cfg = replace(
+                cfg, trajectories_path=os.path.abspath(cfg.trajectories_path)
+            )
+
         return cfg
 
     @staticmethod
@@ -260,6 +293,10 @@ class LoomConfig:
             out["loom_api_base"] = v
         if (v := env.get("LOOM_PROXY_LOG_PATH")) is not None:
             out["proxy_log_path"] = v
+        if (v := env.get("LOOM_TELEMETRY_PATH")) is not None:
+            out["telemetry_path"] = v
+        if (v := env.get("LOOM_TRAJECTORIES_PATH")) is not None:
+            out["trajectories_path"] = v
         if (v := env.get("LOOM_CORPUS_PATH")) is not None:
             out["corpus_path"] = v
         if (v := env.get("LOOM_LEARNINGS_PATH")) is not None:

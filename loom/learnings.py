@@ -121,6 +121,12 @@ class LearningRecord:
         reflection: Free-text slot for a natural-language reflection on the run
             (judge summary, what worked / failed). Optional; never the sole gate
             signal downstream.
+        trajectory_id: Optional telemetry-layer join key correlating this rollout
+            with the trajectory's telemetry events + proxy LLM calls (see
+            :mod:`loom.telemetry`). Defaulted to ``None`` so the field is purely
+            additive: pre-telemetry rows simply carry no id, and
+            :func:`loom.telemetry.assemble_trajectory` falls back to joining on
+            ``task.experiment_id`` when it is absent.
     """
 
     command: str
@@ -133,6 +139,7 @@ class LearningRecord:
     tenant: str = "default"
     owned_by: str = GENERAL
     reflection: str | None = None
+    trajectory_id: str | None = None
     ts: float = field(default=0.0)
 
 

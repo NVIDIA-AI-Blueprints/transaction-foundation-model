@@ -29,12 +29,14 @@ only pulled in when a provider that needs them is actually resolved.
 from __future__ import annotations
 
 import dataclasses
+import time
 
 from loom.config import LoomConfig
 from loom.corpus import Corpus
 from loom.learnings import LearningRecord, Learnings, Outcome, TaskSpec
 from loom.providers import ExecutionProvider, SearchProvider
 from loom.registry import get_execution, get_search
+from loom.telemetry import end_trajectory, start_trajectory
 from loom.types import SearchResult, Task
 
 
@@ -74,6 +76,25 @@ def run_loom(task: Task, config: LoomConfig) -> SearchResult:
     corpus = Corpus(config)
     learnings = Learnings(config)
 
+    # Open the telemetry trajectory (the CC interaction-root span analogue) at the
+    # top of the request->response cycle, PINNED to the task's experiment_id so the
+    # command-level rollout JOINs cleanly in :func:`assemble_trajectory`. This is a
+    # no-op (still returning the id) when LOOM_TELEMETRY is off, so it is always
+    # safe to call. The id is stamped onto the rollout below to correlate the three
+    # scattered signals (events + proxy_calls + the rollout).
+    trajectory_id = start_trajectory(
+        config.search_provider,
+        {
+            "goal": task.goal,
+            "metric": task.eval,
+            "data_ref": task.dataset_ref or task.data_dir or None,
+            "experiment_id": task.experiment_id,
+        },
+        config,
+        trajectory_id=task.experiment_id,
+    )
+    started_ts = time.time()
+
     # Stage the workspace (./input populated, empty ./working, cwd set), run the
     # search with the execution provider as the exec callback, then always tear
     # down so workspace resources are released even on error.
@@ -92,13 +113,29 @@ def run_loom(task: Task, config: LoomConfig) -> SearchResult:
     # shaped as a SkillOpt rollout input). This is in addition to -- not a
     # replacement for -- the per-node corpus capture wired above. Built purely
     # from the SearchResult + task + config; no secret material is read.
-    learnings.record(_learning_from(result, task, config))
+    learnings.record(_learning_from(result, task, config, trajectory_id))
+
+    # Close the trajectory (the CC endInteractionSpan analogue): emit
+    # trajectory.end + trajectory.duration_ms with the run's outcome. A no-op when
+    # telemetry is off.
+    end_trajectory(
+        trajectory_id,
+        {
+            "metric": result.best_metric,
+            "success": result.best_code is not None,
+        },
+        config,
+        started_ts=started_ts,
+    )
 
     return result
 
 
 def _learning_from(
-    result: SearchResult, task: Task, config: LoomConfig
+    result: SearchResult,
+    task: Task,
+    config: LoomConfig,
+    trajectory_id: str | None = None,
 ) -> LearningRecord:
     """Roll up one run into a command-level :class:`LearningRecord`.
 
@@ -112,6 +149,10 @@ def _learning_from(
         result: The search outcome to summarize.
         task: The task the run was executed against.
         config: The active configuration (provider/budget/ownership knobs).
+        trajectory_id: The telemetry trajectory join key (the experiment id) so the
+            rollout correlates with its telemetry events + proxy LLM calls. Purely
+            additive / defaulted; ``None`` leaves the field absent for non-telemetry
+            callers.
 
     Returns:
         The command-level rollout record to append to the flywheel.
@@ -142,6 +183,7 @@ def _learning_from(
         model=config.code_model,
         tenant=task.tenant,
         owned_by=config.owned_by,
+        trajectory_id=trajectory_id,
     )
 
 

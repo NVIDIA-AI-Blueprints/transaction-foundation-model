@@ -160,6 +160,28 @@ def test_general_empty_when_no_general_records(learnings) -> None:
     assert learnings.general() == []
 
 
+def test_trajectory_id_is_additive_and_roundtrips(learnings) -> None:
+    """The telemetry trajectory_id is an additive, defaulted field that roundtrips.
+
+    A pre-telemetry row carries ``trajectory_id == None`` (the default), and a row
+    stamped with a trajectory id reads back unchanged -- the surgical, backward-
+    compatible link from the rollout to its telemetry trajectory.
+    """
+    # Default: absent -> None, and a legacy JSONL line without the key still reads.
+    plain = _make_record(command="legacy", ts=1.0)
+    assert plain.trajectory_id is None
+    learnings.record(plain)
+
+    stamped = dataclasses.replace(
+        _make_record(command="stamped", ts=2.0), trajectory_id="loom-exp-7"
+    )
+    learnings.record(stamped)
+
+    read_back = {r.command: r for r in learnings.all()}
+    assert read_back["legacy"].trajectory_id is None
+    assert read_back["stamped"].trajectory_id == "loom-exp-7"
+
+
 def test_all_empty_before_any_write(tmp_path) -> None:
     """Reading a store whose file does not exist yet yields no records."""
     cfg = LoomConfig(learnings_path=str(tmp_path / "missing" / "rollouts.jsonl"))

@@ -447,6 +447,51 @@ logged**. `loom-proxy` is **opt-in today** (the gateway isn't hosted yet) and
 becomes the default once hosted. `LOOM_API_BASE` (default `http://127.0.0.1:8088`)
 and `LOOM_PROXY_LOG_PATH` (default `learnings/proxy_calls.jsonl`) configure it.
 
+### Telemetry & distillation — trajectories → LOOM-DS-1
+
+The capture above scatters a run's signal across three stores; the **telemetry
+layer** (`loom/telemetry/`, modeled on Claude Code's telemetry) stitches them into
+**distillation-grade trajectories** — the training examples LOOM-DS-1 distills from.
+It does **not** re-log; it **correlates**. Three signal types feed one trajectory:
+
+- **Telemetry events** (`telemetry/events.jsonl`) — sequenced, content-redacted
+  events (`trajectory.start`, `llm_request`, `trajectory.end`) carrying standard
+  attributes + a **monotonic `event.sequence`** for ordering.
+- **Proxy LLM I/O** (`learnings/proxy_calls.jsonl`) — the request/response the
+  gateway already logs, now tagged with the trajectory.
+- **Command rollouts** (`learnings/rollouts.jsonl`) — the per-run outcome/metric.
+
+The model is CC's **interaction-root** one: every user-request → response cycle is a
+single root *trajectory* (the controller opens it with the run's `experiment_id` and
+closes it with the outcome + duration), under which the LLM calls and tool/exec steps
+are correlated by one stable **`trajectory_id`** written onto every signal.
+`assemble_trajectory` is the pure JOIN that re-materializes one ordered trajectory
+(`context → [llm_request → response → tool/exec → observation]* → outcome{reward}`).
+
+**Content is redacted by default** to `<REDACTED:kind>` (CC's `redactIfDisabled`)
+unless `LOOM_LOG_CONTENT` is set — only schema/preview/metrics enter telemetry, never
+raw rows, never keys. The **IP boundary** is the same as the corpus/learnings: the
+distillation export trains **only on `owned_by: general`** trajectories; a
+tenant-owned one is excluded. The **OpenTelemetry exporter is optional** — lazily
+imported, gated by `LOOM_TELEMETRY` + `OTEL_*_EXPORTER` (console/otlp,
+CC-compatible), a clean no-op (never a hard dep) when the SDK is absent; the local
+JSONL capture is always available.
+
+```bash
+loom telemetry status                       # read-only: counts, the general/tenant split, OTel state, paths
+loom telemetry export                        # assemble trajectories -> telemetry/loom-ds-1.jsonl (general-only, redacted)
+loom telemetry export --owned-by general --with-content   # opt in to raw content (off by default)
+loom telemetry trace --trajectory loom-abc123             # show one assembled trajectory
+```
+
+`loom telemetry export` is the bridge to the **LOOM-DS-1** corpus: each kept
+trajectory becomes one reward-weighted SFT/teacher example (`context`,
+`teacher_output`, `tools_trajectory`, `reward`/`weight`). Telemetry is **off unless
+`LOOM_TELEMETRY` is set**; `LOOM_TELEMETRY_PATH` / `LOOM_TRAJECTORIES_PATH` (defaults
+under `telemetry/`) and `LOOM_TELEMETRY_INCLUDE_SESSION_ID` (cardinality) configure
+it. This is the full-lifecycle data discipline — *capture → correlate → distill* —
+not an automated black box.
+
 ---
 
 ## How it's built
@@ -474,7 +519,10 @@ loom/
   corpus.py       append-only JSONL of every node (multi-tenant IP boundary)
   proxy/          the Loom gateway — Anthropic passthrough that logs every call (the moat capture)
   cli.py          the `loom` command (doctor · ingest · datasets · eda · viz · features · run ·
-                  train · validate · pipeline · deploy · ops · collab · report · proxy serve · skillopt)
+                  train · validate · pipeline · deploy · ops · collab · report · proxy serve ·
+                  skillopt · telemetry)
+  telemetry/      distillation-grade trajectory capture — events · attributes · the interaction-root
+                  trajectory model + the JOIN · the LOOM-DS-1 distill bridge · the optional OTel sink
   hivemind.py     capture: learnings traces -> a per-verb VerbCorpus digest (the flywheel's left half)
   skillopt.py     the deterministic SKILL.md scorer + the never-worse promotion GATE (the moat's heart)
 flows/
@@ -495,7 +543,7 @@ Repository invariants: [`CLAUDE.md`](CLAUDE.md).
 
 ```bash
 pip install -e ".[dev]"   # or: pip install pytest
-pytest                    # 374 passed, 1 skipped
+pytest                    # 411 passed, 1 skipped
 ```
 
 Pure-Python tests (registry, corpus, the `local` paths, the model-builder
