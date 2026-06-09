@@ -4,8 +4,8 @@ import { pathToFileURL } from "node:url";
 
 /**
  * Runtime path/arg/env resolution for spawning the Pi coding-agent as a child
- * process. Mirrors the Feynman mechanism (feynman-src/src/pi/runtime.ts) but
- * targets Loom's branded home dir and resolves the Python engine via LOOM_PYTHON.
+ * process. It targets Loom's branded home dir and resolves the engine via
+ * LOOM_PYTHON.
  */
 
 export type PiRuntimeOptions = {
@@ -94,7 +94,7 @@ export function buildPiArgs(options: PiRuntimeOptions, paths: PiPaths = resolveP
 		args.push("--prompt-template", paths.promptTemplatePath);
 	}
 
-	// Full system-prompt replacement (the Loom persona). Passed as text, like Feynman.
+	// Full system-prompt replacement (the Loom persona). Passed as text.
 	if (existsSync(paths.systemPromptPath)) {
 		args.push("--system-prompt", readFileSync(paths.systemPromptPath, "utf8"));
 	}
@@ -133,7 +133,7 @@ export function buildPiEnv(
 		...process.env,
 		PATH: `${binPath}${delimiter}${currentPath}`,
 		// Redirect Pi's config/auth/models/settings into the branded Loom home.
-		// Patched Pi twins read FEYNMAN_*/LOOM_*; upstream Pi reads PI_CODING_AGENT_DIR.
+		// Upstream Pi reads PI_CODING_AGENT_DIR; the LOOM_* twin is set for parity.
 		PI_CODING_AGENT_DIR: options.loomHomeDir,
 		LOOM_CODING_AGENT_DIR: options.loomHomeDir,
 		// Engine interpreter for `python -m loom <verb> --json`, consumed by the

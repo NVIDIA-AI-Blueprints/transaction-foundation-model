@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { dirname, relative, resolve } from "node:path";
 
 /**
- * Hash-tracked asset sync into the Pi home (cf. Feynman's bootstrap/sync.ts).
+ * Hash-tracked asset sync into the Pi home.
  *
  * Loom ships canonical branded assets under `cli/assets/home/` (the theme, the
  * forced settings). The live Pi agent dir is `cli/home/` (PI_CODING_AGENT_DIR).

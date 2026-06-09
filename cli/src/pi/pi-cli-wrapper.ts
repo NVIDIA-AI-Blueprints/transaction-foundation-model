@@ -4,7 +4,7 @@
  * Mirrors the installed Pi bin (dist/cli.js): set process.title, mark the
  * PI_CODING_AGENT env flag, silence warnings, then import Pi's main() from the
  * resolved dist/main.js and call it with the forwarded args. We brand the
- * process title as "loom" (the user's command) instead of "pi"/"feynman".
+ * process title as "loom" (the user's command) instead of the runtime default.
  */
 import { pathToFileURL } from "node:url";
 
