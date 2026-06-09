@@ -26,7 +26,7 @@ default MLOps muscle is Metaflow.
 
 | Verb | Status | What it does | Reach for it when |
 | --- | --- | --- | --- |
-| [`loom-setup-metaflow`](loom-setup-metaflow/) | **roadmap** (in progress) | Install the verified minikube + minio + Metaflow recipe so the MLOps interface has a backend. | You need to stand up Loom's local MLOps stack. |
+| [`loom-setup-metaflow`](loom-setup-metaflow/SKILL.md) | **built** | **Expensive/mutate — always-gate.** Stand up the verified minikube + minio + Metaflow datastore (drives `scripts/setup_metaflow_minikube.sh`, idempotent) so the MLOps interface has a backend, then verify with the read-only `loom doctor` (must end PASS). Local-dev + reversible (`minikube delete`); NOT `disable-model-invocation`. | You need to stand up (or repair) Loom's local MLOps stack so the lifecycle verbs have a datastore. |
 | [`loom-connect`](loom-connect/SKILL.md) | **built** | Data access — register a source as a Metaflow **data object** by pathspec (`loom ingest`) and list ingested data objects (`loom datasets`). The #1 daily DS pain and the front door to every other verb. | You need to point Loom at file data and get a `dataset_ref`, or see what's already ingested. |
 | [`loom-eda`](loom-eda/SKILL.md) | **built** | **Read-only** profile of a data object **through the MLOps interface** (`loom eda`) — shape, dtypes, missingness, target balance, top correlations, leakage flags — emitting a Metaflow run + `@card`, plus suggested goal/metric phrasing. | You point at a `dataset_ref` and ask "what's in here?" / "is this ready for Loom?" / "check for leakage". |
 | [`loom-features`](loom-features/SKILL.md) | **built** | **Workspace-write** feature engineering **through the MLOps interface** (`loom features`) — domain-neutral transforms (scaling/interactions, encoding, datetime parts, aggregations) built into a **NEW** versioned data object (`FeaturesFlow/<id>`) every downstream verb consumes via `--dataset`; composes with `loom-eda` via `--from` (its leakage-flagged columns are dropped). Reads the source read-only, writes only its own workspace. | You want engineered features as a reusable, lineage-grounded data object. |
@@ -39,7 +39,7 @@ default MLOps muscle is Metaflow.
 | [`loom-deploy`](loom-deploy/SKILL.md) | **built** | **Irreversible/external** gated promotion **through the MLOps interface** (`loom deploy`) — asserts the upstream `loom-validate` `VERDICT==PASS` (the cross-verb exit gate) before deploying; a sub-threshold/leaky validate **BLOCKS** it. Default = a deployment PLAN + staged registry manifest (no external mutation); the real apply is behind `--apply` (OFF by default). Always gated; `disable-model-invocation: true`. | You want to ship a validated model to serving (and gate the promotion on a trustworthy held-out number). |
 | [`loom-ops`](loom-ops/SKILL.md) | **built** | **Read-only** monitoring **through the MLOps interface** (`loom ops`) — recent run health (successes/failures, recency), the leaderboard, schedule/run health, and a simple data-object DRIFT check (vs a reference) — emitted as a Metaflow run + `@card`. Reads are free; never prompts. | You want to see what passed/failed, read the leaderboard, or check whether the data drifted. |
 | [`loom-collab`](loom-collab/SKILL.md) | **built** | **Workspace-write to build / irreversible-external to send** a sanitized shareable bundle **through the MLOps interface** (`loom collab`) — report/card + a lineage manifest (pathspecs + fingerprints + commit) as a run + `@card`. Build-only by default (no data leaves the box); the off-box SEND is behind `--send` (OFF by default), gated, to an env/config-driven sink. `disable-model-invocation: true`. | You want to share or hand off a run/report to a teammate, lineage-grounded and sanitized. |
-| `loom-auto` | roadmap | Meta-skill: the one-command happy path (EDA→features→baseline→validate), surfacing only taste decisions. | You want the standard chain without memorizing the verbs. |
+| [`loom-auto`](loom-auto/SKILL.md) | **built** | **Graduated — read-only/workspace-write → expensive at the optimize step.** Meta-skill (no new flow): orchestrates the existing verbs end-to-end — (ingest if a raw source) → `loom eda` → [leakage gate] `loom features` → `loom run`/optimize → `loom validate` → `loom report` — threading each artifact (`--from`/`--dataset`/`--solution`/`--runs`) and asserting each prior VERDICT, gating at the EXPENSIVE optimize step; a sub-threshold/leaky validate STOPS the chain. **Never auto-fires `loom-deploy` or `loom-collab --send`.** | You want the standard chain end-to-end without memorizing the verbs. |
 
 ## Typical flow
 
@@ -61,6 +61,8 @@ Each verb is a plain Claude-Code `SKILL.md` file: YAML frontmatter
 shell out to the project's CLI (never importing a concrete backend):
 
 ```bash
+bash scripts/setup_metaflow_minikube.sh      # loom-setup-metaflow: stand up the local datastore (idempotent, gated)
+loom doctor [--config YAML]                  # loom-setup-metaflow: read-only stack health check (PASS/WARN/FAIL + VERDICT)
 loom ingest --source PATH [--name NAME]      # loom-connect: register a data object
 loom datasets                                # loom-connect: list ingested data objects
 loom eda --dataset PATHSPEC [--target COL]   # loom-eda: read-only profile -> run + @card
@@ -75,6 +77,10 @@ loom collab (--run PATHSPEC | --experiment ID) [--send]  # loom-collab: sanitize
 loom report (--experiment ID | --runs PATHSPEC,...)  # loom-report: assemble runs+metrics+lineage -> run + @card
 loom viz (--dataset PATHSPEC | --run PATHSPEC) [--target COL] [--kind ...]  # loom-viz: standard plots -> run + @card images
 loom run --dataset PATHSPEC --goal STR --metric STR [--steps N] [--mlops metaflow|local] [--search aide]
+# loom-auto: NO new CLI verb — the meta-skill orchestrates the verbs above in sequence
+#   (ingest if a raw source) -> eda -> [leakage gate] features -> run/optimize -> validate -> report,
+#   threading --from/--dataset/--solution/--runs and asserting each VERDICT; gates at the optimize step;
+#   never auto-fires `loom deploy` / `loom collab --send`.
 ```
 
 **Composition edges (artifact handoff + `--from`/`--validate`/`--run`, machine-checkable exit gates):**

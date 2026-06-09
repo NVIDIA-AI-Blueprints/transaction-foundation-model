@@ -1,5 +1,7 @@
 # Secrets / local environment
 .env
+# Local-dev Metaflow datastore env written by scripts/setup_metaflow_minikube.sh
+.env.metaflow
 
 # Python build / cache artifacts
 __pycache__/

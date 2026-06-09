@@ -242,10 +242,23 @@ the gate, the cost-surface, and the `local` stand-in are documented in
 <a name="set-up-the-metaflow-datastore"></a>
 ## Set up the Metaflow datastore (to test the lifecycle verbs)
 
-The lifecycle verbs need `--mlops metaflow` + a datastore. A one-command
-`/loom-setup` skill is on the roadmap; until then, here is the verified local
-recipe (minikube + minio as an S3-compatible datastore — runs on a laptop, no
-cloud, no GPU):
+The lifecycle verbs need `--mlops metaflow` + a datastore. **The one-command path
+is built:** the [`/loom-setup-metaflow`](skills/loom-setup-metaflow/SKILL.md) skill
+drives the idempotent [`scripts/setup_metaflow_minikube.sh`](scripts/setup_metaflow_minikube.sh)
+(detect-before-install the prereqs, start the cluster, apply minio, write
+`.env.metaflow`), then verifies with the read-only `loom doctor` (PASS/WARN/FAIL per
+check + a one-line VERDICT; exits 0 iff nothing FAILs). The skill **always gates**
+before installing/starting anything (it is local-dev + reversible via
+`minikube delete`).
+
+```bash
+# One command (gated): stand up the local datastore, then verify it.
+bash scripts/setup_metaflow_minikube.sh
+source .env.metaflow && loom doctor        # read-only health check — must end VERDICT: PASS
+```
+
+Or run the verified recipe by hand (minikube + minio as an S3-compatible datastore —
+runs on a laptop, no cloud, no GPU):
 
 ```bash
 # 1. A local cluster + an S3-compatible store (minio). (Docker driver via colima on macOS.)
@@ -281,13 +294,18 @@ A `train` fixture with a planted signal wants per-account event sequences
 ## Drive it conversationally (Claude Code)
 
 Prefer to talk to it? The [`skills/`](skills/) pack turns Loom into a Claude Code
-workflow — one verb table, both surfaces. `/loom-connect` brings data in,
+workflow — one verb table, both surfaces. `/loom-setup-metaflow` stands up the local
+datastore (and `loom doctor` health-checks it), `/loom-connect` brings data in,
 `/loom-eda` profiles it, `/loom-optimize` pins the metric and runs the search,
 `/loom-train` builds a backbone, `/loom-validate` checks a sealed holdout,
 `/loom-pipeline` chains the lifecycle, `/loom-deploy` gates promotion,
-`/loom-viz` / `/loom-report` / `/loom-collab` visualize, write up, and share —
-each plans, gates on cost/data, calls the interface, and narrates a
-lineage-grounded result. See [`skills/README.md`](skills/README.md).
+`/loom-viz` / `/loom-report` / `/loom-collab` visualize, write up, and share. Or
+let **`/loom-auto`** drive the whole happy path for you — it orchestrates the verbs
+end-to-end (eda → features → optimize → validate → report), threading each artifact
+and asserting each VERDICT, gating only at the expensive optimize step and **never**
+auto-firing deploy/collab-send. Each verb plans, gates on cost/data, calls the
+interface, and narrates a lineage-grounded result. See
+[`skills/README.md`](skills/README.md).
 
 ---
 
@@ -445,8 +463,8 @@ loom/
   controller.py   run_loom(task, config) — wires it together
   corpus.py       append-only JSONL of every node (multi-tenant IP boundary)
   proxy/          the Loom gateway — Anthropic passthrough that logs every call (the moat capture)
-  cli.py          the `loom` command (ingest · datasets · eda · viz · features · run · train ·
-                  validate · pipeline · deploy · ops · collab · report · proxy serve)
+  cli.py          the `loom` command (doctor · ingest · datasets · eda · viz · features · run ·
+                  train · validate · pipeline · deploy · ops · collab · report · proxy serve)
 flows/
   ingest_dataset.py  the external->Metaflow boundary (dir/CSV -> data object)
   eval_candidate.py  the one static evaluation flow (candidate = data)

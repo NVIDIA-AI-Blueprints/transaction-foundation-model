@@ -130,7 +130,7 @@ import argparse
 import os
 import sys
 import uuid
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 from loom.config import LoomConfig
 from loom.controller import run_loom
@@ -800,6 +800,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional path to a YAML config file (for the Metaflow profile).",
     )
     datasets_parser.set_defaults(func=_cmd_datasets)
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Diagnose the local Loom + Metaflow datastore stack (read-only).",
+        description=(
+            "Run a READ-ONLY health check of the local stack and print PASS / "
+            "WARN / FAIL per check with an actionable fix for each failure, then a "
+            "one-line VERDICT. Checks: the Python venv + `import loom`; `import "
+            "metaflow`; the datastore environment variables "
+            "(METAFLOW_DEFAULT_DATASTORE / METAFLOW_DATASTORE_SYSROOT_S3 / "
+            "METAFLOW_S3_ENDPOINT_URL / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY "
+            "/ METAFLOW_DEFAULT_METADATA / METAFLOW_USER); datastore reachability "
+            "(a socket probe to the METAFLOW_S3_ENDPOINT_URL host:port and/or a "
+            "Metaflow Client API listing); and a `loom datasets`-style Client-API "
+            "smoke that counts ingested data objects (zero is fine). Diagnoses "
+            "only -- it never installs, mutates, or prompts, and never touches the "
+            "datastore except through the Metaflow Client API or a TCP socket "
+            "probe to the configured endpoint. Exit code 0 when no check FAILs."
+        ),
+    )
+    doctor_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Optional path to a YAML config file (for the Metaflow profile).",
+    )
+    doctor_parser.set_defaults(func=_cmd_doctor)
 
     proxy_parser = subparsers.add_parser(
         "proxy",
@@ -3070,6 +3097,430 @@ def _record_collab_learning(
         Learnings(config).record(record)
     except Exception:  # noqa: BLE001 - learnings are best-effort, never fatal
         pass
+
+
+# ---------------------------------------------------------------------------
+# `loom doctor`: a READ-ONLY health check of the local Loom + Metaflow stack.
+#
+# Each check is a small, pure function returning a ``DoctorCheck`` -- a (name,
+# status, detail, fix) tuple where status is one of PASS / WARN / FAIL. They are
+# factored out of the command handler so the suite can unit-test them on a
+# stubbed env without invoking the CLI. The handler runs them in order, prints a
+# line per check + a fix for each non-PASS, then a one-line VERDICT, and returns
+# a non-zero exit code iff any check FAILs (a WARN never fails the verdict).
+#
+# Datastore reachability is verified WITHOUT any object-store SDK: a plain TCP
+# socket probe to the configured endpoint's host:port (read from the env) and,
+# when Metaflow is importable, a Client-API listing. There is no object-store
+# SDK import and no datastore-URI literal anywhere in this code -- the endpoint
+# and datastore root are read from the environment at call time (the source scan
+# in tests/test_dataio.py keeps it that way).
+# ---------------------------------------------------------------------------
+
+# Status constants (ordered worst-last for the verdict roll-up).
+_DOCTOR_PASS = "PASS"
+_DOCTOR_WARN = "WARN"
+_DOCTOR_FAIL = "FAIL"
+
+# The datastore environment variables `loom doctor` and the setup script agree
+# on (the 7 exports the verified minikube recipe writes to .env.metaflow). The
+# AWS_* pair is the datastore credential; the rest select the datastore/metadata
+# backends and the run owner. Values are read from the env at call time -- never
+# defaulted to a literal datastore URI here.
+_DOCTOR_DATASTORE_ENV_VARS = (
+    "METAFLOW_DEFAULT_DATASTORE",
+    "METAFLOW_DATASTORE_SYSROOT_S3",
+    "METAFLOW_S3_ENDPOINT_URL",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "METAFLOW_DEFAULT_METADATA",
+    "METAFLOW_USER",
+)
+
+# The endpoint env var whose host:port the reachability probe connects to.
+_DOCTOR_ENDPOINT_ENV_VAR = "METAFLOW_S3_ENDPOINT_URL"
+
+# The one-liner that re-runs the verified setup + this doctor.
+_DOCTOR_SETUP_FIX = (
+    "run the local datastore setup, then re-source the env: "
+    "`bash scripts/setup_metaflow_minikube.sh` then "
+    "`source .env.metaflow && loom doctor`."
+)
+
+
+def _doctor_check(name: str, status: str, detail: str, fix: str = "") -> dict:
+    """Build one doctor check result.
+
+    Args:
+        name: Short check label (shown on the line).
+        status: One of :data:`_DOCTOR_PASS` / :data:`_DOCTOR_WARN` /
+            :data:`_DOCTOR_FAIL`.
+        detail: Human-readable detail for the line.
+        fix: Actionable remediation, shown only for a non-PASS check.
+
+    Returns:
+        A dict with ``name`` / ``status`` / ``detail`` / ``fix`` keys.
+    """
+    return {"name": name, "status": status, "detail": detail, "fix": fix}
+
+
+def _doctor_check_loom() -> dict:
+    """Check (a): the Python venv is usable and ``import loom`` works.
+
+    This handler is itself running inside ``loom``, so reaching this code means
+    ``import loom`` already succeeded; we re-import defensively to surface the
+    interpreter + package location for the line.
+    """
+    try:
+        import loom as _loom  # noqa: F401 - imported for the location/version
+
+        where = getattr(_loom, "__file__", "?")
+        return _doctor_check(
+            "python/venv + import loom",
+            _DOCTOR_PASS,
+            f"python {sys.version.split()[0]} @ {sys.executable}; loom @ {where}",
+        )
+    except Exception as exc:  # noqa: BLE001 - effectively unreachable; defensive
+        return _doctor_check(
+            "python/venv + import loom",
+            _DOCTOR_FAIL,
+            f"could not import loom: {type(exc).__name__}: {exc}",
+            fix=(
+                "activate the Loom venv and install the package, e.g. "
+                "`source .venv/bin/activate && pip install -e .` from the repo root."
+            ),
+        )
+
+
+def _doctor_check_metaflow() -> dict:
+    """Check (b): ``import metaflow`` works.
+
+    Metaflow is an optional dependency at ``import loom`` time but required for
+    every datastore-backed verb, so a missing import is a hard FAIL here (the
+    fix points at the install).
+    """
+    try:
+        import metaflow  # noqa: F401
+
+        version = getattr(metaflow, "__version__", "?")
+        return _doctor_check(
+            "import metaflow",
+            _DOCTOR_PASS,
+            f"metaflow {version}",
+        )
+    except Exception as exc:  # noqa: BLE001 - actionable, no traceback
+        return _doctor_check(
+            "import metaflow",
+            _DOCTOR_FAIL,
+            f"metaflow is not importable: {type(exc).__name__}: {exc}",
+            fix=(
+                "install Metaflow into the active venv (it ships with Loom's "
+                "deps): `pip install -e .` (or `pip install metaflow`)."
+            ),
+        )
+
+
+def _doctor_check_datastore_env(env: Mapping[str, str]) -> dict:
+    """Check (c): the datastore environment variables are present and sane.
+
+    Verifies every variable in :data:`_DOCTOR_DATASTORE_ENV_VARS` is set and
+    non-empty, and that ``METAFLOW_DEFAULT_DATASTORE`` and
+    ``METAFLOW_DEFAULT_METADATA`` carry recognized values. Returns a single
+    rolled-up check (FAIL if any required var is missing/blank; otherwise PASS).
+
+    Args:
+        env: The environment mapping to inspect (``os.environ`` in production;
+            a stub in tests).
+
+    Returns:
+        The check result; the fix names the exact missing vars and the
+        source-the-env one-liner.
+    """
+    missing = [
+        var
+        for var in _DOCTOR_DATASTORE_ENV_VARS
+        if not (env.get(var) or "").strip()
+    ]
+    if missing:
+        return _doctor_check(
+            "datastore env vars",
+            _DOCTOR_FAIL,
+            f"{len(missing)} of {len(_DOCTOR_DATASTORE_ENV_VARS)} unset/blank: "
+            + ", ".join(missing),
+            fix=(
+                "export the datastore env (the 7 vars the setup writes) -- "
+                + _DOCTOR_SETUP_FIX
+            ),
+        )
+
+    # All present: a light sanity pass on the two enum-ish selectors. A datastore
+    # other than 's3' / metadata other than 'local'/'service' still works, so
+    # flag it as a WARN (not a FAIL) -- the local recipe uses s3 + local.
+    datastore = (env.get("METAFLOW_DEFAULT_DATASTORE") or "").strip().lower()
+    metadata = (env.get("METAFLOW_DEFAULT_METADATA") or "").strip().lower()
+    odd: list[str] = []
+    if datastore not in ("s3", "local", "azure", "gs"):
+        odd.append(f"METAFLOW_DEFAULT_DATASTORE={datastore!r}")
+    if metadata not in ("local", "service"):
+        odd.append(f"METAFLOW_DEFAULT_METADATA={metadata!r}")
+    if odd:
+        return _doctor_check(
+            "datastore env vars",
+            _DOCTOR_WARN,
+            "all set; unusual selector value(s): " + ", ".join(odd),
+            fix=(
+                "the verified local recipe uses METAFLOW_DEFAULT_DATASTORE=s3 + "
+                "METAFLOW_DEFAULT_METADATA=local; double-check these if a verb "
+                "cannot reach the datastore."
+            ),
+        )
+
+    return _doctor_check(
+        "datastore env vars",
+        _DOCTOR_PASS,
+        f"all {len(_DOCTOR_DATASTORE_ENV_VARS)} set "
+        f"(datastore={datastore}, metadata={metadata}, "
+        f"user={(env.get('METAFLOW_USER') or '').strip()})",
+    )
+
+
+def _doctor_parse_host_port(endpoint: str) -> Optional[tuple[str, int]]:
+    """Parse an endpoint URL into a ``(host, port)`` pair for a socket probe.
+
+    Uses :func:`urllib.parse.urlparse`; falls back to the scheme's default port
+    (80 for http, 443 for https) when the URL omits an explicit port. Returns
+    ``None`` when no host can be parsed.
+
+    Args:
+        endpoint: The endpoint URL (e.g. the value of
+            ``METAFLOW_S3_ENDPOINT_URL``). No URI literal is hard-coded here --
+            the value is supplied by the caller from the environment.
+
+    Returns:
+        ``(host, port)`` or ``None`` if unparseable.
+    """
+    from urllib.parse import urlparse
+
+    text = (endpoint or "").strip()
+    if not text:
+        return None
+    # urlparse needs a scheme to populate .hostname/.port; assume http if absent.
+    if "://" not in text:
+        text = "http://" + text
+    parsed = urlparse(text)
+    host = parsed.hostname
+    if not host:
+        return None
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return host, int(port)
+
+
+def _doctor_probe_endpoint(endpoint: str, timeout: float = 3.0) -> dict:
+    """Check (d): the datastore endpoint is reachable via a TCP socket probe.
+
+    Opens (and immediately closes) a TCP connection to the endpoint's
+    host:port. This deliberately uses **no** object-store SDK and **no**
+    datastore-URI literal -- it only resolves the host:port from the supplied
+    endpoint string (the env's ``METAFLOW_S3_ENDPOINT_URL``) and checks the
+    socket. Metaflow itself, configured by the env, owns all real datastore I/O.
+
+    Args:
+        endpoint: The endpoint URL to probe (from the environment).
+        timeout: Socket connect timeout in seconds.
+
+    Returns:
+        PASS when the socket connects; WARN when the endpoint env var is unset
+        (the env check already FAILs that case, so reachability is only a WARN
+        here); FAIL when the host:port refuses/times out.
+    """
+    import socket
+
+    target = (endpoint or "").strip()
+    if not target:
+        return _doctor_check(
+            "datastore reachable",
+            _DOCTOR_WARN,
+            f"no {_DOCTOR_ENDPOINT_ENV_VAR} set; cannot probe (see the env check)",
+            fix=_DOCTOR_SETUP_FIX,
+        )
+
+    parsed = _doctor_parse_host_port(target)
+    if parsed is None:
+        return _doctor_check(
+            "datastore reachable",
+            _DOCTOR_FAIL,
+            f"could not parse a host:port from {_DOCTOR_ENDPOINT_ENV_VAR}={target!r}",
+            fix=(
+                f"set {_DOCTOR_ENDPOINT_ENV_VAR} to a URL like "
+                "http://localhost:9000 (the local minio endpoint)."
+            ),
+        )
+
+    host, port = parsed
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            pass
+    except OSError as exc:
+        return _doctor_check(
+            "datastore reachable",
+            _DOCTOR_FAIL,
+            f"cannot connect to {host}:{port} ({exc.__class__.__name__}: {exc})",
+            fix=(
+                "start/port-forward the datastore, e.g. "
+                "`kubectl port-forward -n loom svc/minio 9000:9000 9001:9001`, "
+                "or re-run the setup -- " + _DOCTOR_SETUP_FIX
+            ),
+        )
+    return _doctor_check(
+        "datastore reachable",
+        _DOCTOR_PASS,
+        f"TCP connect to {host}:{port} ok",
+    )
+
+
+def _doctor_client_api_smoke(config: LoomConfig) -> dict:
+    """Check (e): a ``loom datasets``-style Client-API smoke (count data objects).
+
+    Lists ``IngestDataset`` runs through the Metaflow Client API exactly as
+    ``loom datasets`` does (no datastore touch), counting the ingested data
+    objects. Zero is tolerated (a fresh stack has none) -- that is a PASS with a
+    hint to run ``loom ingest``; a Client-API error is a WARN (the metadata
+    service may simply be empty/local and unconfigured), never a hard FAIL,
+    because the env + reachability checks already cover the load-bearing setup.
+
+    Args:
+        config: The active Loom configuration (for the Metaflow profile).
+
+    Returns:
+        The check result (PASS with a count, or WARN on a Client-API error /
+        when Metaflow is not importable).
+    """
+    try:
+        from metaflow import Flow, namespace
+    except Exception as exc:  # noqa: BLE001 - the metaflow check already FAILs
+        return _doctor_check(
+            "client-api smoke",
+            _DOCTOR_WARN,
+            f"skipped (metaflow not importable: {type(exc).__name__})",
+            fix="install Metaflow (see the `import metaflow` check above).",
+        )
+
+    if config.metaflow_profile:
+        os.environ.setdefault("METAFLOW_PROFILE", config.metaflow_profile)
+    try:
+        namespace(None)
+    except Exception:  # pragma: no cover - namespace API edge case
+        pass
+
+    try:
+        flow = Flow("IngestDataset")
+        runs = list(flow.runs("loom_dataset")) or list(flow.runs())
+        count = sum(1 for r in runs if _doctor_run_ok(r))
+    except Exception as exc:  # noqa: BLE001 - no flow yet / metadata down
+        return _doctor_check(
+            "client-api smoke",
+            _DOCTOR_WARN,
+            f"no ingested data objects readable via the Client API "
+            f"({type(exc).__name__})",
+            fix=(
+                "ingest one with `loom ingest --source <path>` once the datastore "
+                "is up; zero is fine on a fresh stack."
+            ),
+        )
+
+    if count == 0:
+        return _doctor_check(
+            "client-api smoke",
+            _DOCTOR_PASS,
+            "Client API reachable; 0 ingested data objects (fresh stack)",
+            fix="",
+        )
+    return _doctor_check(
+        "client-api smoke",
+        _DOCTOR_PASS,
+        f"Client API reachable; {count} ingested data object(s)",
+    )
+
+
+def _doctor_run_ok(run: object) -> bool:
+    """Return whether a Metaflow run is a readable, successful data object.
+
+    Mirrors the per-run guard in :func:`_cmd_datasets`: ``.successful`` loads
+    lazily and can raise on a corrupt/legacy run, so swallow any access error
+    and treat the run as not-ok.
+    """
+    try:
+        return bool(run.successful)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - an unreadable run does not count
+        return False
+
+
+def _doctor_verdict(checks: Sequence[dict]) -> tuple[str, bool]:
+    """Roll a list of checks into a one-line VERDICT + an ok flag.
+
+    Args:
+        checks: The check results.
+
+    Returns:
+        ``(verdict_line, ok)`` where ``ok`` is ``False`` iff any check FAILed
+        (a WARN never fails the verdict).
+    """
+    fails = sum(1 for c in checks if c["status"] == _DOCTOR_FAIL)
+    warns = sum(1 for c in checks if c["status"] == _DOCTOR_WARN)
+    total = len(checks)
+    if fails:
+        return (
+            f"FAIL -- {fails} check(s) failed, {warns} warning(s) "
+            f"({total} total). Fix the FAIL line(s) above and re-run `loom doctor`.",
+            False,
+        )
+    if warns:
+        return (
+            f"PASS (with {warns} warning(s)) -- the stack is usable; "
+            "review the WARN line(s) above.",
+            True,
+        )
+    return (f"PASS -- all {total} checks green; the local stack is ready.", True)
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    """Handle ``loom doctor``: a read-only diagnosis of the local stack.
+
+    Runs the factored check functions in order, prints a ``[STATUS] name --
+    detail`` line per check (with a ``fix:`` line for each non-PASS), then a
+    one-line VERDICT. Diagnoses only: it never installs, mutates, prompts, or
+    touches the datastore except through the Metaflow Client API or a TCP socket
+    probe to the configured endpoint. Exit code is 0 when no check FAILs.
+
+    Args:
+        args: Parsed arguments for the ``doctor`` subcommand.
+
+    Returns:
+        ``0`` when no check FAILed, else ``1``.
+    """
+    config = _build_config(args)
+    env = os.environ
+
+    checks: list[dict] = [
+        _doctor_check_loom(),
+        _doctor_check_metaflow(),
+        _doctor_check_datastore_env(env),
+        _doctor_probe_endpoint(env.get(_DOCTOR_ENDPOINT_ENV_VAR, "")),
+        _doctor_client_api_smoke(config),
+    ]
+
+    print("Loom doctor -- local stack health check (read-only):")
+    for check in checks:
+        print(f"  [{check['status']:<4}] {check['name']} -- {check['detail']}")
+        if check["status"] != _DOCTOR_PASS and check["fix"]:
+            print(f"         fix: {check['fix']}")
+
+    verdict, ok = _doctor_verdict(checks)
+    print("")
+    print(f"VERDICT: {verdict}")
+    return 0 if ok else 1
 
 
 def _cmd_datasets(args: argparse.Namespace) -> int:
