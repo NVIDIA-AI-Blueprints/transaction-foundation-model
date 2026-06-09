@@ -1,21 +1,18 @@
 """The Loom Rich theme: palette, console factory, helpers, and the banner.
 
-The Python equivalent of Feynman's ``src/ui/terminal.ts`` -- a lean, themed
-render library built on `rich <https://rich.readthedocs.io/>`_ instead of raw
-ANSI. It provides:
+A lean, themed render library built on `rich <https://rich.readthedocs.io/>`_.
+It provides:
 
-* a fixed **color palette** (Loom's equivalents of Feynman's INK / STONE / ASH
-  / SAGE / TEAL / ROSE), exposed both as a :class:`rich.theme.Theme` of named
-  styles and as raw hex constants;
+* a fixed **color palette** (six named roles -- INK / STONE / ASH / SAGE / TEAL
+  / ROSE), exposed both as a :class:`rich.theme.Theme` of named styles and as
+  raw hex constants;
 * :func:`get_console` -- the shared console factory, accepting an optional
   ``file`` so the UI is constructable over a ``StringIO`` buffer and unit-tests
   without a TTY;
 * the one-line helpers :func:`info` / :func:`success` / :func:`warning` /
-  :func:`error` / :func:`section`, plus :func:`panel` (a bordered box) -- the
-  shapes ``printInfo`` / ``printSuccess`` / ... / ``printPanel`` had in Feynman;
+  :func:`error` / :func:`section`, plus :func:`panel` (a bordered box);
 * :func:`banner` -- a branded ASCII ``LOOM`` block logo + the tagline + the
-  version + the active providers (search / mlops / model-builder / model),
-  the analogue of Feynman's ``printAsciiHeader`` + provider summary.
+  version + the active providers (search / mlops / model-builder / model).
 
 ``rich`` is imported lazily where convenient so importing this module is cheap,
 but the module-level import of :class:`~rich.console.Console` is fine because
@@ -40,28 +37,26 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # ---------------------------------------------------------------------------
 # Palette.
 #
-# Feynman matches its CLI to a bundled "Pi" palette (a warm, muted, paper-and-
-# sage scheme) rather than generic magenta. Loom mirrors the SHAPE -- six named
-# roles -- with its own values: a loom/textile-leaning weave of warm thread
-# (INK), neutral fibre (STONE/ASH), a healthy SAGE, a cool TEAL accent, and a
-# ROSE error. These are Loom's own hex values, not Feynman's strings.
+# A warm, muted, paper-and-sage scheme (rather than generic magenta): six named
+# roles in a loom/textile-leaning weave -- warm thread (INK), neutral fibre
+# (STONE/ASH), a healthy SAGE, a cool TEAL accent, and a ROSE error.
 # ---------------------------------------------------------------------------
 
-#: Warm thread / primary body text (Feynman INK analogue).
+#: Warm thread / primary body text.
 INK = "#d8c9a3"
-#: Neutral fibre / muted secondary text (Feynman STONE analogue).
+#: Neutral fibre / muted secondary text.
 STONE = "#9da9a0"
-#: Dim structural fibre / info + panel body (Feynman ASH analogue).
+#: Dim structural fibre / info + panel body.
 ASH = "#859289"
-#: Darker structural fibre / borders + rules (Feynman DARK_ASH analogue).
+#: Darker structural fibre / borders + rules.
 DARK_ASH = "#5c6a72"
-#: Healthy growth / success + PASS (Feynman SAGE analogue).
+#: Healthy growth / success + PASS.
 SAGE = "#a7c080"
-#: Cool weave accent / headers + sections + the logo (Feynman TEAL analogue).
+#: Cool weave accent / headers + sections + the logo.
 TEAL = "#7fbbb3"
-#: Warm warning thread (Feynman STONE-bold-as-warning analogue).
+#: Warm warning thread.
 AMBER = "#dbbc7f"
-#: Error thread / FAIL + BLOCK (Feynman ROSE analogue).
+#: Error thread / FAIL + BLOCK.
 ROSE = "#e67e80"
 
 #: The Rich theme of named styles every Loom console is built with. Verb
@@ -90,7 +85,7 @@ LOOM_THEME = Theme(
     }
 )
 
-#: The branded ASCII block logo for ``LOOM`` (the ``printAsciiHeader`` analogue).
+#: The branded ASCII block logo for ``LOOM``.
 LOOM_ASCII_LOGO = (
     " ██╗      ██████╗  ██████╗  ███╗   ███╗",
     " ██║     ██╔═══██╗██╔═══██╗ ████╗ ████║",
@@ -101,7 +96,7 @@ LOOM_ASCII_LOGO = (
 )
 
 #: The product tagline shown under the logo.
-TAGLINE = "a Feynman-style agentic CLI for data science"
+TAGLINE = "an agentic CLI for data science"
 
 
 def get_console(
@@ -257,9 +252,9 @@ def _provider_lines(config: "LoomConfig") -> list[str]:
 def banner(config: "LoomConfig", *, console: Optional[Console] = None) -> Console:
     """Print the branded launch banner and return the console used.
 
-    The Loom analogue of Feynman's ``printAsciiHeader`` plus its provider
-    summary: the ASCII ``LOOM`` block logo, the tagline, the version, and the
-    active providers. Pure-ish and headless-safe -- pass a console built over a
+    The launch header plus a provider summary: the ASCII ``LOOM`` block logo,
+    the tagline, the version, and the active providers. Pure-ish and
+    headless-safe -- pass a console built over a
     ``StringIO`` (via :func:`get_console`) to render it into a buffer for tests.
 
     Args:

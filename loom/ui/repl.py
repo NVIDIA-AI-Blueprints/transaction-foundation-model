@@ -1,9 +1,7 @@
 """The Loom interactive REPL: a thin loop over the existing CLI verbs.
 
-This is the Python analogue of Feynman's ``cli.ts`` dispatch shell + its
-launch-into-REPL: ``loom`` with no subcommand drops into a branded interactive
-shell. The crucial reuse, exactly mirroring Feynman delegating the chat to an
-agent CLI, is that **the REPL owns no engine logic** -- it builds the SAME
+``loom`` with no subcommand drops into a branded interactive shell. The crucial
+discipline is that **the REPL owns no engine logic** -- it builds the SAME
 :func:`loom.cli._build_parser` parser once, tokenizes each line, parses it with
 that parser, and invokes the SAME ``args.func(args)`` handler the one-shot
 subcommands use. The render layer (:mod:`loom.ui.render`) makes the output

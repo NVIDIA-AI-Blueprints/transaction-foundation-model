@@ -1,6 +1,6 @@
 # Loom
 
-**Loom is a Feynman-style agentic CLI for data science.** It's a catalog of
+**Loom is an agentic CLI for data science.** It's a catalog of
 `/loom-*` verbs — `connect · eda · features · pipeline · train · optimize ·
 validate · viz · report · deploy · ops · collab` — spanning the **whole**
 data-science lifecycle, each an agentic skill (a [Claude Code](https://claude.com/claude-code)
@@ -134,7 +134,7 @@ Metaflow datastore) — they run *flows*, not in-process candidates.
 ## Interactive CLI (the `loom` REPL)
 
 Run `loom` with **no subcommand** (or the explicit alias `loom chat`) to drop into
-a branded interactive shell — a Feynman-style thin loop over the *same* verbs, with
+a branded interactive shell — a thin loop over the *same* verbs, with
 a themed render layer, interactive approval gates, and a streaming search. It is a
 shell over the lifecycle, not an "automated ML engine": every line routes through
 the exact same parser and handlers the one-shot `loom <verb>` commands use, so the
@@ -184,7 +184,7 @@ A short transcript (no key, no infra needed):
  ██║     ██║   ██║██║   ██║ ██║╚██╔╝██║
  ███████╗╚██████╔╝╚██████╔╝ ██║ ╚═╝ ██║
  ╚══════╝ ╚═════╝  ╚═════╝  ╚═╝     ╚═╝
-  a Feynman-style agentic CLI for data science
+  an agentic CLI for data science
   v0.1.0
 
   search        : aide

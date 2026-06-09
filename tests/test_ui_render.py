@@ -330,7 +330,7 @@ def test_banner_renders_logo_tagline_version_providers() -> None:
     out = console.file.getvalue()
     # the ASCII LOOM block logo (first row of the bundled glyph art)
     assert theme.LOOM_ASCII_LOGO[0].strip()[:2] in out or "█" in out
-    assert theme.TAGLINE in out  # "a Feynman-style agentic CLI for data science"
+    assert theme.TAGLINE in out  # "an agentic CLI for data science"
     assert "v" in out  # the version line
     # the active providers summary
     assert "aide" in out and "metaflow" in out and "anthropic-api" in out

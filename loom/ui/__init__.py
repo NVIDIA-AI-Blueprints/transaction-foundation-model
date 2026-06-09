@@ -1,8 +1,7 @@
 """Loom's interactive CLI UI package.
 
 A thin, Rich-based render + approval layer that makes every ``loom`` verb
-beautiful and drives a branded interactive REPL. Modeled on Feynman's lean
-themed terminal library and Claude Code's loop/approval patterns, but it owns
+beautiful and drives a branded interactive REPL. It owns
 no engine logic: it renders the typed summaries the verbs in
 :mod:`loom.cli` already produce and gates per the approval matrix in
 ``skills/CONVENTIONS.md`` §1.

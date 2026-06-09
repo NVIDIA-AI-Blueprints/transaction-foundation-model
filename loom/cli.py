@@ -168,7 +168,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loom",
         description=(
-            "Loom: a Feynman-style agentic CLI for the full data-science "
+            "Loom: an agentic CLI for the full data-science "
             "lifecycle (ports-and-adapters provider architecture). Run with no "
             "subcommand (or `loom chat`) to drop into the interactive REPL."
         ),
@@ -4938,7 +4938,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``loom`` console script.
 
     With NO subcommand, ``loom`` drops into the branded interactive REPL
-    (:mod:`loom.ui.repl`) -- the Feynman launch-into-REPL shape. Every existing
+    (:mod:`loom.ui.repl`) -- the launch-into-REPL shape. Every existing
     one-shot subcommand still dispatches through its handler unchanged. ``rich``
     / ``prompt_toolkit`` are imported lazily inside the REPL path so a stripped
     environment still runs the one-shot commands.
@@ -4954,7 +4954,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if not getattr(args, "command", None):
-        # No subcommand -> the interactive REPL (the Feynman launch-into-REPL).
+        # No subcommand -> the interactive REPL.
         return _launch_repl(args)
 
     return args.func(args)

@@ -1,6 +1,6 @@
 # Loom architecture
 
-Loom is a **Feynman-style agentic CLI for the full data-science lifecycle** —
+Loom is **an agentic CLI for the full data-science lifecycle** —
 **not** an automated ML engine. It's a catalog of `/loom-*` verbs (`connect · eda ·
 features · pipeline · train · optimize · validate · viz · report · deploy · ops ·
 collab`) spanning the whole lifecycle; ML *modeling* (the `optimize` verb, AIDE's
