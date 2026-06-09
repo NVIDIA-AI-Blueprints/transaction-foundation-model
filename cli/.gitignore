@@ -10,6 +10,8 @@ home/npm/
 home/agents/
 home/.loom-bootstrap.json
 home/mcp-npx-cache.json
+home/trust.json
+home/models.json
 
 # misc
 *.log

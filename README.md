@@ -25,6 +25,16 @@ interface* — never a concrete backend — so any layer is drop-in replaceable.
 
 ---
 
+## Contents
+
+- **Start here** — [Install (macOS)](#install-macos) · [Quick engine smoke](#quick-engine-smoke-no-infra) · [Two ways to run](#two-ways-to-run)
+- **Drive it** — [The `loom` CLI](#using-loom-the-agentic-cli) · [Lifecycle verbs](#the-lifecycle-commands) · [Data model](#the-data-model-your-input-is-a-metaflow-data-object) · [Plan mode](#plan-mode-plan) · [Subagents](#subagents-delegate-focused-work) · [MCP data access](#data-access--cloud-ops-mcp)
+- **Run the lifecycle** — [Set up the datastore](#set-up-the-metaflow-datastore) · [Examples / eval bed](#examples--the-eval-bed) · [Verb workflows](#the-verb-workflows--loom-auto)
+- **Reference** — [Configuration](#configuration) · [Model providers](#model-providers) · [How it's built](#how-its-built) · [Tests](#tests) · [Status](#status)
+- **The long game** — [The moat: data flywheel & LOOM-DS-1](#the-moat--the-data-flywheel--loom-ds-1)
+
+---
+
 ## The lifecycle at a glance
 
 Every verb is a `loom` command (`loom eda`) and a `/loom-<verb>` workflow inside the
@@ -409,8 +419,9 @@ kubectl port-forward -n loom svc/minio 9000:9000 9001:9001 &   # keep this alive
 source .env.metaflow && loom doctor        # read-only health check — must end "VERDICT: PASS"
 ```
 
-Or run the verified recipe by hand (minikube + minio as an S3-compatible datastore —
-runs on a laptop, no cloud, no GPU):
+<details>
+<summary><b>Or set it up by hand</b> — the verified minikube + minio recipe (laptop, no cloud, no GPU)</summary>
+
 
 ```bash
 # 1. A local cluster + an S3-compatible store (minio). On macOS the docker driver
@@ -442,6 +453,8 @@ LOOM_MODEL_BUILDER_PROVIDER=local loom train --dataset IngestDataset/123 --objec
 A `train` fixture with a planted signal wants per-account event sequences
 (`account · t · event · … · label`); generic tabular works for `eda`/`features`/
 `validate`/`run`.
+
+</details>
 
 ---
 
@@ -507,6 +520,26 @@ irreversible verbs, and external systems are blocked until you toggle it off. Us
 it to explore and have the agent propose a concrete lifecycle plan, then approve
 and execute. Unlike a generic read-only mode, the allowlist is derived from Loom's
 own verb **tiers**, so data exploration stays available during planning.
+
+---
+
+## Subagents (delegate focused work)
+
+Hand a slice of work to a focused child agent and get the result back — ask in
+plain English (*"use data-scout to survey this dataset"*, *"run a result-reviewer
+on this run before we deploy"*). Loom ships three DS personas:
+
+| Persona | Does | Allowed verbs (tier-safe) |
+|---|---|---|
+| **data-scout** | read-only recon — profiles shape/quality/leakage, proposes a framing | `doctor` `datasets` `eda` `viz` |
+| **pipeline-builder** | ingest + leakage-aware features, then proposes the optimize step | `datasets` `eda` `features` `ingest` |
+| **result-reviewer** | adversarial GO / NO-GO on a run's metrics, validation, leakage | `datasets` `report` `viz` `validate` |
+
+Each runs **only its tier-safe verb set** — no persona can fire an expensive
+(`run`/`optimize`) or irreversible (`deploy`/`train`/`collab`) verb, so spend and
+promotion always stay with you in the parent. The generic agents that come with the
+delegation layer (a reviewer, a scout, an oracle for second opinions) are available
+too, for code/repo work.
 
 ---
 
@@ -608,19 +641,19 @@ loom run --data ./task --goal "..." --metric "..." --model-provider loom-proxy
 
 That central capture feeds two loops:
 
-- **Now — text-space (zero GPU), wired in v0.2:** **HiveMind + SkillOpt** is the
-  built inner loop — `loom skillopt` (the `loom-skillopt` verb). HiveMind captures
-  each `/loom-*` verb's `learnings/rollouts.jsonl` corpus (`owned_by=general` only —
-  the IP boundary; tenant rows are excluded from the cross-tenant moat), then
-  SkillOpt's deterministic, LLM-free scorer grades the incumbent `SKILL.md` + any
-  candidate on Loom's mixed metric (HARD = the 7-point acceptance contract; SOFT =
-  corpus failure-mode coverage) and applies a **held-out, never-worse promotion gate**
-  — the exact parallel of `loom-deploy`'s exit gate: the best hard-valid candidate is
-  promoted only if it beats the incumbent by a margin, so a contract violator or a
-  regression **can never deploy a worse skill**. **Safe by default:** it PROPOSES a
-  `SKILL.candidate.md` sidecar + the gate VERDICT + a diff; the in-place overwrite is
-  behind `--apply` and runs ONLY when the gate PROMOTED (mirroring `loom deploy
-  --apply`). Each `/loom-*` command IS a `SKILL.md` — the *trainable artifact*.
+- **Now — text-space (zero GPU), wired in v0.2:** **HiveMind + SkillOpt**, the built
+  inner loop (`loom skillopt`). Each `/loom-*` command *is* a `SKILL.md` — the
+  trainable artifact:
+    - **HiveMind** captures each verb's `learnings/rollouts.jsonl` corpus —
+      `owned_by=general` only (the IP boundary; tenant rows excluded).
+    - **SkillOpt** scores the incumbent `SKILL.md` and any candidate with a
+      deterministic, LLM-free metric (HARD = the 7-point acceptance contract; SOFT =
+      corpus failure-mode coverage).
+    - A **held-out, never-worse promotion gate** — the parallel of `loom-deploy`'s
+      exit gate — promotes the best hard-valid candidate only if it beats the
+      incumbent by a margin, so a regression or contract violator **can never ship**.
+    - **Safe by default:** proposes a `SKILL.candidate.md` + the gate VERDICT + a
+      diff; the in-place overwrite is behind `--apply`, and only when the gate PROMOTED.
 - **Later — weights:** distill **LOOM-DS-1**, an open-weights, Loom-owned
   **data-science model** fine-tuned (via NeMo) on the accumulated teacher traces —
   *the way Claude has a coding model, Loom has a data-science one.* The outer loop,
@@ -679,6 +712,9 @@ object** (`loom telemetry export --to-dataset`) for durable scale. OTel is an
 send the training corpus to a sampling observability/metrics backend** (they
 sample + aggregate + expire — even first-party analytics pipelines do).
 
+<details>
+<summary><b>How trajectories are assembled</b> — the JOIN, the three signals, redaction, the OTel decoupling</summary>
+
 The capture above scatters a run's signal across three stores; the **telemetry
 layer** (`loom/telemetry/`, modeled on an append-only session
 **transcript**, not a sampling analytics plane) stitches them into
@@ -713,6 +749,8 @@ Enabling capture never implies the ops mirror. ⚠ The ops mirror is **ops-only,
 NOT the corpus** — never route the training corpus to a sampling
 observability/metrics backend; they sample + aggregate + expire. The complete
 append-only JSONL corpus is always available and never flows through an exporter.
+
+</details>
 
 ```bash
 loom telemetry status                       # read-only: counts, the general/tenant split, ops-mirror state, paths
@@ -750,6 +788,9 @@ no core changes.
 | Model-builder ("training") | `ModelBuilderProvider` | `nemo`, `local` |
 | Model ("LLM backend") | `ModelProvider` | `anthropic-api`, `openai-api`, `openrouter`, `nim`, `openai-compat`, `claude-subscription`, `codex-subscription`, `loom-proxy` |
 
+<details>
+<summary><b>Repository layout</b></summary>
+
 ```
 loom/
   types.py        ExecutionResult · RunResult · Task · SearchResult · NodeRecord ·
@@ -776,6 +817,8 @@ flows/
 skills/           the /loom-* skill library — one SKILL.md workflow per verb (incl. loom-train, loom-skillopt)
 tasks/generic_demo/   the bundled smoke-test task
 ```
+
+</details>
 
 Full design + "how to add a provider": [`docs/architecture.md`](docs/architecture.md).
 Repository invariants: [`CLAUDE.md`](CLAUDE.md).
