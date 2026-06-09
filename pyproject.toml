@@ -24,6 +24,12 @@ dependencies = [
     "scikit-learn",
     "omegaconf",
     "python-dotenv",
+    # Interactive CLI UI (the `loom` REPL + the themed render layer). Both are
+    # pure-Python and light, and already present transitively via aideml; pinned
+    # in directly because loom.ui imports them. Imported LAZILY from loom.cli so
+    # a stripped environment still runs the one-shot subcommands.
+    "rich",
+    "prompt_toolkit",
 ]
 
 # Optional extras.

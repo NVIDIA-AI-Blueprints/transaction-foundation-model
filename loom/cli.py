@@ -168,11 +168,38 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loom",
         description=(
-            "Loom: a general-purpose, domain-neutral automated ML engine "
-            "(ports-and-adapters provider architecture)."
+            "Loom: a Feynman-style agentic CLI for the full data-science "
+            "lifecycle (ports-and-adapters provider architecture). Run with no "
+            "subcommand (or `loom chat`) to drop into the interactive REPL."
         ),
     )
+    # The --no-ui escape (also LOOM_NO_UI): force plain, non-Rich output for
+    # CI/pipes. It only affects the interactive REPL path; the one-shot
+    # subcommands print plain text regardless.
+    parser.add_argument(
+        "--no-ui",
+        dest="no_ui",
+        action="store_true",
+        help="Disable the Rich interactive UI (plain output; for CI/pipes). "
+        "Also via the LOOM_NO_UI environment variable.",
+    )
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
+
+    # `loom chat`: an explicit alias for launching the interactive REPL (the same
+    # branded loop a bare `loom` drops into). Carries no flags of its own; the
+    # REPL reads the env/.env/YAML config like every other verb.
+    chat_parser = subparsers.add_parser(
+        "chat",
+        help="Launch the interactive Loom REPL (same as running `loom` with no command).",
+        description=(
+            "Drop into the branded interactive Loom shell: a thin loop over the "
+            "same verbs, with a themed render layer, interactive approval gates, "
+            "and a streaming search. Identical to invoking `loom` with no "
+            "subcommand. The read-only/lifecycle verbs work without an API key; "
+            "only the LLM verbs (run / pipeline) need one."
+        ),
+    )
+    chat_parser.set_defaults(func=_cmd_chat)
 
     run_parser = subparsers.add_parser(
         "run",
@@ -1120,7 +1147,10 @@ def _build_config(args: argparse.Namespace) -> LoomConfig:
     if feedback_provider is not None:
         overrides["feedback_provider"] = feedback_provider
 
-    return LoomConfig.load(yaml_path=args.config, overrides=overrides)
+    # ``--config`` is a subcommand flag; the top-level (no-subcommand REPL launch)
+    # and ``chat`` namespaces do not define it, so read it defensively like the
+    # other subcommand-specific flags above.
+    return LoomConfig.load(yaml_path=getattr(args, "config", None), overrides=overrides)
 
 
 # Substrings that suggest an exception is really a missing/invalid LLM credential.
@@ -4836,22 +4866,96 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ui_disabled(args: argparse.Namespace) -> bool:
+    """Return whether the Rich interactive UI is disabled (``--no-ui`` / env).
+
+    The ``--no-ui`` flag (or a truthy ``LOOM_NO_UI`` environment variable) forces
+    the REPL to plain, color-stripped output -- the CI/pipes posture. Reads the
+    env lazily so a normal interactive run pays nothing.
+
+    Args:
+        args: The parsed top-level namespace.
+
+    Returns:
+        ``True`` when the UI should be plain (no Rich styling).
+    """
+    if getattr(args, "no_ui", False):
+        return True
+    return (os.environ.get("LOOM_NO_UI") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _launch_repl(args: argparse.Namespace) -> int:
+    """Build the config and launch the interactive REPL (the no-command path).
+
+    The single seam from the one-shot CLI into the interactive UI. ``rich`` and
+    ``prompt_toolkit`` are imported here, LAZILY (inside this function), so a
+    stripped environment that never opens the REPL still runs every one-shot
+    subcommand without those packages installed.
+
+    Args:
+        args: The parsed top-level namespace (for the ``--no-ui`` flag).
+
+    Returns:
+        The REPL loop's exit code. A missing Rich/prompt_toolkit install yields
+        an actionable message (and falls back to plain help), never a traceback.
+    """
+    config = _build_config(args)
+    try:
+        from loom.ui.repl import run_repl
+    except Exception as exc:  # noqa: BLE001 - actionable hint, no traceback
+        print(
+            "error: the interactive Loom REPL needs `rich` + `prompt_toolkit` "
+            f"but they could not be imported: {exc}\n"
+            "Install them (they ship with Loom's deps) or use the one-shot "
+            "subcommands (run `loom --help`).",
+            file=sys.stderr,
+        )
+        return 2
+    return run_repl(config, use_rich=not _ui_disabled(args))
+
+
+def _cmd_chat(args: argparse.Namespace) -> int:
+    """Handle ``loom chat``: launch the interactive REPL (explicit alias).
+
+    Identical to invoking ``loom`` with no subcommand; provided as a discoverable
+    verb. Delegates to :func:`_launch_repl` (which lazily imports the UI deps).
+
+    Args:
+        args: Parsed arguments for the ``chat`` subcommand.
+
+    Returns:
+        The REPL loop's exit code.
+    """
+    return _launch_repl(args)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``loom`` console script.
+
+    With NO subcommand, ``loom`` drops into the branded interactive REPL
+    (:mod:`loom.ui.repl`) -- the Feynman launch-into-REPL shape. Every existing
+    one-shot subcommand still dispatches through its handler unchanged. ``rich``
+    / ``prompt_toolkit`` are imported lazily inside the REPL path so a stripped
+    environment still runs the one-shot commands.
 
     Args:
         argv: Optional argument vector (defaults to ``sys.argv[1:]``). Accepting
             it explicitly makes the CLI straightforward to unit-test.
 
     Returns:
-        Process exit code. With no subcommand, prints help and returns 1.
+        Process exit code.
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
 
     if not getattr(args, "command", None):
-        parser.print_help()
-        return 1
+        # No subcommand -> the interactive REPL (the Feynman launch-into-REPL).
+        return _launch_repl(args)
 
     return args.func(args)
 

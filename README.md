@@ -131,6 +131,94 @@ Metaflow datastore) — they run *flows*, not in-process candidates.
 
 ---
 
+## Interactive CLI (the `loom` REPL)
+
+Run `loom` with **no subcommand** (or the explicit alias `loom chat`) to drop into
+a branded interactive shell — a Feynman-style thin loop over the *same* verbs, with
+a themed render layer, interactive approval gates, and a streaming search. It is a
+shell over the lifecycle, not an "automated ML engine": every line routes through
+the exact same parser and handlers the one-shot `loom <verb>` commands use, so the
+REPL can never drift from the CLI.
+
+```bash
+loom            # no subcommand -> the REPL
+loom chat       # the same thing, explicitly
+loom --no-ui    # plain, color-stripped output (also via LOOM_NO_UI=1) — for CI/pipes
+```
+
+**Slash-commands.** Type a verb with or without a leading `/`; tab-completion
+offers every verb plus a small meta set:
+
+- every lifecycle verb — `/eda`, `/datasets`, `/viz`, `/features`, `/run`,
+  `/validate`, `/pipeline`, `/deploy`, `/train`, `/ops`, `/report`, `/collab`,
+  `/ingest`, `/telemetry`, `/skillopt`;
+- meta — `/help` (the verb table), `/status` (the banner + active providers),
+  `/doctor` (the stack health check), `/clear`, `/exit` (and `/quit`).
+
+A bare natural-language line isn't free-form chat — it returns a hint listing the
+verbs. Quoted free-text args survive (`/run --goal "predict churn" --metric auc`).
+
+**Streaming + approval UX.** A running verb is wrapped in a spinner; `/run` and
+`/pipeline` drive the AIDE search and stream the leaderboard as it fills, falling
+back to a spinner + the final rendered leaderboard when streaming isn't reachable.
+The approval gate is interactive and enforces the
+[§1 cost/data matrix](skills/CONVENTIONS.md) — read-only
+verbs never prompt; workspace-write runs with a one-line auto note; the
+**expensive / irreversible** real actions (`deploy --apply`, `train --launch`,
+`collab --send`) show the cost/operation and require a deny-first `y/N` confirm
+before the handler runs. `Ctrl-C` cancels the current action (not the REPL);
+`Ctrl-D` or `/exit` quits cleanly.
+
+**Keyless by default.** The read-only / lifecycle verbs (`datasets`, `eda`, `viz`,
+`report`, `ops`, `validate`, `features`, `train` local, `telemetry`, `doctor`) work
+**without an API key**. Only the LLM verbs (`run` / `pipeline`, which drive the AIDE
+search brain) need one — and a missing key yields an **actionable line** (`set
+ANTHROPIC_API_KEY …` or pick a `--model-provider`), never a traceback.
+
+A short transcript (no key, no infra needed):
+
+```text
+ ██╗      ██████╗  ██████╗  ███╗   ███╗
+ ██║     ██╔═══██╗██╔═══██╗ ████╗ ████║
+ ██║     ██║   ██║██║   ██║ ██╔████╔██║
+ ██║     ██║   ██║██║   ██║ ██║╚██╔╝██║
+ ███████╗╚██████╔╝╚██████╔╝ ██║ ╚═╝ ██║
+ ╚══════╝ ╚═════╝  ╚═════╝  ╚═╝     ╚═╝
+  a Feynman-style agentic CLI for data science
+  v0.1.0
+
+  search        : aide
+  mlops         : metaflow
+  model-builder : nemo
+  model         : anthropic-api
+
+  type /help for the verbs, /exit to quit.
+loom> /eda --dataset IngestDataset/123 --target is_fraud
+  running eda...
+╭─ EDA profile ────────────────────────────────────────────╮
+│ rows x cols : 50000 x 31                                  │
+│ target      : is_fraud                                    │
+│ leakage     : none detected                               │
+╰──────────────────────────────────────────────────────────╯
+✓ eda ok
+loom> /deploy --validate ValidateFlow/41 --apply
+╭─ Approval required: IRREVERSIBLE/EXTERNAL ────────────────╮
+│ deploy to the external registry                           │
+│ This is the IRREVERSIBLE/EXTERNAL tier — it always gates. │
+│ The model proposes; only you can fire this.               │
+╰──────────────────────────────────────────────────────────╯
+Proceed with deploy to the external registry? [y/N]: n
+  IRREVERSIBLE/EXTERNAL: BLOCKED — deploy to the external registry not approved.
+loom> /exit
+  bye.
+```
+
+The interactive UI deps (`rich` + `prompt_toolkit`) are imported **lazily** from
+the REPL path, so a stripped environment still runs every one-shot subcommand even
+without them installed.
+
+---
+
 ## The data model: your input is a Metaflow data object
 
 Loom's input is a **Metaflow data object — a Metaflow Artifact** — referenced by
