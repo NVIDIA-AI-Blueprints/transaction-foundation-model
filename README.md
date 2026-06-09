@@ -497,6 +497,19 @@ bulk through chat; **MCP `cloud-ops` tools are gated** like `deploy --apply`.
 
 ---
 
+## Plan mode (`/plan`)
+
+For ambitious or expensive work, toggle **`/plan`** to enter a **read-only**
+exploration phase: the agent can read files, run read-only bash, and run Loom's
+**read-only verbs** (`eda`, `datasets`, `viz`, `report`, `ops`, `doctor`,
+`validate`) to inspect the *data* — but writes/edits, workspace-write/expensive/
+irreversible verbs, and external systems are blocked until you toggle it off. Use
+it to explore and have the agent propose a concrete lifecycle plan, then approve
+and execute. Unlike a generic read-only mode, the allowlist is derived from Loom's
+own verb **tiers**, so data exploration stays available during planning.
+
+---
+
 ## Configuration
 
 Everything is configured by flags + environment variables (and an optional `.env`

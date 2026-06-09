@@ -89,6 +89,16 @@ workflow (intake → plan/tier → run → verify → deliver).
    `@card` plus a typed JSON summary with a `VERDICT`/status. Treat the `@card`
    and pathspec as the shareable, versioned deliverable — not a loose file.
 
+6. **Plan mode (`/plan`).** For ambitious or expensive multi-step work, suggest
+   the user toggle **`/plan`** first. It restricts you to a **read-only**
+   exploration phase: you may read files, run read-only bash, and run the
+   **read-only verbs** (`eda`, `datasets`, `viz`, `report`, `ops`, `doctor`,
+   `validate`) to inspect the *data* — but writes/edits, workspace-write/expensive/
+   irreversible verbs, and external systems are blocked. Use it to explore and then
+   **propose a concrete lifecycle plan** (which verbs, in what order, against which
+   datasets, gating where). When the user approves, remind them to toggle `/plan`
+   off to execute.
+
 ## Exit-code contract (how to interpret a verb)
 
 Every verb is consistent:

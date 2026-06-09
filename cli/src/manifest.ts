@@ -314,3 +314,129 @@ export function installApprovalGate(pi: ExtensionAPI): void {
 		return;
 	});
 }
+
+// ─── Plan mode ────────────────────────────────────────────────────────────────
+// A read-only PLANNING phase, toggled with `/plan`: the agent may explore — read
+// files, run read-only bash, and call Loom's READ-ONLY verbs (eda/datasets/viz/
+// report/ops/doctor/validate) to inspect the DATA — but may not write/edit, run
+// workspace-write/expensive/irreversible verbs, or reach external systems, until
+// the user toggles plan mode back off.
+//
+// The mechanism (a `/plan` toggle + `setActiveTools` allowlist + a `tool_call`
+// veto + state persisted across resumes) is adapted from the `pi-plan-mode`
+// package. We author Loom's own rather than adopt it because that package hardcodes
+// the allowlist to `["read","bash"]` — which would hide every Loom verb, so the
+// agent couldn't explore the data during a data-science plan phase. Here the
+// allowlist is DERIVED from Loom's own verb tiers (`tierByToolName`): the read-only
+// verbs stay available, everything that writes/spends/mutates is hidden.
+
+/** Read-only shell allowed during plan mode (subset adapted from pi-plan-mode). */
+const PLAN_SAFE_BASH: RegExp[] = [
+	/^\s*cat\b/, /^\s*ls\b/, /^\s*grep\b/, /^\s*find\b/, /^\s*head\b/, /^\s*tail\b/,
+	/^\s*wc\b/, /^\s*pwd\b/, /^\s*echo\b/, /^\s*file\b/, /^\s*stat\b/, /^\s*du\b/,
+	/^\s*df\b/, /^\s*which\b/, /^\s*env\b/, /^\s*printenv\b/, /^\s*uname\b/,
+	/^\s*whoami\b/, /^\s*date\b/, /^\s*git\s+(status|log|diff|show|branch)\b/,
+];
+/** Shell chaining / redirects → not read-only, never allowed in plan mode. */
+const PLAN_UNSAFE_BASH = /[;&`\n]|>{1,2}/;
+
+function isExploratoryBash(command: string): boolean {
+	const c = command.trim().replace(/\\\n\s*/g, "").replace(/\n\s*/g, " ");
+	if (PLAN_UNSAFE_BASH.test(c)) return false;
+	return PLAN_SAFE_BASH.some((p) => p.test(c));
+}
+
+/** Built-in Pi tools allowed in plan mode (read + exploratory bash). */
+const PLAN_BUILTIN_ALLOW = ["read", "bash"];
+
+/**
+ * Install Loom plan mode. Must be called AFTER registerLoomTools so the verb
+ * tiers are populated (the allowlist reads `tierByToolName`).
+ */
+export function installPlanMode(pi: ExtensionAPI): void {
+	let enabled = false;
+
+	const readOnlyVerbTools = (): string[] =>
+		[...tierByToolName.entries()].filter(([, tier]) => tier === "read-only").map(([name]) => name);
+
+	function showStatus(ctx: ExtensionContext): void {
+		const label = enabled ? "◆ planning (read-only)" : undefined;
+		try {
+			ctx.ui.setStatus?.("loom-plan", label as string | undefined);
+		} catch {
+			// status surface is interactive-only — ignore in headless
+		}
+	}
+
+	pi.registerCommand("plan", {
+		description:
+			"Toggle plan mode — read-only exploration (read/bash + Loom read-only verbs); writes, expensive runs, and irreversible verbs are blocked until you toggle off.",
+		handler: async (_args, ctx) => {
+			enabled = !enabled;
+			ctx.ui.notify?.(
+				enabled
+					? "Plan mode ON — read-only exploration; writes & expensive/irreversible verbs blocked. Toggle /plan again to execute."
+					: "Plan mode OFF — full lifecycle re-enabled.",
+				"info",
+			);
+			showStatus(ctx);
+			pi.appendEntry("loom-plan-mode", { active: enabled, timestamp: new Date().toISOString() });
+		},
+	});
+
+	pi.on("before_agent_start", async (event) => {
+		if (!enabled) {
+			pi.setActiveTools(pi.getAllTools().map((t) => t.name));
+			return;
+		}
+		pi.setActiveTools([...PLAN_BUILTIN_ALLOW, ...readOnlyVerbTools()]);
+		const verbs = readOnlyVerbTools()
+			.map((t) => `/${t.replace(/^loom_/, "loom-")}`)
+			.join(", ");
+		const instructions = `[LOOM PLAN MODE — READ-ONLY]
+
+You are in a planning phase. You MAY:
+- read files and run read-only bash (cat/ls/grep/find/…)
+- run Loom READ-ONLY verbs to inspect the data: ${verbs}
+
+You may NOT write or edit files, run workspace-write/expensive/irreversible verbs
+(features, ingest, optimize, run, pipeline, train, deploy, collab, skillopt), or
+reach external systems. Explore the data and codebase, then propose a concrete
+lifecycle plan — which verbs, in what order, against which datasets, gating where.
+When the user approves, remind them to toggle /plan off to execute it.`;
+		return { systemPrompt: `${(event as { systemPrompt: string }).systemPrompt}\n\n${instructions}` };
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		const entries = ctx.sessionManager.getEntries() as Array<{ type?: string; customType?: string; data?: { active?: boolean } }>;
+		const planEntries = entries.filter((e) => e.type === "custom" && e.customType === "loom-plan-mode");
+		const last = planEntries.length > 0 ? planEntries[planEntries.length - 1] : undefined;
+		if (last?.data?.active === true) {
+			enabled = true;
+			showStatus(ctx);
+			ctx.ui.notify?.("Loom plan mode restored (read-only).", "info");
+		}
+	});
+
+	pi.on("tool_call", async (event: ToolCallEvent): Promise<ToolCallEventResult | void> => {
+		if (!enabled) return;
+		const name = event.toolName;
+		if (name === "write" || name === "edit") {
+			return { block: true, reason: "Plan mode is read-only — toggle /plan off to write or edit." };
+		}
+		const tier = tierOf(name);
+		if (tier && tier !== "read-only") {
+			return { block: true, reason: `Plan mode is read-only — ${name} is a ${tier} verb. Toggle /plan off to run it.` };
+		}
+		if (name === "bash") {
+			const command = ((event as { input?: { command?: string } }).input?.command ?? "").toString();
+			if (!isExploratoryBash(command)) {
+				return {
+					block: true,
+					reason: "Plan mode allows only read-only bash (cat/ls/grep/find/…; no redirects, chaining, or mutating commands). Toggle /plan off to run it.",
+				};
+			}
+		}
+		return;
+	});
+}

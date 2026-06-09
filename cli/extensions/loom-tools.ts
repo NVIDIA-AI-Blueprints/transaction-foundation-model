@@ -13,7 +13,7 @@
 import type { ExtensionAPI, ExtensionContext, SessionStartEvent } from "@earendil-works/pi-coding-agent";
 
 import { installLoomHeader } from "../dist/branding/header.js";
-import { installApprovalGate, registerLoomTools } from "../dist/manifest.js";
+import { installApprovalGate, installPlanMode, registerLoomTools } from "../dist/manifest.js";
 
 export default async function loomTools(pi: ExtensionAPI): Promise<void> {
 	// One Pi tool per Loom verb (loom_eda, loom_run, loom_deploy, …), each
@@ -21,6 +21,9 @@ export default async function loomTools(pi: ExtensionAPI): Promise<void> {
 	await registerLoomTools(pi);
 	// Layer-B per-call approval gate keyed off the verb tier.
 	installApprovalGate(pi);
+	// Plan mode: `/plan` toggles a read-only exploration phase whose allowlist is
+	// derived from the verb tiers registered just above (read-only verbs stay on).
+	installPlanMode(pi);
 	// Branding: install the LOOM banner header once the (interactive) session
 	// starts and tools/commands are registered.
 	pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext) => {
