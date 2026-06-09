@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { constants } from "node:os";
 
-import { buildPiArgs, buildPiEnv, type PiRuntimeOptions, resolvePiPaths } from "./runtime.js";
+import { buildPiArgs, buildPiEnv, ensurePiBranding, type PiRuntimeOptions, resolvePiPaths } from "./runtime.js";
 
 export function exitCodeFromSignal(signal: NodeJS.Signals): number {
 	const signalNumber = constants.signals[signal];
@@ -17,6 +17,10 @@ export function exitCodeFromSignal(signal: NodeJS.Signals): number {
 export async function launchPiChat(options: PiRuntimeOptions): Promise<void> {
 	const paths = resolvePiPaths(options.appRoot);
 	const { piMainPath, piCliWrapperPath } = paths;
+
+	// Brand the spawned agent as "loom" (terminal title / config dir / process
+	// name) before it starts — idempotent, so it survives a fresh `npm install`.
+	ensurePiBranding(paths.piPackageRoot);
 
 	if (!existsSync(piMainPath)) {
 		throw new Error(

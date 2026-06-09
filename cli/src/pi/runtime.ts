@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -64,6 +64,31 @@ export function resolvePiPaths(appRoot: string) {
 		themePath: resolve(appRoot, "home", "themes", "loom.json"),
 		nodeModulesBinPath: resolve(nodeModules, ".bin"),
 	};
+}
+
+/**
+ * Brand the spawned agent as "loom". Pi derives its app name, the terminal
+ * title, and the config-dir from `piConfig` in the package.json it resolves by
+ * walking up from its own `dist/` — i.e. its installed package.json, which has
+ * no `piConfig`, so the title falls back to a bare glyph. We set
+ * `piConfig.name = "loom"` there (idempotently, at every launch, so it survives
+ * a fresh `npm install`) — the terminal title, process name, and config dir all
+ * then read "loom". `buildPiEnv` already sets `LOOM_CODING_AGENT_DIR`, the env
+ * var that `name:"loom"` implies, so the home redirect stays intact.
+ */
+export function ensurePiBranding(piPackageRoot: string): void {
+	const pkgPath = resolve(piPackageRoot, "package.json");
+	if (!existsSync(pkgPath)) return;
+	try {
+		const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
+			piConfig?: { name?: string; configDir?: string };
+		};
+		if (pkg.piConfig?.name === "loom" && pkg.piConfig?.configDir === ".loom") return;
+		pkg.piConfig = { ...pkg.piConfig, name: "loom", configDir: ".loom" };
+		writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
+	} catch {
+		// Non-fatal: a read-only install just keeps the dependency's default title.
+	}
 }
 
 export type PiPaths = ReturnType<typeof resolvePiPaths>;
