@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { materializeAgentPersonas, syncBundledAssets } from "./bootstrap/sync.js";
+import { runLoomUpdate } from "./update.js";
 import { ensureLoomPackages } from "./pi/ensure-packages.js";
 import { launchPiChat } from "./pi/launch.js";
 import { normalizeLoomSettings } from "./pi/settings.js";
@@ -60,6 +61,7 @@ function printHelp(version: string | undefined): void {
 		"    loom                      Open the Loom agent (interactive)",
 		"    loom <goal in words>      Start with a one-shot goal",
 		"    loom <verb> [--flags]     Jump straight to a verb workflow (/loom-<verb>)",
+		"    loom update               Pull + rebuild the CLI + refresh the engine",
 		"    loom --help               Show this help",
 		"    loom --version            Show version",
 		"",
@@ -124,6 +126,12 @@ export async function main(): Promise<void> {
 	}
 
 	const [command, ...rest] = positionals as string[];
+	if (command === "update") {
+		// Self-update: pull + rebuild the compiled CLI + refresh the engine. Handled
+		// here (not as a /loom-<verb> prompt) since it manages the install itself.
+		process.exitCode = runLoomUpdate(appRoot, resolveLoomPython());
+		return;
+	}
 	if (command === "help") {
 		printHelp(version);
 		return;

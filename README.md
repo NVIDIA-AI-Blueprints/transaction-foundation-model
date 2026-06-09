@@ -27,7 +27,7 @@ interface* — never a concrete backend — so any layer is drop-in replaceable.
 
 ## Contents
 
-- **Start here** — [Install (macOS)](#install-macos) · [Uninstall](#uninstall) · [Quick engine smoke](#quick-engine-smoke-no-infra) · [Two ways to run](#two-ways-to-run)
+- **Start here** — [Install (macOS)](#install-macos) · [Update](#update) · [Uninstall](#uninstall) · [Quick engine smoke](#quick-engine-smoke-no-infra) · [Two ways to run](#two-ways-to-run)
 - **Drive it** — [The `loom` CLI](#using-loom-the-agentic-cli) · [Lifecycle verbs](#the-lifecycle-commands) · [Data model](#the-data-model-your-input-is-a-metaflow-data-object) · [Plan mode](#plan-mode-plan) · [Subagents](#subagents-delegate-focused-work) · [MCP data access](#data-access--cloud-ops-mcp)
 - **Run the lifecycle** — [Set up the datastore](#set-up-the-metaflow-datastore) · [Examples / eval bed](#examples--the-eval-bed) · [Verb workflows](#the-verb-workflows--loom-auto)
 - **Reference** — [Configuration](#configuration) · [Model providers](#model-providers) · [How it's built](#how-its-built) · [Tests](#tests) · [Status](#status)
@@ -122,6 +122,19 @@ scripts/setup_metaflow_minikube.sh` + the port-forward above (the datastore), an
 > remember: **`LOOM_PYTHON`** must stay exported (point it at `<repo>/.venv/bin/python`)
 > or the lifecycle verbs can't find the engine, and the datastore verbs only work
 > while the **port-forward** is running.
+
+---
+
+## Update
+
+```bash
+loom update        # git pull + rebuild the CLI + refresh the engine
+```
+
+The running `loom` is the **compiled** `cli/dist` (gitignored build output), so a
+bare `git pull` updates the source but **not** what you actually run — the banner,
+verbs, and tools keep using the old build until the CLI is rebuilt. `loom update`
+runs the whole cycle; by hand it's `git pull && cd cli && npm run build`.
 
 ---
 

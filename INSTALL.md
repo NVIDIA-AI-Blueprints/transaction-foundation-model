@@ -77,6 +77,16 @@ export ANTHROPIC_API_KEY="sk-ant-..."   # or run `loom`, then /login
   (in its own shell) and re-`source .env.metaflow`.
 - **`loom: command not found`** — re-run step 2's `npm link`, or make sure your npm global bin is on `PATH`.
 
+## Update
+
+```bash
+loom update        # git pull + rebuild the CLI + refresh the engine
+```
+
+The running `loom` is the compiled `cli/dist` (gitignored), so a bare `git pull`
+won't change what you run until the CLI is rebuilt — `loom update` runs the whole
+cycle (by hand: `git pull && cd cli && npm run build`).
+
 ## Uninstall
 
 ```bash
