@@ -228,6 +228,17 @@ adapters:
   `gpu_target` configured it returns a clean `REFUSED_NO_GPU_TARGET` (never
   launches); with a target but `launch=False` it returns a staged `PLANNED` plan —
   the same posture as `deploy --apply`.
+
+  **GPU launch targets (`LOOM_GPU_TARGET`).** When the gate ALLOWS (`--launch`
+  with a target set), the lowered plan is routed by launcher: **`modal`** (or
+  `modal://<app>`) — the v0.2 default — submits the NeMo NGC container training to
+  an **on-demand H100 via Modal** (the laptop stays the control plane; the GPU
+  burst is ephemeral), then snapshots the produced checkpoint **back as a Metaflow
+  artifact pathspec** (never a checkpoint file or object-store URI). `modal` is an
+  optional, lazily-imported dep — absent, the launcher refuses with an actionable
+  install/auth message. Any other target → `REFUSED_UNKNOWN_GPU_TARGET` (listing
+  the supported launchers). The container image is read from `LOOM_NEMO_IMAGE` at
+  the point of use (env only, never committed).
 - **`local`** — a **torch-free CPU stand-in** (PPMI + TruncatedSVD sequence
   embeddings) that actually builds a backbone/embeddings end-to-end, deterministically
   and in seconds, with zero new dependencies. It is the conformance/CI/dev default

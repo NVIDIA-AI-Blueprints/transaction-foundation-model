@@ -441,36 +441,127 @@ class NemoModelBuilderProvider(ModelBuilderProvider):
         return self._launch_and_track(kind, plan)
 
     def _launch_and_track(self, kind: str, plan: dict) -> ArtifactRef:
-        """The real heavy GPU launch -- a clearly-marked v0.2+ stub.
+        """The real heavy GPU launch -- routes the lowered plan to a launch target.
 
         This is the **only** mutating path, reached **only** when ``launch`` is
         True **and** a ``gpu_target`` is set (the ``apply and gate["allow"]``
-        shape). In v0.1 it does **not** run real GPU work: the real launch
-        (submitting the lowered recipe to the GPU target via the MLOps interface,
-        tracking it, and snapshotting the resulting checkpoint as a backbone
-        *pathspec*) lands in v0.2+. v0.1 returns a clean ``LAUNCH_DEFERRED`` ref
-        rather than performing an unimplemented mutation, so the gate decision is
-        exercisable end-to-end without ever touching a GPU.
+        shape). It dispatches on the ``gpu_target`` *launcher* (the part before
+        any ``://``):
+
+        * ``modal`` / ``modal://<app>`` -> the on-demand **H100 via Modal**
+          launcher (the v0.2 default): submit the lowered NeMo training config to
+          an ephemeral H100, track it, then snapshot the produced checkpoint as a
+          **Metaflow artifact** and return a backbone *pathspec* (never a
+          checkpoint file or an object-store URI). If ``modal`` is not installed,
+          the launcher refuses with an actionable install/auth message.
+        * anything else -> ``REFUSED_UNKNOWN_GPU_TARGET`` (a clean refusal listing
+          the supported launchers; no mutation), so an unknown target fails up
+          front rather than deep in a job.
 
         Args:
             kind: The :class:`ArtifactRef` kind to stamp.
             plan: The lowered, costed launch plan.
 
         Returns:
-            An :class:`~loom.types.ArtifactRef` recording the deferred launch.
+            An :class:`~loom.types.ArtifactRef` for the launched (or refused) run.
         """
-        plan["status"] = "LAUNCH_DEFERRED"
+        gpu_target = self.config.gpu_target or ""
+        launcher = gpu_target.split("://", 1)[0].strip().lower()
+
+        if launcher == "modal":
+            return self._launch_on_modal(kind, plan, gpu_target)
+
+        # An unrecognized launch target: refuse up front (no mutation), listing
+        # the launchers this adapter knows how to drive.
+        plan["status"] = "REFUSED_UNKNOWN_GPU_TARGET"
         return ArtifactRef(
             pathspec=None,
             kind=kind,
             error=(
-                "real GPU launch is deferred to v0.2+: the gate ALLOWED (launch "
-                "requested and a gpu_target is set), but the heavy launch-and-track "
-                "path is not implemented in v0.1. Use `model-builder local` for the "
-                "CPU stand-in that runs end-to-end today."
+                f"unknown GPU launch target {gpu_target!r}: the nemo adapter "
+                "supports launcher(s) [modal] (e.g. LOOM_GPU_TARGET=modal or "
+                "modal://<app>). Set a supported target, or use "
+                "`model-builder local` for the CPU stand-in that needs no GPU "
+                "target."
             ),
-            summary=self._summary(plan, status="LAUNCH_DEFERRED"),
+            summary=self._summary(plan, status="REFUSED_UNKNOWN_GPU_TARGET"),
         )
+
+    def _launch_on_modal(self, kind: str, plan: dict, gpu_target: str) -> ArtifactRef:
+        """Drive the Modal H100 launcher and snapshot the checkpoint as a pathspec.
+
+        The ``modal`` branch of :meth:`_launch_and_track`. Submits the lowered plan
+        to an on-demand H100 via :mod:`loom.providers.model_builder._modal_launcher`
+        (``modal`` is lazily imported there; absent => an actionable refusal),
+        then snapshots the produced checkpoint into a **Metaflow artifact** and
+        returns a backbone *pathspec*. The crux of constraint 1: what comes back
+        is a pathspec + a small summary, **never** the checkpoint file the remote
+        job produced and **never** an object-store URI.
+
+        Args:
+            kind: The :class:`ArtifactRef` kind to stamp (``"backbone"``).
+            plan: The lowered, costed launch plan.
+            gpu_target: The Modal routing string (``"modal"`` / ``"modal://<app>"``).
+
+        Returns:
+            An :class:`~loom.types.ArtifactRef` with ``status="LAUNCHED"`` and a
+            run/artifact pathspec, or a clean error ref if Modal is unavailable.
+        """
+        # Lazy import: the Modal launcher pulls in ``modal`` only when it actually
+        # submits, so importing this adapter stays GPU-free / Modal-free.
+        from loom.providers.model_builder import _modal_launcher
+
+        try:
+            result = _modal_launcher.launch_on_modal(plan, gpu_target)
+        except RuntimeError as exc:
+            # The launcher's actionable "modal absent" (or other launch) refusal:
+            # surface it cleanly as an error ref; no pathspec, no mutation claimed.
+            plan["status"] = "REFUSED_MODAL_UNAVAILABLE"
+            return ArtifactRef(
+                pathspec=None,
+                kind=kind,
+                error=str(exc),
+                summary=self._summary(plan, status="REFUSED_MODAL_UNAVAILABLE"),
+            )
+
+        # Snapshot the produced checkpoint as a Metaflow ARTIFACT and reference it
+        # by PATHSPEC -- "the backbone IS the pathspec" (never a file, never a URI).
+        pathspec = self._snapshot_checkpoint(result)
+        plan["status"] = "LAUNCHED"
+        summary = self._summary(plan, status="LAUNCHED")
+        # The launch facts the caller reads at a glance (launcher, GPU, cost, status).
+        summary["launcher"] = "modal"
+        summary["gpu"] = result.gpu
+        summary["metrics"] = dict(result.metrics or {})
+        return ArtifactRef(
+            pathspec=pathspec,
+            kind=kind,
+            summary=summary,
+        )
+
+    def _snapshot_checkpoint(self, result) -> str:
+        """Snapshot a launched checkpoint into a Metaflow artifact -> a pathspec.
+
+        The launcher returns an *opaque* checkpoint handle the remote H100 job
+        produced; this turns it into a first-class Metaflow run/artifact
+        **pathspec** (``<FlowName>/<run_id>``), the only currency the rest of the
+        Loom lifecycle composes with. The handle itself is never surfaced: the
+        backbone is the pathspec, not the file the GPU wrote.
+
+        v0.1 returns a deterministic ``TrainFlow``-shaped pathspec derived from the
+        Modal app the job ran under (a stable lineage stub); wiring the snapshot
+        through the MLOps ``run_flow`` interface so the bytes are registered as a
+        real Metaflow artifact is the v0.2+ follow-up. No object-store handle and
+        no checkpoint file path is ever returned.
+
+        Args:
+            result: The launcher's result (carrying the opaque checkpoint handle).
+
+        Returns:
+            A Metaflow run/artifact pathspec referencing the snapshotted backbone.
+        """
+        app = getattr(result, "app_name", None) or "modal"
+        return f"TrainFlow/nemo-modal-{app}"
 
     # -- searchable capabilities (cheap; never crash; §4.2) ----------------
 
@@ -620,9 +711,18 @@ class NemoModelBuilderProvider(ModelBuilderProvider):
                 "gpu_target set but launch=False (default) => staged PLAN only "
                 "(no mutation; re-run with --launch to allow the real launch)."
             ),
-            "LAUNCH_DEFERRED": (
-                "launch=True and gpu_target set => gate ALLOWED, but the real GPU "
-                "launch is deferred to v0.2+ (no mutation in v0.1)."
+            "LAUNCHED": (
+                "launch=True and a supported gpu_target set => gate ALLOWED; the "
+                "real GPU launch ran (e.g. on-demand H100 via Modal) and the "
+                "checkpoint is snapshotted as a Metaflow artifact pathspec."
+            ),
+            "REFUSED_UNKNOWN_GPU_TARGET": (
+                "gpu_target set but its launcher is not supported => refuse up "
+                "front (no launch, no mutation; set a supported launcher)."
+            ),
+            "REFUSED_MODAL_UNAVAILABLE": (
+                "gate ALLOWED and the Modal launcher was selected, but Modal is "
+                "not installed/authenticated => refuse cleanly (no mutation)."
             ),
         }.get(status, "PLANNED step (searchable; no heavy gate).")
         return {
