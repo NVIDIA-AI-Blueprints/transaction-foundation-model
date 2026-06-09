@@ -4,5 +4,8 @@
   "collapseChangelog": true,
   "lastChangelogVersion": "0.79.0",
   "defaultProvider": "anthropic",
-  "defaultModel": "claude-opus-4-8"
+  "defaultModel": "claude-opus-4-8",
+  "packages": [
+    "npm:pi-mcp-adapter"
+  ]
 }

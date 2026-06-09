@@ -4,8 +4,7 @@
 `/loom-*` verbs — `connect · eda · features · pipeline · train · optimize ·
 validate · viz · report · deploy · ops · collab` — spanning the **whole**
 data-science lifecycle, each an agentic skill you drive from the standalone
-**`loom`** CLI (or as a [Claude Code](https://claude.com/claude-code) skill-pack).
-ML *modeling* is the ~3%
+**`loom`** CLI. ML *modeling* is the ~3%
 "brain"; the product is the other **97%** — data access, EDA, features,
 pipelines, training, validation, viz, reporting, deployment, ops, collaboration.
 
@@ -27,8 +26,8 @@ interface* — never a concrete backend — so any layer is drop-in replaceable.
 
 ## The lifecycle at a glance
 
-Every verb is a Claude Code skill now (`/loom-eda`) and the same `loom eda` in the
-binary later. Each runs *through* Loom's MLOps interface, produces a **Metaflow
+Every verb is a `loom` command (`loom eda`) and a `/loom-<verb>` workflow inside the
+agent. Each runs *through* Loom's MLOps interface, produces a **Metaflow
 run + an `@card`** plus a typed JSON summary with a `VERDICT`/status line, and
 declares an **approval tier** enforced beneath the model.
 
@@ -73,29 +72,36 @@ the **data-science engine** (Python) it drives + a **local datastore** for the
 lifecycle verbs. One copy-paste on a Mac:
 
 ```bash
-# 0. Prereqs (Homebrew): node ≥22, python 3.10–3.12, + the local-datastore stack.
-brew install node python@3.12 colima minikube kubectl awscli
-colima start                                  # the container runtime minikube uses
+# 0. Prereqs (Homebrew): node ≥22.19, python 3.12. (The datastore stack —
+#    colima, minikube, kubectl, awscli — is installed/started for you in step 4;
+#    install it here too if you like, it's detect-before-install either way.)
+brew install node python@3.12
 
 # 1. Clone
 git clone git@github.com:ZKAI-Network/Loom.git && cd Loom
 
 # 2. The engine (Python) — the verbs `loom` drives
 python3.12 -m venv .venv && source .venv/bin/activate && pip install -e .
-export LOOM_PYTHON="$(pwd)/.venv/bin/python"  # how `loom` finds the engine — add to your shell profile
+export LOOM_PYTHON="$(pwd)/.venv/bin/python"  # REQUIRED: how `loom` finds the engine — add to your shell profile
 
 # 3. The `loom` command (Node) — the agentic CLI itself
 ( cd cli && npm install && npm run build && npm link )   # → `loom` on your PATH
 
-# 4. The local Metaflow datastore (for the lifecycle verbs) — one gated command
-bash scripts/setup_metaflow_minikube.sh && source .env.metaflow
-"$LOOM_PYTHON" -m loom doctor                 # health check — should end VERDICT: PASS
+# 4. The local Metaflow datastore (for the lifecycle verbs) — one gated command.
+#    The script installs/starts colima+minikube, applies minio, makes the bucket,
+#    and writes .env.metaflow. It does NOT hold the port-forward open — start that
+#    yourself (the datastore is only reachable while it runs).
+bash scripts/setup_metaflow_minikube.sh
+kubectl port-forward -n loom svc/minio 9000:9000 9001:9001 &   # keep this alive
+source .env.metaflow
+"$LOOM_PYTHON" -m loom doctor                 # health check — should end "VERDICT: PASS"
 
 # 5. (optional) a model key — only the natural-language turns need one
 export ANTHROPIC_API_KEY="sk-ant-..."         # or run `loom`, then /login
 
 # 6. Go
-loom
+loom --help                                   # confirm the install — branded help + verb list
+loom                                          # open the agent
 ```
 
 Type **`loom`** and ask for what you want — *"profile my data and flag leakage"*,
@@ -105,8 +111,11 @@ one (a missing key gives an actionable `/login` line, never a crash).
 
 > **Early-install honesty.** It's a multi-step polyglot install for now (Node CLI
 > + Python engine + a local datastore); a one-command installer / `npm i -g` is on
-> the roadmap. `LOOM_PYTHON` must point at the venv where `pip install -e .` ran —
-> set it in your shell profile so `loom` always resolves the engine.
+> the roadmap. **`LOOM_PYTHON` is required:** it must point at the venv where
+> `pip install -e .` ran (`<repo>/.venv/bin/python`), and you must export it in your
+> shell profile so every new shell's `loom` resolves the engine — without it, the
+> CLI boots but the lifecycle verbs can't find the engine. Likewise, the datastore
+> verbs only work while the step-4 `kubectl port-forward` is running.
 
 ---
 
@@ -125,8 +134,9 @@ first "does it work":
 # 1. Get the code
 git clone git@github.com:ZKAI-Network/Loom.git && cd Loom
 
-# 2. Install into a clean virtualenv (first install pulls AIDE's ML stack — a few minutes)
-python3 -m venv .venv && source .venv/bin/activate
+# 2. Install into a clean virtualenv (use a 3.10–3.12 interpreter; a fresh Mac's
+#    system python3 may be older). First install pulls AIDE's ML stack — a few minutes.
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e .
 
 # 3. Point Loom at an LLM (Claude is the default)
@@ -383,24 +393,29 @@ the gate, the cost-surface, and the `local` stand-in are documented in
 The lifecycle verbs need `--mlops metaflow` + a datastore. **The one-command path
 is built:** the [`/loom-setup-metaflow`](skills/loom-setup-metaflow/SKILL.md) skill
 drives the idempotent [`scripts/setup_metaflow_minikube.sh`](scripts/setup_metaflow_minikube.sh)
-(detect-before-install the prereqs, start the cluster, apply minio, write
-`.env.metaflow`), then verifies with the read-only `loom doctor` (PASS/WARN/FAIL per
-check + a one-line VERDICT; exits 0 iff nothing FAILs). The skill **always gates**
-before installing/starting anything (it is local-dev + reversible via
+(detect-before-install the prereqs incl. colima, start the cluster, apply minio,
+create the bucket, write `.env.metaflow`), then prints the port-forward command to
+run. After you start the port-forward, verify with the read-only `loom doctor`
+(PASS/WARN/FAIL per check + a one-line VERDICT; exits 0 iff nothing FAILs). The skill
+**always gates** before installing/starting anything (it is local-dev + reversible via
 `minikube delete`).
 
 ```bash
-# One command (gated): stand up the local datastore, then verify it.
+# Stand up the local datastore (gated). The script does NOT hold the port-forward
+# open — start it yourself in a separate shell (or background it), then verify.
 bash scripts/setup_metaflow_minikube.sh
-source .env.metaflow && loom doctor        # read-only health check — must end VERDICT: PASS
+kubectl port-forward -n loom svc/minio 9000:9000 9001:9001 &   # keep this alive
+source .env.metaflow && loom doctor        # read-only health check — must end "VERDICT: PASS"
 ```
 
 Or run the verified recipe by hand (minikube + minio as an S3-compatible datastore —
 runs on a laptop, no cloud, no GPU):
 
 ```bash
-# 1. A local cluster + an S3-compatible store (minio). (Docker driver via colima on macOS.)
-minikube start
+# 1. A local cluster + an S3-compatible store (minio). On macOS the docker driver
+#    runs via colima, so start that first (the script does this for you).
+colima start                                  # the container runtime minikube uses (macOS)
+minikube start --driver=docker
 kubectl create namespace loom
 kubectl apply -n loom -f skills/loom-setup-metaflow/manifests/minio.yaml
 kubectl port-forward -n loom svc/minio 9000:9000 9001:9001 &     # keep this alive
@@ -452,10 +467,10 @@ the keyless-vs-key-gated note.
 
 ---
 
-## Drive it conversationally (Claude Code)
+## The verb workflows & `/loom-auto`
 
-Prefer to talk to it? The [`skills/`](skills/) pack turns Loom into a Claude Code
-workflow — one verb table, both surfaces. `/loom-setup-metaflow` stands up the local
+Each verb is also a guided workflow you trigger by name from the `loom` agent.
+`/loom-setup-metaflow` stands up the local
 datastore (and `loom doctor` health-checks it), `/loom-connect` brings data in,
 `/loom-eda` profiles it, `/loom-optimize` pins the metric and runs the search,
 `/loom-train` builds a backbone, `/loom-validate` checks a sealed holdout,
@@ -465,8 +480,19 @@ let **`/loom-auto`** drive the whole happy path for you — it orchestrates the 
 end-to-end (eda → features → optimize → validate → report), threading each artifact
 and asserting each VERDICT, gating only at the expensive optimize step and **never**
 auto-firing deploy/collab-send. Each verb plans, gates on cost/data, calls the
-interface, and narrates a lineage-grounded result. See
-[`skills/README.md`](skills/README.md).
+interface, and narrates a lineage-grounded result.
+
+---
+
+## Data access & cloud ops (MCP)
+
+Loom reaches data **across vendors/clouds** (S3 · GCS · a warehouse · Postgres · a
+filesystem) and drives **cloud ops** (provision/deploy) via the Model Context
+Protocol — powered by the bundled `pi-mcp-adapter` (one lazy proxy tool, installed
+on first launch). Configure servers in `.mcp.json` (or run `/mcp setup` in the
+agent). Loom's discipline: **MCP `data` tools LOCATE/FETCH, then you `loom ingest`**
+into a Metaflow data object and work on the pathspec — never the raw store, never
+bulk through chat; **MCP `cloud-ops` tools are gated** like `deploy --apply`.
 
 ---
 
@@ -640,8 +666,8 @@ send the training corpus to a sampling observability/metrics backend** (they
 sample + aggregate + expire — even first-party analytics pipelines do).
 
 The capture above scatters a run's signal across three stores; the **telemetry
-layer** (`loom/telemetry/`, modeled on Claude Code's append-only session
-**transcript**, not its sampling analytics plane) stitches them into
+layer** (`loom/telemetry/`, modeled on an append-only session
+**transcript**, not a sampling analytics plane) stitches them into
 **distillation-grade trajectories** — the training examples LOOM-DS-1 distills from.
 It does **not** re-log; it **correlates**. Three signal types feed one trajectory:
 
@@ -733,7 +759,7 @@ flows/
   eval_candidate.py  the one static evaluation flow (candidate = data)
   eda · viz · features · validate · pipeline · deploy · ops · collab · report · train .py
                      one static lifecycle flow per verb -> a Metaflow run + @card
-skills/           the Claude Code skill-pack — one /loom-* skill per verb (incl. loom-train, loom-skillopt)
+skills/           the /loom-* skill library — one SKILL.md workflow per verb (incl. loom-train, loom-skillopt)
 tasks/generic_demo/   the bundled smoke-test task
 ```
 

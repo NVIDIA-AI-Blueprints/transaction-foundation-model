@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { syncBundledAssets } from "./bootstrap/sync.js";
+import { ensureLoomPackages } from "./pi/ensure-packages.js";
 import { launchPiChat } from "./pi/launch.js";
 import { normalizeLoomSettings } from "./pi/settings.js";
 import { validatePiInstallation } from "./pi/runtime.js";
@@ -145,6 +146,9 @@ export async function main(): Promise<void> {
 	// branding-related settings keys.
 	syncBundledAssets(appRoot, loomHomeDir);
 	normalizeLoomSettings(resolve(loomHomeDir, "settings.json"));
+	// Ensure Loom's bundled Pi capability packages (MCP via pi-mcp-adapter) are
+	// installed in the home — idempotent, first-launch only.
+	ensureLoomPackages(appRoot, loomHomeDir);
 
 	const missing = validatePiInstallation(appRoot);
 	if (missing.length > 0) {

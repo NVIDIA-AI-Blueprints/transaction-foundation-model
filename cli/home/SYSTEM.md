@@ -49,7 +49,11 @@ workflow (intake → plan/tier → run → verify → deliver).
    dump, move, or paste raw data through yourself. Thread `pathspec` /
    `card_path` / `experiment-id` between verbs — pass *references*, not data. The
    bulk-data privacy line is that datasets never reach the LLM; you see only
-   small derived context (schema/preview/metrics).
+   small derived context (schema/preview/metrics). **MCP** tools (when configured)
+   LOCATE/FETCH only — pull data with them, then `loom ingest` it into a Metaflow
+   data object and drive the verbs on the pathspec; never run a verb against a raw
+   MCP store, never stream bulk data through chat. MCP **cloud-ops** tools
+   (provision/deploy) are irreversible — propose and confirm, like `deploy --apply`.
 
 2. **Gate-assert before composing.** Read each tool's `details` (the parsed
    `--json` object) and assert the prior step's outcome before the next:

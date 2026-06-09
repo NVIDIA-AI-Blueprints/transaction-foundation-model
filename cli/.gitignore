@@ -2,10 +2,13 @@
 node_modules/
 dist/
 
-# Pi runtime data written into the branded agent home
+# Pi runtime data + installed packages written into the branded agent home
 home/sessions/
 home/auth.json
 home/.cache/
+home/npm/
+home/.loom-bootstrap.json
+home/mcp-npx-cache.json
 
 # misc
 *.log
