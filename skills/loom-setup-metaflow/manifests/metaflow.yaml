@@ -3,6 +3,14 @@
 # (METAFLOW_DEFAULT_METADATA=service) instead of local ~/.metaflow files, so the
 # Client API + the UI read one shared source of truth.
 #
+# This manifest stands up the full local Metaflow stack:
+#   - metaflow-db          Postgres backing the metadata service + UI backend
+#   - metaflow-metadata    the metadata API (:8080) Loom registers/reads runs through
+#   - metaflow-ui-backend  the UI's data API (:8083) — SAME image, ui_backend entrypoint
+#   - metaflow-ui          the visual dashboard (:3000) — the metaflow-ui SPA on nginx,
+#                          with an /api proxy (the ConfigMap below) to the UI backend so
+#                          the browser needs only ONE port-forward (svc/metaflow-ui :3000).
+#
 # ⚠ Apple-Silicon note: the netflixoss/metaflow_* images are amd64-only. minikube's
 # containerd will NOT *pull* them (no arm64 manifest), but it WILL *run* one that
 # was `minikube image load`ed (host pulls it under colima's emulation, then it's
@@ -10,6 +18,12 @@
 #   docker pull --platform linux/amd64 netflixoss/metaflow_metadata_service:latest
 #   minikube image load netflixoss/metaflow_metadata_service:latest
 # and these Deployments use imagePullPolicy: IfNotPresent (never pull).
+#
+# The metaflow-ui FRONTEND has no published image, so the installer builds it from
+# source (Netflix/metaflow-ui) — and because that Dockerfile is multi-arch, it builds
+# NATIVELY for arm64 (fast, no emulation) and is `minikube image load`ed as
+# loom/metaflow-ui:<version>. The /api proxy lives in a ConfigMap (not baked into the
+# image), so the stock build is used unmodified.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -94,3 +108,160 @@ spec:
   ports:
     - { name: metadata, port: 8080, targetPort: 8080 }
     - { name: migration, port: 8082, targetPort: 8082 }
+---
+# The UI backend — the data API the visual dashboard reads. It is the SAME
+# netflixoss image, just a different entrypoint (ui_backend_service -> :8083). It
+# reads the same Postgres directly (MF_METADATA_DB_*) and the same minio datastore
+# (for artifact/card views), so it shares the metadata service's source of truth.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metaflow-ui-backend
+  namespace: loom
+  labels: { app: metaflow-ui-backend }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: metaflow-ui-backend } }
+  template:
+    metadata: { labels: { app: metaflow-ui-backend } }
+    spec:
+      containers:
+        - name: ui-backend
+          image: netflixoss/metaflow_metadata_service:latest
+          imagePullPolicy: IfNotPresent
+          # Override the default migration->metadata CMD: run the UI backend instead.
+          # The metadata-service Deployment already applies the DB migrations.
+          command: ["/opt/latest/bin/ui_backend_service"]
+          env:
+            # Postgres (read the same DB the metadata service writes).
+            - { name: MF_METADATA_DB_HOST, value: metaflow-db }
+            - { name: MF_METADATA_DB_PORT, value: "5432" }
+            - { name: MF_METADATA_DB_USER, value: metaflow }
+            - { name: MF_METADATA_DB_PSWD, value: metaflow }
+            - { name: MF_METADATA_DB_NAME, value: metaflow }
+            # Serve the UI data API on :8083, all interfaces.
+            - { name: MF_UI_METADATA_HOST, value: 0.0.0.0 }
+            - { name: MF_UI_METADATA_PORT, value: "8083" }
+            # UI_ENABLED=0: serve ONLY the data API (flows/runs/cards/logs/ws). The
+            # metaflow-ui frontend is served by the separate nginx pod below, so we
+            # must NOT also mount the backend's bundled-static frontend — that image
+            # ships no UI bundle, so UI_ENABLED=1 crashes on a missing ui/static dir.
+            - { name: UI_ENABLED, value: "0" }
+            # Datastore (in-cluster minio) so artifact/card endpoints can read S3.
+            - { name: METAFLOW_DEFAULT_DATASTORE, value: s3 }
+            - { name: METAFLOW_DATASTORE_SYSROOT_S3, value: s3://metaflow/metaflow }
+            - { name: METAFLOW_S3_ENDPOINT_URL, value: http://minio:9000 }
+            - { name: AWS_ACCESS_KEY_ID, value: minioadmin }
+            - { name: AWS_SECRET_ACCESS_KEY, value: minioadmin123 }
+            - { name: LOGLEVEL, value: INFO }
+          ports: [{ containerPort: 8083 }]
+          readinessProbe:
+            tcpSocket: { port: 8083 }
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 40
+---
+apiVersion: v1
+kind: Service
+metadata: { name: metaflow-ui-backend, namespace: loom }
+spec:
+  selector: { app: metaflow-ui-backend }
+  ports: [{ port: 8083, targetPort: 8083 }]
+---
+# nginx config for the SPA. This is the upstream metaflow-ui template PLUS an
+# `/api` proxy to the UI backend service, so the browser needs only ONE
+# port-forward (svc/metaflow-ui :3000) — every `${METAFLOW_SERVICE}` (=/api) call
+# the SPA makes, REST and the /ws websocket alike, is proxied in-cluster to :8083.
+# Runtime `${VAR}` tokens are substituted by the nginx image's envsubst from the
+# Deployment env; nginx's own `$uri`/`$http_upgrade` are NOT env vars, so they pass
+# through untouched.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: metaflow-ui-nginx, namespace: loom }
+data:
+  default.conf.template: |
+    server {
+        listen ${PORT};
+        root /usr/share/nginx/html;
+        gzip on;
+        gzip_types text/css application/javascript application/json image/svg+xml;
+        gzip_comp_level 9;
+        etag on;
+
+        # Proxy the SPA's API + websocket calls to the in-cluster UI backend.
+        location /api/ {
+            proxy_pass http://metaflow-ui-backend:8083/;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_read_timeout 86400;
+        }
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+        location /index.html {
+            sub_filter_once on;
+            sub_filter '</head>' '<script>window.METAFLOW_SERVICE="${METAFLOW_SERVICE}";window.MF_DEFAULT_TIME_FILTER_DAYS="${MF_DEFAULT_TIME_FILTER_DAYS}";</script>${METAFLOW_HEAD}</head>';
+            sub_filter '<body>' '<body>${METAFLOW_BODY_BEFORE}';
+            sub_filter '</body>' '${METAFLOW_BODY_AFTER}</body>';
+            add_header Cache-Control max-age=300;
+        }
+        location /static/ {
+            add_header Cache-Control max-age=31536000;
+        }
+        location ~* \.(svg|jpg|jpeg|png|gif|ico|css|js)$ {
+            add_header Cache-Control max-age=31536000;
+        }
+    }
+---
+# The visual dashboard — the metaflow-ui SPA on nginx. Built from source by the
+# installer (see metaflow-ui.Dockerfile) and `minikube image load`ed natively for
+# arm64, so this image — unlike the netflixoss ones — is the node's own arch.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metaflow-ui
+  namespace: loom
+  labels: { app: metaflow-ui }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: metaflow-ui } }
+  template:
+    metadata: { labels: { app: metaflow-ui } }
+    spec:
+      containers:
+        - name: ui
+          image: loom/metaflow-ui:1.3.14
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: PORT, value: "3000" }
+            # The SPA calls this base for the API; /api is proxied to the UI backend
+            # by the ConfigMap nginx config above.
+            - { name: METAFLOW_SERVICE, value: /api }
+            # Defined-but-empty so envsubst replaces these tokens with nothing.
+            - { name: METAFLOW_HEAD, value: "" }
+            - { name: METAFLOW_BODY_BEFORE, value: "" }
+            - { name: METAFLOW_BODY_AFTER, value: "" }
+            - { name: MF_DEFAULT_TIME_FILTER_DAYS, value: "" }
+          ports: [{ containerPort: 3000 }]
+          volumeMounts:
+            - name: nginx-template
+              mountPath: /etc/nginx/templates/default.conf.template
+              subPath: default.conf.template
+          readinessProbe:
+            httpGet: { path: /, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+      volumes:
+        - name: nginx-template
+          configMap: { name: metaflow-ui-nginx }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: metaflow-ui, namespace: loom }
+spec:
+  selector: { app: metaflow-ui }
+  ports: [{ port: 3000, targetPort: 3000 }]

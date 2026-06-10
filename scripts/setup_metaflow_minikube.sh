@@ -44,6 +44,15 @@ METAFLOW_MANIFEST="${REPO_ROOT}/skills/loom-setup-metaflow/manifests/metaflow.ya
 METAFLOW_MD_IMAGE="netflixoss/metaflow_metadata_service:latest"
 ENV_FILE="${REPO_ROOT}/.env.metaflow"
 
+# The visual Metaflow UI (metaflow-ui SPA). It has NO published image, so we build
+# it from source — natively for arm64 — with the Loom Dockerfile, then load it. The
+# version pins the upstream tag we build + the image tag the manifest references.
+METAFLOW_UI_VERSION="1.3.14"
+METAFLOW_UI_IMAGE="loom/metaflow-ui:${METAFLOW_UI_VERSION}"
+METAFLOW_UI_REPO="https://github.com/Netflix/metaflow-ui.git"
+METAFLOW_UI_REF="v${METAFLOW_UI_VERSION}"
+METAFLOW_UI_DOCKERFILE="${REPO_ROOT}/skills/loom-setup-metaflow/manifests/metaflow-ui.Dockerfile"
+
 # ---------------------------------------------------------------------------
 # Small helpers.
 # ---------------------------------------------------------------------------
@@ -185,12 +194,47 @@ else
   info "could not preload ${METAFLOW_MD_IMAGE}; if the metadata pod ImagePullBackOffs,"
   info "  run: docker pull --platform linux/amd64 ${METAFLOW_MD_IMAGE} && minikube image load ${METAFLOW_MD_IMAGE}"
 fi
-kubectl apply -n "${NAMESPACE}" -f "${METAFLOW_MANIFEST}"
-if kubectl wait -n "${NAMESPACE}" --for=condition=available --timeout=240s \
-    deployment/metaflow-db deployment/metaflow-metadata; then
-  info "Metaflow metadata service is available (Postgres-backed)"
+# Build + load the visual UI (metaflow-ui SPA) from source. No published image
+# exists, so we build it natively for arm64 with the Loom Dockerfile. This is the
+# only heavy step; it is NON-FATAL — if git/docker are missing or the build fails,
+# the metadata service (the load-bearing part) still comes up and the dashboard pod
+# simply waits for the image (build it later with the hint below).
+UI_READY=0
+if minikube image ls 2>/dev/null | grep -q "${METAFLOW_UI_IMAGE}"; then
+  info "UI image ${METAFLOW_UI_IMAGE} already loaded"
+  UI_READY=1
+elif have git && have docker; then
+  UI_SRC="$(mktemp -d)"
+  info "building the metaflow-ui dashboard from source (${METAFLOW_UI_REF}) -- one-time native build"
+  if git clone --depth 1 --branch "${METAFLOW_UI_REF}" "${METAFLOW_UI_REPO}" "${UI_SRC}" >/dev/null 2>&1 \
+     && DOCKER_BUILDKIT=0 docker build -f "${METAFLOW_UI_DOCKERFILE}" \
+          --build-arg BUILD_RELEASE_VERSION="${METAFLOW_UI_VERSION}" \
+          -t "${METAFLOW_UI_IMAGE}" "${UI_SRC}" >/dev/null 2>&1 \
+     && minikube image load "${METAFLOW_UI_IMAGE}" >/dev/null 2>&1; then
+    info "metaflow-ui built + loaded (${METAFLOW_UI_IMAGE})"
+    UI_READY=1
+  else
+    info "metaflow-ui build/load skipped or failed; the dashboard pod will wait for the image."
+    info "  build it later (then re-run this script): git clone --depth 1 --branch ${METAFLOW_UI_REF} \\"
+    info "    ${METAFLOW_UI_REPO} /tmp/metaflow-ui && DOCKER_BUILDKIT=0 docker build -f \\"
+    info "    ${METAFLOW_UI_DOCKERFILE} -t ${METAFLOW_UI_IMAGE} /tmp/metaflow-ui && \\"
+    info "    minikube image load ${METAFLOW_UI_IMAGE}"
+  fi
+  rm -rf "${UI_SRC}" 2>/dev/null || true
 else
-  info "metadata service not ready yet; inspect: kubectl -n ${NAMESPACE} get pods,events"
+  info "git/docker missing; skipping the visual UI build (the metadata service still works)."
+fi
+
+kubectl apply -n "${NAMESPACE}" -f "${METAFLOW_MANIFEST}"
+# Always wait on Postgres + the metadata service + the UI backend (same already-loaded
+# image); only wait on the UI frontend when its image actually loaded.
+WAIT_DEPLOYS="deployment/metaflow-db deployment/metaflow-metadata deployment/metaflow-ui-backend"
+[[ "${UI_READY}" == "1" ]] && WAIT_DEPLOYS="${WAIT_DEPLOYS} deployment/metaflow-ui"
+# shellcheck disable=SC2086 -- WAIT_DEPLOYS is a deliberately word-split list of targets.
+if kubectl wait -n "${NAMESPACE}" --for=condition=available --timeout=240s ${WAIT_DEPLOYS}; then
+  info "Metaflow stack is available (Postgres + metadata service$([[ "${UI_READY}" == "1" ]] && echo ' + UI'))"
+else
+  info "some Metaflow component is not ready yet; inspect: kubectl -n ${NAMESPACE} get pods,events"
 fi
 
 # ---------------------------------------------------------------------------
@@ -225,13 +269,18 @@ cat <<EOF
 
      kubectl port-forward -n ${NAMESPACE} svc/minio 9000:9000 9001:9001 &
      kubectl port-forward -n ${NAMESPACE} svc/metaflow-metadata 8080:8080 &
+     kubectl port-forward -n ${NAMESPACE} svc/metaflow-ui 3000:3000 &
 
    Local dashboards & endpoints:
-     - minio console (browse the datastore)         http://localhost:9001
+     - Metaflow UI (the visual dashboard: runs,         http://localhost:3000
+       DAGs, timelines, artifacts -- the /api proxy
+       reaches the UI backend in-cluster, so this
+       single port-forward is all the browser needs)
+     - minio console (browse the datastore)             http://localhost:9001
          login: ${MINIO_USER} / ${MINIO_PASSWORD}
-     - Metaflow metadata service (Loom registers     http://localhost:8080
+     - Metaflow metadata service (Loom registers        http://localhost:8080
        runs here; the Client API reads it -- NOT ~/.metaflow files)
-     - Loom's own run views (no service needed)       loom report / loom datasets / loom viz
+     - Loom's own run views (no service needed)          loom report / loom datasets / loom viz
 
 2) Source the env and verify with the read-only doctor (must end PASS):
 
