@@ -28,13 +28,20 @@ LLM), same handoff machinery, applied to upgrades instead of diagnosis.
 
 1. **Read installed version.** `loom doctor --json` → `summary.loom_version`
    (preferred), falling back to parsing `summary.checks[0].detail` (`loom (\S+) @`).
-2. **Select manifests.** After `git pull --ff-only`, the newly-pulled set is
-   `git -C <repo> diff --name-only <old>..<new> -- migrations/`. Keep those whose
-   `from` PEP 440 predicate the installed version satisfies and whose `to` is newer;
-   sort ascending by `to`; apply in order. Non-matching manifests are
-   **NOT-APPLICABLE → skipped silently** (this is how a newer machine no-ops).
-3. **Read actual state.** Run `loom doctor --json` once + any referenced
-   `shell`/`http` probes → ACTUAL. Evaluate every `desired.expect`.
+2. **Select manifests by what the machine should satisfy — not a version delta.**
+   - the **baseline**: the newest manifest with `to <= installed` (the release the
+     machine is ON). Always a candidate, because `loom update`'s `pip install -e .`
+     advances the *version* to the target before the advisor runs — so a machine
+     can be "version 0.2.0" yet never have reached 0.2.0's desired state (no cluster
+     setup). Selecting only `to > installed` is the bug that made `loom update` do
+     nothing; the version moving forward is not evidence the desired state was met.
+   - **pending** upgrades: manifests with `to > installed` whose `from` PEP 440
+     predicate the installed version satisfies (code for a newer release you haven't
+     installed yet; non-matching ones are NOT-APPLICABLE → skipped).
+3. **Read actual state and decide if there's work.** Run `loom doctor --json` once +
+   any referenced `shell`/`http` probes → ACTUAL. A healthy baseline with no pending
+   upgrade (doctor `VERDICT: PASS`, no `to > installed`) is a genuine **no-op**.
+   Otherwise evaluate every `desired.expect` against ACTUAL.
 4. **Reconcile.** For each **unmet** assertion, take its transitions (those whose
    `satisfies` lists the assertion). For each: evaluate `guard` — true ⇒ already
    applied ⇒ **SKIP**. Else gate on `mutation`/`confirm` (below), run, then evaluate

@@ -59,12 +59,27 @@ def _load_index() -> list[dict]:
 
 
 def _applicable(releases: list[dict], installed: str) -> list[dict]:
-    """Select manifests whose ``to`` is newer than ``installed`` and whose ``from``
-    PEP 440 predicate the installed version satisfies, ascending by ``to``.
+    """Select the manifests whose desired-state this machine should satisfy.
 
-    PEP 440 — NOT SemVer: ``0.1.0.dev0`` is a valid PEP 440 version (and a valid
-    pre-release of ``0.2.0``) but invalid SemVer, so the comparison must use
-    ``packaging`` to order dev/pre-releases correctly.
+    Two kinds:
+
+    * the BASELINE — the newest manifest with ``to <= installed`` (the release the
+      machine is ON). Selected so that an install whose VERSION advanced (e.g.
+      ``loom update``'s ``pip install -e .`` bumps it to the target) but whose
+      desired-state was never reached (no cluster setup) still gets reconciled.
+      Keying selection on ``to > installed`` alone was the bug behind "loom update
+      did nothing": pip moves the version to the target BEFORE the advisor runs, so
+      a pure version-delta finds nothing to do even on a machine that never set the
+      stack up. Desired-state, checked via ``loom doctor`` in :func:`run_migrate`,
+      decides whether the baseline actually needs work (a healthy baseline no-ops).
+    * PENDING upgrades — manifests with ``to > installed`` whose ``from`` PEP 440
+      predicate the installed version satisfies (a release whose CODE you haven't
+      installed yet; uncommon in the editable-install flow but possible).
+
+    Returns the baseline (if any) then pending, ascending by ``to``.
+
+    PEP 440 — NOT SemVer: ``0.1.0.dev0`` is valid PEP 440 (a pre-release of
+    ``0.2.0``) but invalid SemVer, so ``packaging`` must do the comparison.
     """
     from packaging.specifiers import SpecifierSet
     from packaging.version import InvalidVersion, Version
@@ -74,26 +89,30 @@ def _applicable(releases: list[dict], installed: str) -> list[dict]:
     except InvalidVersion:
         return []
 
-    chosen: list[tuple[Version, dict]] = []
+    baseline: Optional[tuple] = None
+    pending: list[tuple] = []
     for rel in releases:
         try:
             to = Version(str(rel["to"]))
         except InvalidVersion:
             continue
-        if to <= cur:
-            continue  # already applied / not newer
-        # Honor the manifest's own `from` predicate when present (load the file).
-        from_pred = _manifest_from_predicate(rel)
-        if from_pred is not None:
-            try:
-                applies = SpecifierSet(from_pred).contains(cur, prereleases=True)
-            except Exception:  # noqa: BLE001 - an unparseable predicate is a maintainer
-                applies = False  # error; fail CLOSED (skip) rather than over-apply
-            if not applies:
-                continue  # NOT-APPLICABLE to this installed version -> skip
-        chosen.append((to, rel))
-    chosen.sort(key=lambda t: t[0])
-    return [rel for _, rel in chosen]
+        if to > cur:
+            # A pending upgrade: honor the manifest's `from` predicate.
+            from_pred = _manifest_from_predicate(rel)
+            if from_pred is not None:
+                try:
+                    applies = SpecifierSet(from_pred).contains(cur, prereleases=True)
+                except Exception:  # noqa: BLE001 - unparseable predicate -> fail closed
+                    applies = False
+                if not applies:
+                    continue  # NOT-APPLICABLE to this installed version -> skip
+            pending.append((to, rel))
+        elif baseline is None or to > baseline[0]:
+            baseline = (to, rel)  # newest manifest at/below the installed version
+    pending.sort(key=lambda t: t[0])
+    out: list[dict] = [baseline[1]] if baseline is not None else []
+    out.extend(rel for _, rel in pending)
+    return out
 
 
 def _manifest_from_predicate(rel: dict) -> Optional[str]:
@@ -198,13 +217,44 @@ def _advisor_prompt(installed: str, applicable: list[dict], doctor: Optional[dic
     )
 
 
-def run_migrate(apply: bool = False) -> int:
-    """Reconcile the machine toward the newest applicable release's desired state.
+def _needs_reconcile(applicable: list[dict], installed: str, doctor: Optional[dict]) -> tuple[bool, str]:
+    """Decide whether there is migration WORK, given the applicable manifests + the
+    live ``loom doctor --json``.
 
-    A no-op (returns 0) when the installed version is already at/after every
-    manifest's ``to`` — so ``loom update`` can call this unconditionally and the LLM
-    only engages when there is a real migration. With an assistant on PATH it hands
-    off (``os.execvp``, replacing this process); otherwise it prints the applicable
+    The desired-state source of truth is ``loom doctor``. Engage when either:
+    - a PENDING upgrade exists (``to > installed`` — new desired-state to reach), or
+    - the baseline release's stack is NOT healthy (doctor VERDICT != PASS), meaning
+      the version is at the target but the machine never reached the desired state
+      (exactly the "loom update did nothing / metaflow not set up" case).
+
+    A healthy baseline with no pending upgrade is a genuine no-op. Returns
+    ``(needs, reason)``.
+    """
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        cur = Version(installed)
+        pending = [r for r in applicable if Version(str(r["to"])) > cur]
+    except (InvalidVersion, KeyError):
+        pending = []
+    if pending:
+        return True, f"pending upgrade(s): {', '.join(str(r['to']) for r in pending)}"
+    verdict = (doctor or {}).get("VERDICT")
+    if verdict != "PASS":
+        # No pending upgrade, but the stack isn't healthy -> the current release's
+        # desired-state isn't met (or a port-forward/env is down). Reconcile.
+        return True, f"`loom doctor` is not healthy (VERDICT: {verdict or 'unknown'})"
+    return False, "stack healthy (loom doctor VERDICT: PASS)"
+
+
+def run_migrate(apply: bool = False) -> int:
+    """Reconcile the machine toward the current/pending release's desired state.
+
+    Selects the applicable manifests (the baseline release the machine is on, plus
+    any pending upgrade — see :func:`_applicable`), then uses live ``loom doctor``
+    health to decide if there is actually work (so a healthy stack is a no-op even
+    though a baseline manifest matches). With an assistant on PATH it hands off
+    (``os.execvp``, replacing this process); otherwise it prints the applicable
     manifests for manual follow-through.
 
     Args:
@@ -224,19 +274,27 @@ def run_migrate(apply: bool = False) -> int:
     releases = _load_index()
     applicable = _applicable(releases, installed)
     if not applicable:
-        print(f"Migrations: up to date (installed loom {installed}; nothing newer to apply).")
+        print(f"Migrations: no manifest applies to installed loom {installed}.")
+        return 0
+
+    # Desired-state, not version-delta, decides whether there's work: a stack that
+    # is already healthy needs nothing even though a baseline manifest matches.
+    doctor = _doctor_json()
+    needs, reason = _needs_reconcile(applicable, installed, doctor)
+    if not needs:
+        print(f"Migrations: up to date (installed loom {installed}; {reason}).")
         return 0
 
     versions = ", ".join(str(r["to"]) for r in applicable)
     summaries = "; ".join(f"{r['to']}: {r.get('summary', '')}" for r in applicable)
-    print(f"\nMigrations to apply for release(s) {versions} -- {summaries}")
+    print(f"\nReconciling to release(s) {versions} -- {reason}.\n  {summaries}")
 
     # Reuse doctor --fix's assistant detection + handoff pattern (no auto-approve
     # flags; the prompt carries the ask-before-destructive gate).
     from loom.cli import _detect_repair_assistant
 
     assistant = _detect_repair_assistant()
-    prompt = _advisor_prompt(installed, applicable, _doctor_json(), apply)
+    prompt = _advisor_prompt(installed, applicable, doctor, apply)
     if assistant is None:
         print(
             "\nNo `claude` or `codex` CLI on PATH for guided migration. Follow the "
