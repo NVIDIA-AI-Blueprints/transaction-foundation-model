@@ -44,6 +44,12 @@ dependencies = [
 # transitively via aideml) and CI (torch absent) cannot silently diverge.
 [project.optional-dependencies]
 model-local = ["torch>=2.0"]
+# ``gateway`` is the Loom proxy server stack (the moat-capture seam, run via
+# ``loom proxy serve`` / the deploy/gateway container). These are the ONLY deps
+# the gateway path needs beyond loom + its light config deps — `import loom.cli`
+# /`loom.proxy` pull none of the heavy ML core — so the gateway image installs
+# `loom --no-deps` + these (+ omegaconf/python-dotenv) and stays slim.
+gateway = ["starlette>=0.37", "uvicorn>=0.30", "httpx>=0.27"]
 
 [project.scripts]
 loom = "loom.cli:main"

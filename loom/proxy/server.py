@@ -61,7 +61,8 @@ _DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 # Loom's framing. Intentionally generic / domain-neutral — no tenant or vendor
 # specifics (those would taint the cross-tenant moat corpus).
 LOOM_SYSTEM_PROMPT = (
-    "You are operating inside Loom, an agentic data-science engine. "
+    "You are operating inside Loom, an agentic CLI for the full data-science "
+    "lifecycle. "
     "Be rigorous, reproducible, and metric-driven: optimize exactly the stated "
     "evaluation metric, never fabricate results, and prefer simple, verifiable "
     "solutions. This request is routed through Loom's model gateway."
@@ -69,6 +70,26 @@ LOOM_SYSTEM_PROMPT = (
 
 # Upstream timeout: generous read (streaming can run long), short connect.
 _UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
+
+
+def _read_keys_file(path: str) -> set[str]:
+    """Read accepted Loom keys from a file (one key per line; blanks/#-comments skipped).
+
+    The file half of the gateway's key lookup: mount a keys file into the container
+    (``LOOM_API_KEYS_FILE``) and add/rotate caller keys without changing the
+    environment or rebuilding the image. Merges with the env-supplied keys. A
+    missing or unreadable file yields an empty set (the env keys still apply) and
+    never raises — the gateway still fails closed if NO key is configured anywhere.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return {
+                line.strip()
+                for line in fh
+                if line.strip() and not line.strip().startswith("#")
+            }
+    except OSError:
+        return set()
 
 
 class ProxyAuthError(Exception):
@@ -137,6 +158,13 @@ class ProxyConfig:
             part = part.strip()
             if part:
                 keys.add(part)
+
+        # Also accept keys from a file mounted into the container (one key per
+        # line) — the file half of the kv/file lookup, so keys can be rotated
+        # without touching the env. Both sources merge into the allowlist.
+        keys_file = (e.get("LOOM_API_KEYS_FILE") or "").strip()
+        if keys_file:
+            keys |= _read_keys_file(keys_file)
 
         # The log path comes from the Loom config so it is anchored absolute the
         # same way corpus_path / learnings_path are; tenant/owned_by defaults too.

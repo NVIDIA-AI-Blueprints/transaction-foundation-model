@@ -27,7 +27,12 @@ WORKDIR /app
 # install resolves the package + the static `flows` package the spec ships.
 # Build context is the repo root: `docker build -f deploy/gateway/Dockerfile .`
 COPY . /app
-RUN pip install /app
+# Slim gateway: `loom proxy serve` imports only loom.cli / loom.config / loom.proxy
+# — NONE of the heavy ML core (aideml/torch/metaflow/pandas/sklearn). So install
+# loom WITHOUT its deps, then add just the gateway server stack + loom's light
+# config deps. Keeps the image small and the build fast (no torch/aideml pull).
+RUN pip install --no-deps /app \
+ && pip install "starlette>=0.37" "uvicorn>=0.30" "httpx>=0.27" "omegaconf>=2.3" "python-dotenv>=1.0"
 
 # Run as a non-root user (defense in depth — the gateway needs no root).
 RUN useradd --create-home --uid 10001 loom \
