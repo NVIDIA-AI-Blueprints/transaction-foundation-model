@@ -1,0 +1,10 @@
+# Ordered index of Loom migration manifests (ascending by `to` version). The
+# loom update advisor enumerates this to compute the chain between the installed
+# version and HEAD without globbing. Append a row when a version is cut; never
+# reorder or rewrite shipped rows (manifests are append-only — see FORMAT.md).
+schema: loom-migration-index/1
+releases:
+  - to: "0.2.0"
+    manifest: migrations/0.2.0.yaml
+    notes: migrations/0.2.0.md
+    summary: "Metadata service + visual dashboards (metaflow-ui)"

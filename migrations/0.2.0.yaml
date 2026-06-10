@@ -1,0 +1,124 @@
+# 0.2.0 — Loom registers runs to the Metaflow METADATA SERVICE (not ~/.metaflow
+# files) and ships the visual dashboard (metaflow-ui). Re-running the verified
+# minikube setup is the load-bearing action; everything else is reconcile + verify.
+# Human rationale lives in the required sidecar: migrations/0.2.0.md
+schema: loom-migration/1
+to: "0.2.0"
+from: "<0.2.0"          # applies to any pre-0.2.0 install (e.g. 0.1.0.dev0); newer installs skip
+title: "Metadata service + visual dashboards (metaflow-ui)"
+
+probes:
+  - id: loom_version
+    kind: doctor_version                 # check #1 detail: 'loom (?P<v>\S+) @'
+  - id: metadata_service
+    kind: doctor_check
+    check: "metadata service"
+    read: status                         # PASS iff METAFLOW_SERVICE_URL/ping -> 200
+  - id: metadata_backend
+    kind: doctor_check
+    check: "metadata service"
+    read: detail
+    regex: "-> 200|METAFLOW_DEFAULT_METADATA=service"   # .match once on the service
+  - id: datastore_env
+    kind: doctor_check
+    check: "datastore env vars"
+    read: detail
+    regex: "metadata=service"            # the 7 vars set AND flipped to service
+  - id: ns_pods
+    kind: shell
+    read_only: true
+    cmd: ["kubectl", "-n", "loom", "get", "pods", "-o", "name"]
+  - id: ui_pod_ready
+    kind: shell
+    read_only: true
+    cmd: ["kubectl", "-n", "loom", "get", "deploy", "metaflow-ui",
+          "-o", "jsonpath={.status.availableReplicas}"]
+  - id: md_portforward
+    kind: http
+    url: "http://localhost:8080/ping"
+    expect_status: 200
+  - id: ui_portforward
+    kind: http
+    url: "http://localhost:3000/"
+    expect_status: 200
+
+desired:
+  - id: version_is_target
+    statement: "Installed Loom is 0.2.0."
+    expect: 'probe:loom_version.capture.v >= "0.2.0"'
+    # Satisfied by loom update's own deterministic `pip install -e .` step (which
+    # runs BEFORE this advisor), not by a manifest transition — see on_fail.
+    on_fail: "re-run `loom update` — its pip step installs the new engine; this manifest does not reinstall code."
+  - id: metadata_is_service
+    statement: "Loom registers/reads runs via the metadata SERVICE, not ~/.metaflow files."
+    expect: "probe:datastore_env.match == true && probe:metadata_backend.match == true"
+  - id: metadata_reachable
+    statement: "The metadata service answers /ping with 200 (doctor check 'metadata service' PASS)."
+    expect: "probe:metadata_service.status == PASS"
+  - id: dashboards_deployed
+    statement: "The metaflow-ui dashboard is deployed and reachable at :3000."
+    expect: 'probe:ui_pod_ready.stdout_contains("1") && probe:ui_portforward.expect_status == 200'
+
+transitions:
+  - id: rerun_setup
+    satisfies: [metadata_is_service, metadata_reachable, dashboards_deployed]
+    # Already applied iff the metadata check PASSes AND both new deployments exist.
+    guard: 'probe:metadata_service.status == PASS && probe:ns_pods.stdout_contains("metaflow-metadata") && probe:ns_pods.stdout_contains("metaflow-ui")'
+    mutation: cluster              # spins minikube, applies Deployments/Services, one-time UI build
+    confirm: true                  # REQUIRED — cluster mutation, never unattended
+    run:
+      shell: ["bash", "scripts/setup_metaflow_minikube.sh"]
+    # verify is stricter than the guard: the UI deployment must actually be READY,
+    # not merely present (closes the Pending-pod-skips-the-only-state-changer hole).
+    verify: 'probe:ns_pods.stdout_contains("metaflow-metadata") && probe:ui_pod_ready.stdout_contains("1")'
+    on_fail: "inspect `kubectl -n loom get pods,events`. The netflixoss metadata image is amd64-only (loaded via `minikube image load`); the metaflow-ui SPA has no published image so it is built from source (one-time). A missing image leaves a pod Pending — that is a UI-build problem, not a metadata failure."
+
+  - id: refresh_env
+    satisfies: [metadata_is_service]
+    guard: "probe:datastore_env.match == true"     # 7 vars already set + metadata=service in THIS shell
+    mutation: local                                # re-sources a gitignored local-dev env file; no cluster touch
+    confirm: false                                 # low-risk; advisor shows the export lines for transparency
+    run:
+      doc: "Re-source the regenerated env in the working shell: `source .env.metaflow`. setup_metaflow_minikube.sh overwrites it with METAFLOW_DEFAULT_METADATA=service + METAFLOW_SERVICE_URL=http://localhost:8080/. A stale shell still on local metadata is why doctor's 'metadata service' check WARNs. Show the user the export lines before sourcing. NOTE: `source` only mutates the shell that runs it — the advisor must source into the SAME shell it later runs `loom doctor` from."
+    verify: "probe:datastore_env.match == true"
+    on_fail: "if the vars still aren't set, re-run `bash scripts/setup_metaflow_minikube.sh` then `source .env.metaflow && loom doctor`."
+
+  - id: portforward_metadata
+    satisfies: [metadata_reachable]
+    guard: "probe:md_portforward.expect_status == 200"   # already forwarded -> skip
+    mutation: local                                       # a local process, not a cluster change
+    confirm: false
+    run:
+      shell: ["kubectl", "port-forward", "-n", "loom", "svc/metaflow-metadata", "8080:8080"]
+      background: true                                    # long-lived; verify polls the http probe with retry
+    verify: "probe:md_portforward.expect_status == 200"
+    on_fail: "keep this running in a separate terminal; without :8080 the Client API and doctor's 'metadata service' check cannot reach the service."
+
+  - id: portforward_ui
+    satisfies: [dashboards_deployed]
+    guard: "probe:ui_portforward.expect_status == 200"
+    mutation: local
+    confirm: false
+    run:
+      shell: ["kubectl", "port-forward", "-n", "loom", "svc/metaflow-ui", "3000:3000"]
+      background: true
+    verify: "probe:ui_portforward.expect_status == 200"
+    on_fail: "the dashboard SPA proxies /api to the in-cluster UI backend, so only :3000 is needed in the browser; if the metaflow-ui pod is Pending, finish the one-time UI build first (see rerun_setup.on_fail)."
+
+expectations:
+  - id: old_runs_absent
+    statement: "Runs recorded before 0.2.0 (METAFLOW_DEFAULT_METADATA=local, flat files in ~/.metaflow) will NOT appear in the metadata service or the Metaflow UI. There is no backfill; only runs after the flip show up."
+    do_not_fix: true
+  - id: emptydir_volatile
+    statement: "metaflow-db (Postgres) uses an emptyDir volume — run history does NOT survive a pod restart or `minikube stop/start`. Fine for local dev; swap to a PVC for persistence."
+    do_not_fix: true
+  - id: amd64_emulated
+    statement: "The netflixoss metadata image is amd64-only and runs under colima emulation; the metaflow-ui image is a native arm64 source build. A Pending UI pod means the one-time build was skipped/failed, not that the metadata service is broken."
+    do_not_fix: true
+
+rollback:
+  confirm: true
+  never_auto_select: true          # offered only on explicit human request; forward reconcile can never pick it
+  statement: "Tear down the whole local cluster (DESTROYS all registered runs + datastore objects)."
+  run:
+    shell: ["minikube", "delete"]
