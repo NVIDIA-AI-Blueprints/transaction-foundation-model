@@ -40,6 +40,8 @@ S3_ENDPOINT_URL="http://localhost:9000"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MINIO_MANIFEST="${REPO_ROOT}/skills/loom-setup-metaflow/manifests/minio.yaml"
+METAFLOW_MANIFEST="${REPO_ROOT}/skills/loom-setup-metaflow/manifests/metaflow.yaml"
+METAFLOW_MD_IMAGE="netflixoss/metaflow_metadata_service:latest"
 ENV_FILE="${REPO_ROOT}/.env.metaflow"
 
 # ---------------------------------------------------------------------------
@@ -169,7 +171,30 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7) Write the sourceable env file with the 7 exports (gitignored). Overwriting
+# 6b) Deploy the Metaflow metadata SERVICE + its Postgres, so Loom registers runs
+#     to a real service (METAFLOW_DEFAULT_METADATA=service) instead of local
+#     ~/.metaflow files. The netflixoss image is amd64-only; minikube's containerd
+#     won't PULL it on Apple Silicon (no arm64 manifest), but it RUNS once loaded
+#     (colima emulates amd64). So: host-pull (emulated) -> minikube image load.
+# ---------------------------------------------------------------------------
+step "Loading + deploying the Metaflow metadata service + Postgres"
+if docker pull --platform linux/amd64 "${METAFLOW_MD_IMAGE}" >/dev/null 2>&1 \
+   && minikube image load "${METAFLOW_MD_IMAGE}" >/dev/null 2>&1; then
+  info "metadata-service image loaded into the node"
+else
+  info "could not preload ${METAFLOW_MD_IMAGE}; if the metadata pod ImagePullBackOffs,"
+  info "  run: docker pull --platform linux/amd64 ${METAFLOW_MD_IMAGE} && minikube image load ${METAFLOW_MD_IMAGE}"
+fi
+kubectl apply -n "${NAMESPACE}" -f "${METAFLOW_MANIFEST}"
+if kubectl wait -n "${NAMESPACE}" --for=condition=available --timeout=240s \
+    deployment/metaflow-db deployment/metaflow-metadata; then
+  info "Metaflow metadata service is available (Postgres-backed)"
+else
+  info "metadata service not ready yet; inspect: kubectl -n ${NAMESPACE} get pods,events"
+fi
+
+# ---------------------------------------------------------------------------
+# 7) Write the sourceable env file with the exports (gitignored). Overwriting
 #    is intentional and safe: the values are fixed local-dev settings.
 # ---------------------------------------------------------------------------
 step "Writing the datastore env file: ${ENV_FILE}"
@@ -185,21 +210,28 @@ export METAFLOW_DATASTORE_SYSROOT_S3=${DATASTORE_SYSROOT}
 export METAFLOW_S3_ENDPOINT_URL=${S3_ENDPOINT_URL}
 export AWS_ACCESS_KEY_ID=${MINIO_USER}
 export AWS_SECRET_ACCESS_KEY=${MINIO_PASSWORD}
-export METAFLOW_DEFAULT_METADATA=local
+export METAFLOW_DEFAULT_METADATA=service
+export METAFLOW_SERVICE_URL=http://localhost:8080/
 export METAFLOW_USER=\$(whoami)
 EOF
-info "wrote 7 exports to ${ENV_FILE}"
+info "wrote the datastore + metadata-service exports to ${ENV_FILE}"
 
 # ---------------------------------------------------------------------------
 # Done -- print the port-forward command + the verify step.
 # ---------------------------------------------------------------------------
 step "Setup complete -- next steps"
 cat <<EOF
-1) Start the minio port-forward in a SEPARATE terminal (keep it running):
+1) Start the port-forwards in a SEPARATE terminal (keep them running):
 
-     kubectl port-forward -n ${NAMESPACE} svc/minio 9000:9000 9001:9001
+     kubectl port-forward -n ${NAMESPACE} svc/minio 9000:9000 9001:9001 &
+     kubectl port-forward -n ${NAMESPACE} svc/metaflow-metadata 8080:8080 &
 
-   (minio API on :9000, console on :9001 -- ${MINIO_USER} / ${MINIO_PASSWORD})
+   Local dashboards & endpoints:
+     - minio console (browse the datastore)         http://localhost:9001
+         login: ${MINIO_USER} / ${MINIO_PASSWORD}
+     - Metaflow metadata service (Loom registers     http://localhost:8080
+       runs here; the Client API reads it -- NOT ~/.metaflow files)
+     - Loom's own run views (no service needed)       loom report / loom datasets / loom viz
 
 2) Source the env and verify with the read-only doctor (must end PASS):
 

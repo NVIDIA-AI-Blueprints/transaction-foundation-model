@@ -1,0 +1,96 @@
+# Loom local Metaflow — the metadata SERVICE + its Postgres, on the same minikube
+# as minio. This is what makes Loom register runs to a real Metaflow *service*
+# (METAFLOW_DEFAULT_METADATA=service) instead of local ~/.metaflow files, so the
+# Client API + the UI read one shared source of truth.
+#
+# ⚠ Apple-Silicon note: the netflixoss/metaflow_* images are amd64-only. minikube's
+# containerd will NOT *pull* them (no arm64 manifest), but it WILL *run* one that
+# was `minikube image load`ed (host pulls it under colima's emulation, then it's
+# pushed into the node, which runs it emulated). So the installer does:
+#   docker pull --platform linux/amd64 netflixoss/metaflow_metadata_service:latest
+#   minikube image load netflixoss/metaflow_metadata_service:latest
+# and these Deployments use imagePullPolicy: IfNotPresent (never pull).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metaflow-db
+  namespace: loom
+  labels: { app: metaflow-db }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: metaflow-db } }
+  template:
+    metadata: { labels: { app: metaflow-db } }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine        # multi-arch — pulls fine on arm64
+          env:
+            - { name: POSTGRES_USER, value: metaflow }
+            - { name: POSTGRES_PASSWORD, value: metaflow }
+            - { name: POSTGRES_DB, value: metaflow }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports: [{ containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "metaflow"] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+      volumes:
+        # Ephemeral for local dev (run history resets if the DB pod restarts).
+        # Swap for a PVC if you want it to survive restarts.
+        - { name: data, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: metaflow-db, namespace: loom }
+spec:
+  selector: { app: metaflow-db }
+  ports: [{ port: 5432, targetPort: 5432 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metaflow-metadata
+  namespace: loom
+  labels: { app: metaflow-metadata }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: metaflow-metadata } }
+  template:
+    metadata: { labels: { app: metaflow-metadata } }
+    spec:
+      containers:
+        - name: metadata
+          # amd64-only; loaded into the node via `minikube image load` (see header).
+          image: netflixoss/metaflow_metadata_service:latest
+          imagePullPolicy: IfNotPresent
+          # Default CMD (services/migration_service/run_script.py) applies DB
+          # migrations, then serves the metadata API on MF_METADATA_PORT.
+          env:
+            - { name: MF_METADATA_DB_HOST, value: metaflow-db }
+            - { name: MF_METADATA_DB_PORT, value: "5432" }
+            - { name: MF_METADATA_DB_USER, value: metaflow }
+            - { name: MF_METADATA_DB_PSWD, value: metaflow }
+            - { name: MF_METADATA_DB_NAME, value: metaflow }
+            - { name: MF_METADATA_PORT, value: "8080" }
+            - { name: MF_MIGRATION_PORT, value: "8082" }
+            - { name: LOGLEVEL, value: INFO }
+          ports:
+            - { containerPort: 8080 }   # metadata API (flows + Client API register here)
+            - { containerPort: 8082 }   # migration server
+          readinessProbe:
+            httpGet: { path: /ping, port: 8080 }
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 40
+---
+apiVersion: v1
+kind: Service
+metadata: { name: metaflow-metadata, namespace: loom }
+spec:
+  selector: { app: metaflow-metadata }
+  ports:
+    - { name: metadata, port: 8080, targetPort: 8080 }
+    - { name: migration, port: 8082, targetPort: 8082 }
