@@ -4181,9 +4181,10 @@ def _doctor_probe_metadata_service(env: Mapping[str, str], timeout: float = 3.0)
                 "local ~/.metaflow files, not a service"
             ),
             fix=(
-                "Loom is meant to talk to the Metaflow service -- set "
-                "METAFLOW_DEFAULT_METADATA=service + METAFLOW_SERVICE_URL "
-                "(re-source .env.metaflow), or re-run the setup: " + _DOCTOR_SETUP_FIX
+                "run `loom migrate` to reconcile the stack to the service (it's "
+                "Claude/Codex-guided). Or by hand: set METAFLOW_DEFAULT_METADATA="
+                "service + METAFLOW_SERVICE_URL (re-source .env.metaflow), or re-run "
+                "the setup: " + _DOCTOR_SETUP_FIX
             ),
         )
 
@@ -4472,11 +4473,53 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     # `--fix` prefers a real assistant (claude, else codex) that can read the repo
     # and adapt, over re-printing the brittle static fix steps.
     issues = [c for c in checks if c["status"] != _DOCTOR_PASS]
+
+    # Is `loom migrate` the right remedy? Only when the ENGINE is fine (venv +
+    # both imports PASS) but the STACK checks aren't — that's a "not set up to the
+    # release's desired state" problem the migration reconciles, versus a partial
+    # install (engine broken) which the generic INSTALL.md repair handles. Routing
+    # the stack case to the targeted migration advisor is the no-babysitting path:
+    # one obvious next command instead of a generic "follow the docs".
+    _ENGINE_CHECKS = {"python/venv + import loom", "import metaflow"}
+    _STACK_CHECKS = {
+        "datastore env vars", "datastore reachable", "metadata service",
+        "client-api smoke",
+    }
+    engine_ok = all(
+        c["status"] == _DOCTOR_PASS for c in checks if c["name"] in _ENGINE_CHECKS
+    )
+    stack_unhealthy = any(
+        c["status"] != _DOCTOR_PASS for c in checks if c["name"] in _STACK_CHECKS
+    )
+    try:
+        from loom.migrate import has_applicable
+
+        migrate_is_the_fix = engine_ok and stack_unhealthy and has_applicable()
+    except Exception:  # noqa: BLE001 - the nudge is best-effort, never blocks doctor
+        migrate_is_the_fix = False
+
     if getattr(args, "fix", False):
-        if issues:
-            _doctor_try_agentic_fix(issues)  # replaces this process on success
-        else:
+        if not issues:
             print("\nNothing to fix -- all checks pass.")
+        elif migrate_is_the_fix:
+            # The stack just isn't reconciled to the release's desired state —
+            # route to the targeted migration advisor (it knows the manifest +
+            # the setup), in apply mode, instead of the generic repair.
+            print(
+                "\nThe engine is fine but the local stack isn't at the release's "
+                "desired state -- handing off to `loom migrate` to reconcile it."
+            )
+            from loom.migrate import run_migrate
+
+            return run_migrate(apply=True)  # replaces this process on handoff
+        else:
+            _doctor_try_agentic_fix(issues)  # replaces this process on success
+    elif issues and migrate_is_the_fix:
+        print(
+            "\nTip: run `loom migrate` -- it reconciles the local stack to the "
+            "release's desired state (Claude/Codex-guided, asking before any cluster "
+            "change). For engine/install issues instead, `loom doctor --fix`."
+        )
     elif issues:
         print(
             "\nTip: `loom doctor --fix` lets Claude or Codex resolve these for you "

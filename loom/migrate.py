@@ -44,6 +44,23 @@ def _installed_version() -> Optional[str]:
         return None
 
 
+def has_applicable() -> bool:
+    """Whether any migration manifest applies to the installed version.
+
+    A cheap, side-effect-free check (no doctor run, no handoff) so callers like
+    ``loom doctor`` can decide whether ``loom migrate`` is the relevant remedy.
+    Returns False when loom isn't pip-installed or no manifest matches. Swallows
+    any error (missing deps / malformed index) — a nudge must never crash doctor.
+    """
+    try:
+        installed = _installed_version()
+        if installed is None:
+            return False
+        return bool(_applicable(_load_index(), installed))
+    except Exception:  # noqa: BLE001 - the nudge is best-effort
+        return False
+
+
 def _load_index() -> list[dict]:
     """Parse ``migrations/INDEX.yaml`` into its ascending ``releases`` list."""
     if not INDEX_FILE.is_file():
