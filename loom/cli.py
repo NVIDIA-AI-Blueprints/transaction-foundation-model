@@ -1260,6 +1260,44 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     migrate_parser.set_defaults(func=_cmd_migrate)
 
+    notebook_parser = subparsers.add_parser(
+        "notebook",
+        help="Launch a GPU-backed Jupyter (NeMo container) on Modal, forwarded to your laptop.",
+        description=(
+            "Open an interactive GPU notebook without a local GPU or host setup. "
+            "Loom launches JupyterLab in the same NeMo NGC container it uses for "
+            "remote training, on an on-demand Modal H100, and forwards it back to "
+            "your laptop (the datastore env is forwarded too, so the Metaflow Client "
+            "API works in the notebook). Loom is NOT a notebook IDE -- this is a "
+            "remote-compute launcher: the documented 'remote Jupyter in the NeMo "
+            "container' path, with the host prep / Docker flags / forwarding handled "
+            "for you. Requires the 'modal' package + a Modal token (pip install "
+            "modal; modal token set). Use --dry-run to print what would launch "
+            "without spending."
+        ),
+    )
+    notebook_parser.add_argument(
+        "--gpu", default=None, metavar="TARGET",
+        help=(
+            "Modal launch target: 'modal' (default) or 'modal://<app>'. Falls back "
+            "to the configured gpu target."
+        ),
+    )
+    notebook_parser.add_argument(
+        "--no-datastore", action="store_true",
+        help="Do NOT forward the datastore env (the notebook won't reach the Client API).",
+    )
+    notebook_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the submission spec (app, GPU, image, port, timeout) without launching.",
+    )
+    notebook_parser.add_argument(
+        "--config", default=None, metavar="YAML",
+        help="Optional path to a YAML config file (for the gpu target / Metaflow profile).",
+    )
+    _add_json_flag(notebook_parser)
+    notebook_parser.set_defaults(func=_cmd_notebook)
+
     proxy_parser = subparsers.add_parser(
         "proxy",
         help="Run the Loom model gateway (the central data-collection moat path).",
@@ -4545,6 +4583,67 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
     from loom.migrate import run_migrate
 
     return run_migrate(apply=getattr(args, "apply", False))
+
+
+def _cmd_notebook(args: argparse.Namespace) -> int:
+    """Handle ``loom notebook``: launch a GPU-backed remote Jupyter via Modal.
+
+    Resolves the Modal launch target (``--gpu`` > the configured gpu target >
+    ``modal``), refuses non-Modal targets with an actionable message, then either
+    prints the submission spec (``--dry-run`` / ``--json``, no spend) or launches
+    JupyterLab in the NeMo container on a Modal GPU and forwards it back (blocking
+    for the session). Delegates the launch to :mod:`loom.notebook`.
+
+    Args:
+        args: Parsed arguments for the ``notebook`` subcommand.
+
+    Returns:
+        Process exit code.
+    """
+    from dataclasses import asdict
+
+    from loom.notebook import build_notebook_submission, launch_notebook, routes_to_modal
+
+    config = _build_config(args)
+    gpu_target = (
+        getattr(args, "gpu", None) or getattr(config, "gpu_target", None) or "modal"
+    ).strip()
+
+    if not routes_to_modal(gpu_target):
+        msg = (
+            f"`loom notebook` launches on Modal, but the gpu target {gpu_target!r} is "
+            "not a Modal target. Use `--gpu modal` (or `--gpu modal://<app>`), or set "
+            "the gpu target to modal."
+        )
+        if _json_active(args):
+            _emit_simple_envelope("notebook", successful=False, verdict="REFUSED", error=msg)
+        else:
+            print(msg)
+        return 1
+
+    submission = build_notebook_submission(
+        gpu_target, mount_datastore=not getattr(args, "no_datastore", False)
+    )
+    spec = asdict(submission)
+
+    if _json_active(args) or getattr(args, "dry_run", False):
+        if _json_active(args):
+            _emit_simple_envelope(
+                "notebook", successful=True, summary=spec, verdict="PLANNED"
+            )
+        else:
+            with _verb_prose(args):
+                print("loom notebook -- would launch (dry run):")
+                print(f"  app:       {spec['app_name']}")
+                print(f"  gpu:       {spec['gpu']}")
+                print(f"  image:     {spec['image']}")
+                print(f"  port:      {spec['port']} (forwarded to your laptop)")
+                print(f"  timeout:   {spec['timeout_seconds'] // 3600}h")
+                print(f"  datastore: {'forwarded' if spec['mount_datastore'] else 'NOT forwarded'}")
+                print("\n  Drop --dry-run to launch (needs `modal` + a Modal token).")
+        return 0
+
+    return launch_notebook(submission)
 
 
 def _cmd_datasets(args: argparse.Namespace) -> int:
