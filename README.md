@@ -37,8 +37,11 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
 > This project will download and install additional third-party open source software projects.
 > Please review the license terms of these open source projects before use.
 
+> 📚 **New to foundation models?** Start with the **[documentation](docs/README.md)** — a didactic, level-based learning path (100 → 400) for data scientists, plus guides on adding new datasets (including public blockchain data via BigQuery), a research literature review with improvement ideas, and our experimentation workflow.
+
 ## Table of Contents
 
+- [Documentation](docs/README.md)
 - [Quickstart](#quickstart)
   - [Notebooks](#notebooks)
 - [Deployment](#deployment)
