@@ -4,7 +4,7 @@ Every idea below is (a) motivated by the [literature review](01-literature-revie
 
 Run anything here as a tracked experiment via [Loom](../06-experimentation/01-loom-workflow.md); record verdicts back to the [research KB](https://github.com/ZKAI-Network/research).
 
-**Suggested first wave** (high value-per-effort, in order): E2 → T1 → T2 → E1 → O1 → A1 → D1 → G1.
+**Suggested first wave** (high value-per-effort, in order): E2 → T1 → T2 → E1 → **D5 (customer-driven)** → O1 → A1 → D1 → G1.
 
 ---
 
@@ -126,6 +126,9 @@ Pretrain on chain data, evaluate transfer to TabFormer fraud (and reverse). *No 
 ### D4 — Drift study on real data
 With D1/D2 in place, measure 3/6/12-month degradation (E1's temporal axis) and trial rolling-LoRA refresh ([arXiv:2505.17902](https://arxiv.org/abs/2505.17902)) vs full retrain. Addresses the literature's unsolved-drift gap. **Effort:** L.
 
+### D5 — Next-trade prediction on ZKAI internal trade streams ⭐ customer-driven
+Train on our own [Embed pipeline datasets](../04-data/09-zkai-internal-datasets.md) (enriched DEX trades across Ethereum/Base/Solana, Hyperliquid, Polymarket, Kalshi — plus the ready-made cross-chain interaction mart) with **next-trade prediction for wallets** as the deliverable. The objective is just CLM, so the customer task *is* the pretraining task; evaluate as E1's next-item Prec@K against a popularity/repeat-last-item baseline, on a wallet-disjoint split (T2 applied from day one). Likely **our first production-facing run** — existing customers have asked for exactly this. Sets up the in-house transfer matrix (DEX↔perps↔prediction-markets) as a D3 warm-up. **Effort:** M.
+
 ## I — Infrastructure
 
 ### I1 — Streaming corpus loading
@@ -151,6 +154,7 @@ Wire NeMo AutoModel's PEFT/LoRA recipes to the checkpoint for task adaptation �
 | G1 | graph late-fusion | RiskSEA +0.13 F1; PRAGMA AML −47% | M | no |
 | D1 | MBD scale-up | 950M real txns, open | M–L | yes |
 | D2 | chain corpora | EWE-1; open data moat | M | yes |
+| D5 | next-trade prediction (internal data) | customer demand; CLM = the task | M | yes |
 | D3 | chain↔fiat transfer | no published study — novel | L | yes |
 | I2 | LoRA path | PRAGMA: LoRA ≥ full | M | no (adapter) |
 

@@ -1,6 +1,6 @@
 # Data: Datasets and How to Feed Them In
 
-The model is only as interesting as its corpus. This section covers **what data exists** (the included TabFormer dataset, other public research datasets, and public blockchain data) and **exactly how to turn any of it into a training run** for this repo's pipeline.
+The model is only as interesting as its corpus. This section covers **what data exists** (the included TabFormer dataset, other public research datasets, public blockchain data, and [ZKAI's internal Embed pipeline datasets](09-zkai-internal-datasets.md)) and **exactly how to turn any of it into a training run** for this repo's pipeline.
 
 ## Section map
 
@@ -14,6 +14,7 @@ The model is only as interesting as its corpus. This section covers **what data 
 | [06 — Stellar guide](06-guide-stellar-hubble.md) | Step-by-step for SDF's Hubble dataset — the most payment-like chain data |
 | [07 — Celo & other chains](07-guide-celo-and-other-chains.md) | Celo's special situation post-L2 migration; NEAR, Polkadot, Cardano, Bitcoin-family, XRP |
 | [08 — From raw data to training run](08-from-raw-data-to-training-run.md) | **The universal recipe**: schema mapping → tokenizer steps → corpus → config → train → evaluate |
+| [09 — ZKAI internal datasets](09-zkai-internal-datasets.md) | 🔒 Our Embed pipeline catalog: DEX/Hyperliquid/Polymarket/Kalshi trade streams + the cross-chain mart — **the likely starting point for next-trade prediction work** |
 
 ## Why blockchain data, specifically?
 

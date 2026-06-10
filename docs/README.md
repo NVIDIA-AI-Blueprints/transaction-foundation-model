@@ -19,7 +19,7 @@ The documentation follows a **level scaffolding** (think university course numbe
 | [01 — Getting Started](01-getting-started/01-orientation.md) | Orientation, environment setup, glossary | First contact with the repo |
 | [02 — Concepts](02-concepts/README.md) | Primers on everything you might not know yet (foundation models, tokenization, NeMo, RAPIDS, …) | Whenever a term in the learning path is unfamiliar |
 | [03 — Learning Path](03-learning-path/README.md) | **The core curriculum**: Levels 100 → 400, from big picture to design contracts | In order, at your own pace |
-| [04 — Data](04-data/README.md) | Dataset catalog + step-by-step guides for adding new data — including public blockchain data from BigQuery (EVM, Solana, Stellar, Celo) | When you want to train on new/your own data |
+| [04 — Data](04-data/README.md) | Dataset catalog + step-by-step guides for adding new data — public blockchain data from BigQuery (EVM, Solana, Stellar, Celo) and ZKAI's internal Embed pipeline datasets | When you want to train on new/your own data |
 | [05 — Research](05-research/README.md) | Literature review and concrete ideas for improving this model | When you move from "using" to "researching" |
 | [06 — Experimentation](06-experimentation/README.md) | How we run disciplined experiments with [Loom](https://github.com/ZKAI-Network/loom) | Before you launch your first training run variant |
 
