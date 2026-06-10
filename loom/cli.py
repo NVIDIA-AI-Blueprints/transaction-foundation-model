@@ -1204,8 +1204,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "METAFLOW_S3_ENDPOINT_URL / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY "
             "/ METAFLOW_DEFAULT_METADATA / METAFLOW_USER); datastore reachability "
             "(a socket probe to the METAFLOW_S3_ENDPOINT_URL host:port and/or a "
-            "Metaflow Client API listing); and a `loom datasets`-style Client-API "
-            "smoke that counts ingested data objects (zero is fine). Diagnoses "
+            "Metaflow Client API listing); the Metaflow metadata service health "
+            "(a /ping probe of METAFLOW_SERVICE_URL when metadata=service, so runs "
+            "register to the service and not local ~/.metaflow files); and a `loom "
+            "datasets`-style Client-API smoke that counts ingested data objects "
+            "(zero is fine). Diagnoses "
             "only by default -- it never installs, mutates, or prompts, and never "
             "touches the datastore except through the Metaflow Client API or a TCP "
             "socket probe to the configured endpoint. With `--fix` it additionally "
@@ -3845,6 +3848,11 @@ _DOCTOR_DATASTORE_ENV_VARS = (
 # The endpoint env var whose host:port the reachability probe connects to.
 _DOCTOR_ENDPOINT_ENV_VAR = "METAFLOW_S3_ENDPOINT_URL"
 
+# The metadata-service URL env var. When METAFLOW_DEFAULT_METADATA=service (the
+# verified recipe), Loom registers/reads runs through this service -- NOT local
+# ~/.metaflow files -- so doctor health-checks its /ping endpoint.
+_DOCTOR_SERVICE_URL_ENV_VAR = "METAFLOW_SERVICE_URL"
+
 # The one-liner that re-runs the verified setup + this doctor.
 _DOCTOR_SETUP_FIX = (
     "run the local datastore setup, then re-source the env: "
@@ -4003,7 +4011,7 @@ def _doctor_check_datastore_env(env: Mapping[str, str]) -> dict:
             "all set; unusual selector value(s): " + ", ".join(odd),
             fix=(
                 "the verified local recipe uses METAFLOW_DEFAULT_DATASTORE=s3 + "
-                "METAFLOW_DEFAULT_METADATA=local; double-check these if a verb "
+                "METAFLOW_DEFAULT_METADATA=service; double-check these if a verb "
                 "cannot reach the datastore."
             ),
         )
@@ -4110,6 +4118,97 @@ def _doctor_probe_endpoint(endpoint: str, timeout: float = 3.0) -> dict:
         "datastore reachable",
         _DOCTOR_PASS,
         f"TCP connect to {host}:{port} ok",
+    )
+
+
+def _doctor_probe_metadata_service(env: Mapping[str, str], timeout: float = 3.0) -> dict:
+    """Check (d2): the Metaflow metadata SERVICE is reachable and serving.
+
+    Loom is meant to talk to a Metaflow metadata service, not local
+    ``~/.metaflow`` files -- runs registered locally are invisible to the
+    service, the UI, and other clients. So this check is opinionated:
+
+    * ``METAFLOW_DEFAULT_METADATA=service`` -- the verified recipe. Hit the
+      service's documented ``/ping`` health endpoint (the same one the readiness
+      probe uses). PASS on HTTP 200; FAIL when the URL is unset, unreachable, or
+      answers non-200 (the fix is to port-forward ``svc/metaflow-metadata``).
+    * ``local`` (or unset) -- WARN: metadata is going to files, which contradicts
+      "Loom always talks to Metaflow". The fix points at the service recipe.
+    * anything else -- WARN (unrecognized backend).
+
+    Uses only the stdlib (``urllib``); no Metaflow import and no URI literal --
+    the service URL comes from the environment.
+
+    Args:
+        env: The environment mapping to inspect.
+        timeout: HTTP timeout in seconds for the ``/ping`` probe.
+
+    Returns:
+        The check result.
+    """
+    metadata = (env.get("METAFLOW_DEFAULT_METADATA") or "").strip().lower()
+    if metadata != "service":
+        return _doctor_check(
+            "metadata service",
+            _DOCTOR_WARN,
+            (
+                f"METAFLOW_DEFAULT_METADATA={metadata or 'unset'!r}: runs track to "
+                "local ~/.metaflow files, not a service"
+            ),
+            fix=(
+                "Loom is meant to talk to the Metaflow service -- set "
+                "METAFLOW_DEFAULT_METADATA=service + METAFLOW_SERVICE_URL "
+                "(re-source .env.metaflow), or re-run the setup: " + _DOCTOR_SETUP_FIX
+            ),
+        )
+
+    url = (env.get(_DOCTOR_SERVICE_URL_ENV_VAR) or "").strip()
+    if not url:
+        return _doctor_check(
+            "metadata service",
+            _DOCTOR_FAIL,
+            f"METAFLOW_DEFAULT_METADATA=service but {_DOCTOR_SERVICE_URL_ENV_VAR} is unset",
+            fix=(
+                f"set {_DOCTOR_SERVICE_URL_ENV_VAR} (e.g. http://localhost:8080/) -- "
+                + _DOCTOR_SETUP_FIX
+            ),
+        )
+
+    import urllib.error
+    import urllib.request
+
+    ping = url.rstrip("/") + "/ping"
+    try:
+        with urllib.request.urlopen(ping, timeout=timeout) as resp:  # noqa: S310 - local http
+            code = getattr(resp, "status", None) or resp.getcode()
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+    except OSError as exc:
+        return _doctor_check(
+            "metadata service",
+            _DOCTOR_FAIL,
+            f"cannot reach {ping} ({exc.__class__.__name__}: {exc})",
+            fix=(
+                "port-forward the metadata service, e.g. "
+                "`kubectl port-forward -n loom svc/metaflow-metadata 8080:8080`, "
+                "or re-run the setup -- " + _DOCTOR_SETUP_FIX
+            ),
+        )
+
+    if code != 200:
+        return _doctor_check(
+            "metadata service",
+            _DOCTOR_FAIL,
+            f"{ping} answered HTTP {code} (expected 200)",
+            fix=(
+                "the metadata pod may still be migrating/starting; check "
+                "`kubectl -n loom get pods` and retry."
+            ),
+        )
+    return _doctor_check(
+        "metadata service",
+        _DOCTOR_PASS,
+        f"{ping} -> 200 (Loom registers runs to the service, not files)",
     )
 
 
@@ -4302,6 +4401,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         _doctor_check_metaflow(),
         _doctor_check_datastore_env(env),
         _doctor_probe_endpoint(env.get(_DOCTOR_ENDPOINT_ENV_VAR, "")),
+        _doctor_probe_metadata_service(env),
         _doctor_client_api_smoke(config),
     ]
 
