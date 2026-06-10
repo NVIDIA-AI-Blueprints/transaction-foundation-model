@@ -116,22 +116,40 @@ transcript.
 After the script completes, do the two manual steps it prints and verify:
 
 ```bash
-# In a SEPARATE terminal, keep the minio port-forward alive:
-kubectl port-forward -n loom svc/minio 9000:9000 9001:9001
+# In a SEPARATE terminal, keep the port-forwards alive (datastore + metadata + UI):
+kubectl port-forward -n loom svc/minio 9000:9000 9001:9001 &
+kubectl port-forward -n loom svc/metaflow-metadata 8080:8080 &
+kubectl port-forward -n loom svc/metaflow-ui 3000:3000 &
 
 # Then source the env and run the read-only doctor (must end VERDICT: PASS):
 source .env.metaflow && loom doctor
 ```
 
 - `loom doctor` is **read-only** (it never prompts/mutates) — it checks the venv +
-  `import loom`, `import metaflow`, the 7 datastore env vars, a TCP socket probe to
-  `METAFLOW_S3_ENDPOINT_URL`, and a Client-API smoke counting ingested data objects
-  (zero is fine). It exits 0 iff no check FAILs.
+  `import loom`, `import metaflow`, the datastore env vars, a TCP socket probe to
+  `METAFLOW_S3_ENDPOINT_URL`, the **metadata service** (`/ping` on `METAFLOW_SERVICE_URL`
+  when `METAFLOW_DEFAULT_METADATA=service` — so runs register to the service, not local
+  `~/.metaflow` files), and a Client-API smoke counting ingested data objects (zero is
+  fine). It exits 0 iff no check FAILs.
 - **The exit gate is `loom doctor` reading PASS.** If any line is FAIL, read its
-  `fix:` line back to the user and act on it (commonly: the port-forward is not
-  running, so the endpoint probe FAILs → start the port-forward and re-run; or the env
-  was not sourced → `source .env.metaflow`). Do not declare the setup done until the
-  VERDICT line reads `PASS`.
+  `fix:` line back to the user and act on it (commonly: a port-forward is not running,
+  so the endpoint or metadata-service probe FAILs → start the port-forward and re-run;
+  or the env was not sourced → `source .env.metaflow`). Do not declare the setup done
+  until the VERDICT line reads `PASS`.
+
+### Local dashboards (hand these to the user)
+
+All three are reached through the port-forwards above — keep them running:
+
+| Dashboard | URL | What it shows |
+|---|---|---|
+| **Metaflow UI** | http://localhost:3000 | the visual dashboard — runs, DAGs, timelines, artifacts (the SPA's `/api` is proxied to the UI backend in-cluster, so this one port-forward is all the browser needs) |
+| **minio console** | http://localhost:9001 | browse the S3 datastore — login `minioadmin` / `minioadmin123` (local-dev only) |
+| **Metaflow metadata service** | http://localhost:8080 | the metadata API Loom registers/reads runs through (`/ping`, `/flows`, …) |
+
+`loom report` / `loom datasets` / `loom viz` give Loom's own run views from the CLI
+(no port-forward needed). The first time the UI is set up, the installer builds the
+`metaflow-ui` image from source — a one-time native build; on later runs it is reused.
 
 Then smoke the datastore through the Client API:
 
@@ -144,8 +162,10 @@ loom datasets   # lists ingested data objects (an empty list on a fresh datastor
 - **Narrate** what was installed vs already-present, that the cluster is up in the
   `loom` namespace, and that `loom doctor` reads **PASS**.
 - **Hand back the deliverable:** the sourceable **`.env.metaflow`** (source it in any
-  shell that runs a datastore verb) and the live port-forward command. Remind the user
-  the port-forward must stay running for the datastore to be reachable.
+  shell that runs a datastore verb), the live port-forward commands, and the **local
+  dashboards** (Metaflow UI http://localhost:3000, minio console http://localhost:9001,
+  metadata service http://localhost:8080 — see the table above). Remind the user the
+  port-forwards must stay running for the datastore/UI to be reachable.
 - **Next step:** the datastore is ready — point to **`loom-connect`** (`loom ingest`)
   to register a source as a data object, then the lifecycle verbs (`loom-eda`,
   `loom-features`, `loom-validate`, …). Mention the teardown (`minikube delete`) is the
