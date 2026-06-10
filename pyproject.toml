@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loom"
-version = "0.1.0.dev0"
-description = "A general-purpose, domain-neutral automated ML engine with a ports-and-adapters provider architecture."
+version = "0.2.0"
+description = "An agentic CLI for the full data-science lifecycle, on a ports-and-adapters provider architecture."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
@@ -30,6 +30,12 @@ dependencies = [
     # a stripped environment still runs the one-shot subcommands.
     "rich",
     "prompt_toolkit",
+    # The migration advisor (loom/migrate.py) parses migrations/*.yaml and compares
+    # PEP 440 versions. Both are pure-Python and already present transitively (PyYAML
+    # via omegaconf, packaging via aideml's stack); pinned directly because
+    # loom.migrate imports them so the dependency is honest, not incidental.
+    "PyYAML",
+    "packaging",
 ]
 
 # Optional extras.

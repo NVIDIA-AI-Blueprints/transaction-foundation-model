@@ -1235,6 +1235,31 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_json_flag(doctor_parser)
     doctor_parser.set_defaults(func=_cmd_doctor)
 
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="LLM-guided upgrade: reconcile this machine to a release's desired state.",
+        description=(
+            "The LLM-guided half of `loom update` (the mechanical pull/rebuild/"
+            "reinstall is separate). Reads the installed loom version, selects the "
+            "applicable migrations/<version>.yaml manifest(s) (the loom-migration/1 "
+            "format), and hands them plus the live `loom doctor --json` state to a "
+            "local assistant (claude, else codex) to reconcile -- run only the "
+            "transitions whose desired state is unmet, skip already-applied ones, and "
+            "confirm before any cluster mutation. A no-op when nothing is newer than "
+            "the installed version; prints the applicable manifests when no assistant "
+            "is on PATH. `loom update` calls this automatically after updating."
+        ),
+    )
+    migrate_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Let the assistant EXECUTE the reconcile (still pausing for confirmation "
+            "before any cluster mutation), versus the default advisory propose-only."
+        ),
+    )
+    migrate_parser.set_defaults(func=_cmd_migrate)
+
     proxy_parser = subparsers.add_parser(
         "proxy",
         help="Run the Loom model gateway (the central data-collection moat path).",
@@ -4420,10 +4445,24 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         # doctor's typed summary is the per-check result list + the rolled-up
         # verdict line. The headline VERDICT is PASS (ok) / FAIL; doctor exits 1
         # iff a check FAILed (a WARN never fails), so success mirrors `ok`.
+        # Surface the installed loom version as a first-class, machine-readable
+        # field (not only buried in check #1's free-text detail) so the migration
+        # advisor can reconcile `version_is_target` without regexing prose.
+        from importlib.metadata import PackageNotFoundError
+        from importlib.metadata import version as _dist_version
+
+        try:
+            _loom_version = _dist_version("loom")
+        except PackageNotFoundError:
+            _loom_version = None
         _emit_simple_envelope(
             "doctor",
             successful=ok,
-            summary={"checks": checks, "verdict_line": verdict},
+            summary={
+                "loom_version": _loom_version,
+                "checks": checks,
+                "verdict_line": verdict,
+            },
             verdict="PASS" if ok else "FAIL",
             error=None if ok else verdict,
         )
@@ -4444,6 +4483,25 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             "(falls back to the manual fixes above if neither is installed)."
         )
     return 0 if ok else 1
+
+
+def _cmd_migrate(args: argparse.Namespace) -> int:
+    """Handle ``loom migrate``: LLM-guided reconcile to a release's desired state.
+
+    Delegates to :func:`loom.migrate.run_migrate`, which selects the applicable
+    ``migrations/<version>.yaml`` manifests, captures the live ``loom doctor --json``
+    state, and hands them to a local assistant (reusing the ``doctor --fix`` handoff)
+    — or prints the manifests when none is installed. A no-op when up to date.
+
+    Args:
+        args: Parsed arguments for the ``migrate`` subcommand (``--apply``).
+
+    Returns:
+        Process exit code.
+    """
+    from loom.migrate import run_migrate
+
+    return run_migrate(apply=getattr(args, "apply", False))
 
 
 def _cmd_datasets(args: argparse.Namespace) -> int:
