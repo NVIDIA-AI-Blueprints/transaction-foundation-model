@@ -249,6 +249,16 @@ adapters:
   install/auth message. Any other target → `REFUSED_UNKNOWN_GPU_TARGET` (listing
   the supported launchers). The container image is read from `LOOM_NEMO_IMAGE` at
   the point of use (env only, never committed).
+
+  **The same seam powers `loom notebook` (`loom/notebook.py`).** Interactive GPU
+  notebooks are a *different use of one remote-compute seam*, not a new subsystem:
+  `loom notebook` reuses this launcher's image / GPU class / app-parsing / lazy
+  `_require_modal` to start **JupyterLab in the same NeMo container** on a Modal GPU
+  and forward it to the laptop (the datastore env is forwarded so the Metaflow
+  Client API works in the session). This is a deliberate **scope boundary**: Loom
+  *orchestrates* remote notebooks (a launcher) but is **not** a notebook IDE/host —
+  hosting stays with Modal. Same posture as training: a pure `build_notebook_submission`
+  is unit-tested with no Modal installed; the live launch is lazy + gated.
 - **`local`** — a **torch-free CPU stand-in** (PPMI + TruncatedSVD sequence
   embeddings) that actually builds a backbone/embeddings end-to-end, deterministically
   and in seconds, with zero new dependencies. It is the conformance/CI/dev default

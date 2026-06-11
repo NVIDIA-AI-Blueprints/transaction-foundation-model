@@ -56,6 +56,7 @@ declares an **approval tier** enforced beneath the model.
 | `deploy` | promote a **validated** solution — gated on `validate==PASS` | **irreversible/external** |
 | `ops` | run health + leaderboard + data-object drift | read-only |
 | `collab` | a sanitized, shareable bundle (card + lineage) | workspace-write (send is external) |
+| `notebook` | launch an interactive **GPU Jupyter** in the NeMo container on Modal, forwarded to your laptop (Loom *orchestrates* remote notebooks — it is **not** a notebook IDE/host) | **expensive · remote GPU** |
 
 **Approval matrix** (enforced by the client/hook layer, not by prompt text):
 
@@ -63,7 +64,7 @@ declares an **approval tier** enforced beneath the model.
 |---|---|---|
 | read-only | `eda`, `viz`, `report`, `ops` | never prompts |
 | workspace-write | `features`, `validate`, `optimize`, `collab` (build) | light/auto, network off by default |
-| expensive / mutate | `train` (GPU), `pipeline`'s optimize stage | **always gate** — cost/rows shown |
+| expensive / mutate | `train` (GPU), `pipeline`'s optimize stage, `notebook` (remote GPU) | **always gate** — cost/rows shown |
 | irreversible / external | `deploy --apply`, `collab --send`, the real `train --launch` | **always gate, never model-auto-invoked** |
 
 **Composition = artifact hand-off + machine-checkable exit gates:** `eda` leakage
@@ -71,6 +72,16 @@ flags block `features`; a `features` data object feeds `pipeline`/`validate`; a
 `validate` `VERDICT==PASS` is required by `deploy` (a sub-threshold validate
 **BLOCKS** it). The two irreversible verbs are **safe by default** — `deploy`
 plans unless `--apply` (and the gate must ALLOW); `collab` builds unless `--send`.
+
+> **Notebooks: Loom orchestrates, it does not host.** For interactive GPU work
+> (e.g. the NeMo-container Jupyter flow), `loom notebook` launches JupyterLab in
+> that same container on an on-demand Modal GPU and forwards it to your laptop —
+> the datastore env comes too, so the Metaflow Client API works in the notebook.
+> So a data scientist on a fresh Mac (no local GPU, no host setup) gets the
+> documented remote-notebook environment with one command. Loom is **not** a
+> notebook IDE/host — that stays with Modal; Loom is the launcher. (`loom notebook
+> --dry-run` shows what it would launch without spending; the live launch needs
+> `pip install modal` + a Modal token.)
 
 ---
 
