@@ -13,10 +13,11 @@ change. The split is simple: **tutorials teach, examples assert.** (The `run.sh`
 in each tutorial is itself self-checking, so a tutorial doubles as a smoke test —
 but its job is to walk you through the *why*, not to be the test suite.)
 
-All tutorials are **keyless**: they talk to your live local Metaflow + minio
-datastore with no API key and no cost. Data is synthesized inline (deterministic,
-seeded, no downloads). Each ingests under a unique dataset name so repeat and
-concurrent runs never collide.
+The lifecycle tutorials (**01–06**) are **keyless**: they talk to your live local
+Metaflow + minio datastore with no API key and no cost. Data is synthesized inline
+(deterministic, seeded, no downloads). Each ingests under a unique dataset name so
+repeat and concurrent runs never collide. (**07** is the one exception — an
+interactive GPU notebook on Modal that **spends**; see its note below.)
 
 ## The tutorials
 
@@ -28,6 +29,11 @@ concurrent runs never collide.
 | 04 | [`04-trustworthy-validation`](./04-trustworthy-validation/README.md) | Validation you can trust + a model card: `validate --sensitive` runs CV + sealed holdout + calibration/Brier + per-slice fairness + leakage checks + a VERDICT, then `report` builds the card. | `ingest` · `validate` · `report` |
 | 05 | [`05-build-a-backbone`](./05-build-a-backbone/README.md) | Building a model backbone with no GPU: the keyless model-builder (`train`) seam — build a CPU backbone at probe budget (STATUS BUILT + sha256 fingerprint), and watch the GPU path refuse cleanly (`REFUSED_NO_GPU_TARGET`). | `ingest` · `train` |
 | 06 | [`06-monitoring-drift`](./06-monitoring-drift/README.md) | Monitoring data drift in production: the read-only monitoring tier — `ops --flow` for run health and `ops --dataset --reference` to compare a shifted batch against a reference. | `ingest` · `validate` · `ops` |
+| 07 | [`07-gpu-notebook`](./07-gpu-notebook/README.md) | **Interactive GPU notebooks — needs Modal, NOT keyless, spends.** `loom notebook` launches JupyterLab in the NeMo container on an on-demand Modal GPU and forwards it to your laptop (datastore included), so a DS on a fresh Mac gets a GPU notebook with no host setup. Loom *orchestrates* remote notebooks; it is not a notebook host. | `notebook` (Modal GPU) |
+
+> **01–06 are keyless and free** (local datastore, no API key, no spend). **07 is the
+> exception** — it launches a real GPU on Modal and **costs money**; it needs a Modal
+> account + token. Its `run.sh` only smoke-tests the free `--dry-run` planning path.
 
 ## How to run
 
