@@ -396,7 +396,7 @@ def _emit_simple_envelope(
 # contract, so they are dropped from the manifest's required/optional lists:
 #   - ``json``   is injected by the tool wrapper itself (it always appends --json)
 #   - ``help``   is argparse's own action
-_VERB_MANIFEST_EXCLUDE_ARGS = {"json", "help"}
+_VERB_MANIFEST_EXCLUDE_ARGS = {"json", "help", "serve"}
 
 
 def _verb_manifest_args(parser: argparse.ArgumentParser) -> tuple[list[str], list[str]]:
@@ -1286,6 +1286,22 @@ def _build_parser() -> argparse.ArgumentParser:
             "to the configured gpu target."
         ),
     )
+    notebook_parser.add_argument(
+        "--launch", action="store_true",
+        help="Actually spin up the GPU notebook (real spend) and return its URL. Off by "
+             "default (plan only); gated like train --launch.",
+    )
+    notebook_parser.add_argument(
+        "--stop", action="store_true",
+        help="Tear down the running notebook for this app (stops the GPU + billing).",
+    )
+    notebook_parser.add_argument(
+        "--status", action="store_true",
+        help="Report a running notebook's status + URL (for one still provisioning).",
+    )
+    # Hidden: the in-process BLOCKING server that --launch backgrounds. Excluded
+    # from the verb manifest (not a model-facing tool param) like --json/--help.
+    notebook_parser.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)
     notebook_parser.add_argument(
         "--no-datastore", action="store_true",
         help="Do NOT forward the datastore env (the notebook won't reach the Client API).",
@@ -4605,7 +4621,14 @@ def _cmd_notebook(args: argparse.Namespace) -> int:
     """
     from dataclasses import asdict
 
-    from loom.notebook import build_notebook_submission, launch_notebook, routes_to_modal
+    from loom.notebook import (
+        build_notebook_submission,
+        launch_notebook,
+        notebook_status,
+        routes_to_modal,
+        spawn_notebook,
+        stop_notebook,
+    )
 
     config = _build_config(args)
     gpu_target = (
@@ -4629,24 +4652,59 @@ def _cmd_notebook(args: argparse.Namespace) -> int:
     )
     spec = asdict(submission)
 
-    if _json_active(args) or getattr(args, "dry_run", False):
+    # Hidden: the in-process BLOCKING server that --launch backgrounds (detached).
+    if getattr(args, "serve", False):
+        return launch_notebook(submission)
+
+    # --stop / --status: background-notebook lifecycle, keyed by the Modal app name.
+    if getattr(args, "stop", False) or getattr(args, "status", False):
+        res = (
+            stop_notebook(submission.app_name)
+            if getattr(args, "stop", False)
+            else notebook_status(submission.app_name)
+        )
+        if _json_active(args):
+            _emit_simple_envelope("notebook", successful=True, summary=res, verdict=res.get("status"))
+        else:
+            with _verb_prose(args):
+                if res.get("url"):
+                    print(f"Notebook ({res['status']}): {res['url']}")
+                else:
+                    print(f"Notebook {res.get('status')}: {res.get('message', '')}")
+        return 0
+
+    # --launch: spin it up in the background (NON-BLOCKING) and return the URL.
+    if getattr(args, "launch", False):
+        res = spawn_notebook(submission)
+        ok = res.get("status") != "ERROR"
         if _json_active(args):
             _emit_simple_envelope(
-                "notebook", successful=True, summary=spec, verdict="PLANNED"
+                "notebook", successful=ok, summary=res, verdict=res.get("status"),
+                error=None if ok else res.get("message"),
             )
         else:
             with _verb_prose(args):
-                print("loom notebook -- would launch (dry run):")
-                print(f"  app:       {spec['app_name']}")
-                print(f"  gpu:       {spec['gpu']}")
-                print(f"  image:     {spec['image']}")
-                print(f"  port:      {spec['port']} (forwarded to your laptop)")
-                print(f"  timeout:   {spec['timeout_seconds'] // 3600}h")
-                print(f"  datastore: {'forwarded' if spec['mount_datastore'] else 'NOT forwarded'}")
-                print("\n  Drop --dry-run to launch (needs `modal` + a Modal token).")
-        return 0
+                if res.get("url"):
+                    print(f"Your GPU notebook is up:\n  {res['url']}")
+                    print("\n  Stop it (releases the GPU) with: loom notebook --stop")
+                else:
+                    print(f"Notebook {res.get('status')}: {res.get('message', '')}")
+        return 0 if ok else 1
 
-    return launch_notebook(submission)
+    # Default (and --dry-run): PLAN only — print the spec, no spend.
+    if _json_active(args):
+        _emit_simple_envelope("notebook", successful=True, summary=spec, verdict="PLANNED")
+    else:
+        with _verb_prose(args):
+            print("loom notebook -- plan (no spend; add --launch to spin it up):")
+            print(f"  app:       {spec['app_name']}")
+            print(f"  gpu:       {spec['gpu']}")
+            print(f"  image:     {spec['image']}")
+            print(f"  port:      {spec['port']} (forwarded to your laptop)")
+            print(f"  timeout:   {spec['timeout_seconds'] // 3600}h")
+            print(f"  datastore: {'forwarded' if spec['mount_datastore'] else 'NOT forwarded'}")
+            print("\n  Spin it up with --launch (needs `modal` + a Modal token).")
+    return 0
 
 
 def _cmd_datasets(args: argparse.Namespace) -> int:

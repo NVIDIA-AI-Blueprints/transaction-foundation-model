@@ -165,3 +165,57 @@ def test_datastore_env_forwarded_only_when_set(monkeypatch) -> None:
         "METAFLOW_DEFAULT_METADATA": "service",
         "METAFLOW_SERVICE_URL": "http://localhost:8080/",
     }
+
+
+# ---------------------------------------------------------------------------
+# Background lifecycle: spawn (non-blocking, returns URL) / status / stop.
+# ---------------------------------------------------------------------------
+
+
+def test_read_url_parses_marker(tmp_path) -> None:
+    """_read_url extracts the LOOM_NOTEBOOK_URL marker from a server log."""
+    log = tmp_path / "x.log"
+    log.write_text("boot\nLOOM_NOTEBOOK_URL=https://t.modal.host/lab?token=zz\ntail\n")
+    assert nb._read_url(log) == "https://t.modal.host/lab?token=zz"
+    assert nb._read_url(tmp_path / "missing.log") is None
+
+
+def test_status_and_stop_with_no_running_notebook() -> None:
+    """status/stop for an app with no running notebook report STOPPED, never crash."""
+    app = "tut-no-such-running-app-zzz"
+    assert nb.notebook_status(app)["status"] == "STOPPED"
+    assert nb.stop_notebook(app)["status"] == "STOPPED"
+
+
+def test_spawn_notebook_is_nonblocking_and_returns_status(monkeypatch) -> None:
+    """spawn_notebook backgrounds `loom notebook --serve` and returns promptly.
+
+    With a stubbed Popen (no real process) and wait_seconds=0, it does not block on
+    a URL — it returns LAUNCHING with the app name, having recorded the argv that
+    backgrounds the hidden --serve server.
+    """
+    recorded = {}
+
+    class _FakeProc:
+        pid = 4242
+
+        def poll(self):
+            return None  # "still running"
+
+    import subprocess as _sp
+
+    def _fake_popen(argv, **kwargs):
+        recorded["argv"] = argv
+        recorded["new_session"] = kwargs.get("start_new_session")
+        return _FakeProc()
+
+    monkeypatch.setattr(_sp, "Popen", _fake_popen)
+    sub = build_notebook_submission("modal://team-x")
+    res = nb.spawn_notebook(sub, wait_seconds=0)
+
+    assert res["status"] == "LAUNCHING"  # no URL yet, but did not block
+    assert res["app_name"] == "team-x"
+    assert res["pid"] == 4242
+    # It backgrounds the hidden in-process server, detached.
+    assert "--serve" in recorded["argv"] and "notebook" in recorded["argv"]
+    assert recorded["new_session"] is True

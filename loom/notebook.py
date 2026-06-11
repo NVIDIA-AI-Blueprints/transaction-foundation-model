@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
 
 # Reuse the exact Modal+NeMo seam the training launcher already established: same
 # container image resolution, same GPU class, same app-name parsing, same lazy
@@ -168,6 +170,7 @@ def launch_notebook(submission: NotebookSubmission) -> int:
         gpu=submission.gpu,
         image=image,
         timeout=submission.timeout_seconds,
+        serialized=True,  # _serve is nested (not global scope); required by modal>=1.x
     )
     def _serve(env: dict, tok: str) -> None:  # pragma: no cover - runs remotely on the GPU
         # Inside the NeMo container on the GPU: export the forwarded datastore env
@@ -178,7 +181,11 @@ def launch_notebook(submission: NotebookSubmission) -> int:
 
         _os.environ.update(env)
         with modal.forward(submission.port) as tunnel:
-            print(f"\n  Open your GPU notebook:  {tunnel.url}/lab?token={tok}\n", flush=True)
+            url = f"{tunnel.url}/lab?token={tok}"
+            # Machine-parseable marker so the detached parent (spawn_notebook) can
+            # capture the URL from this process's log, plus a human line.
+            print(f"LOOM_NOTEBOOK_URL={url}", flush=True)
+            print(f"\n  Open your GPU notebook:  {url}\n", flush=True)
             subprocess.run(
                 [
                     "jupyter", "lab",
@@ -190,14 +197,131 @@ def launch_notebook(submission: NotebookSubmission) -> int:
             )
 
     print(
-        f"Launching a {submission.gpu} notebook in {submission.image} on Modal app "
-        f"'{submission.app_name}' (up to {submission.timeout_seconds // 3600}h). The "
-        "URL will print below once the container is up; keep this terminal open for "
-        "the session."
+        f"Serving a {submission.gpu} notebook in {submission.image} on Modal app "
+        f"'{submission.app_name}' (up to {submission.timeout_seconds // 3600}h)."
     )
     with app.run():
         _serve.remote(datastore_env, token)
     return 0
+
+
+# --- Background lifecycle: spin up (detached), report URL, stop ----------------
+# `loom notebook --launch` must be NON-BLOCKING so the agent can spin a notebook up
+# and tell the user its URL. So it backgrounds the blocking server above (run via
+# the hidden `loom notebook --serve`) in a detached session, captures the URL from
+# its log, and returns — the GPU notebook keeps running until `--stop`.
+
+_URL_MARKER = "LOOM_NOTEBOOK_URL="
+
+
+def _state_dir() -> Path:
+    """Per-user state dir for background notebook logs + pids (~/.loom/notebooks)."""
+    d = Path(os.path.expanduser("~/.loom/notebooks"))
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _read_url(log: Path) -> Optional[str]:
+    """Read the captured notebook URL from a server log, or None if not up yet."""
+    try:
+        for line in log.read_text(errors="ignore").splitlines():
+            if line.startswith(_URL_MARKER):
+                return line[len(_URL_MARKER):].strip()
+    except OSError:
+        pass
+    return None
+
+
+def spawn_notebook(submission: NotebookSubmission, wait_seconds: int = 45) -> dict:
+    """Spin the notebook up in a DETACHED background process and return its URL.
+
+    Non-blocking: backgrounds ``loom notebook --serve`` (the blocking server) in a
+    new session so the GPU notebook outlives this call, then polls its log for the
+    URL. Returns ``LAUNCHED`` + url when the tunnel is up, or ``LAUNCHING`` (the
+    first launch pulls the container, minutes) with the URL to be fetched via
+    :func:`notebook_status`. ``--stop`` tears it down. Returns a JSON-able dict.
+    """
+    import subprocess
+    import sys
+    import time
+
+    sd = _state_dir()
+    app = submission.app_name
+    log = sd / f"{app}.log"
+    pidf = sd / f"{app}.pid"
+
+    argv = [sys.executable, "-m", "loom", "notebook", "--serve", "--gpu", submission.gpu_target]
+    if not submission.mount_datastore:
+        argv.append("--no-datastore")
+
+    logf = open(log, "w")  # noqa: SIM115 - handed to the detached child; closed on its exit
+    proc = subprocess.Popen(
+        argv, stdout=logf, stderr=subprocess.STDOUT,
+        start_new_session=True, env=dict(os.environ),
+    )
+    pidf.write_text(str(proc.pid))
+
+    deadline = time.time() + max(0, wait_seconds)
+    url = _read_url(log)
+    while url is None and time.time() < deadline:
+        if proc.poll() is not None:  # the server exited early -> a real failure
+            return {
+                "status": "ERROR", "url": None, "app_name": app, "log": str(log),
+                "message": f"the launch process exited early (code {proc.returncode}); see {log}",
+            }
+        time.sleep(2)
+        url = _read_url(log)
+
+    if url:
+        return {"status": "LAUNCHED", "url": url, "app_name": app, "pid": proc.pid, "log": str(log)}
+    return {
+        "status": "LAUNCHING", "url": None, "app_name": app, "pid": proc.pid, "log": str(log),
+        "message": "provisioning — the first launch pulls the container (~minutes). "
+                   "Ask for the status (or `loom notebook --status`) for the URL.",
+    }
+
+
+def notebook_status(app_name: str) -> dict:
+    """Report a background notebook's status + URL (LAUNCHED / LAUNCHING / STOPPED)."""
+    sd = _state_dir()
+    log = sd / f"{app_name}.log"
+    pidf = sd / f"{app_name}.pid"
+    url = _read_url(log)
+    alive = False
+    if pidf.exists():
+        try:
+            os.kill(int(pidf.read_text().strip()), 0)
+            alive = True
+        except (ValueError, ProcessLookupError, PermissionError):
+            alive = False
+    if alive and url:
+        return {"status": "LAUNCHED", "url": url, "app_name": app_name}
+    if alive:
+        return {"status": "LAUNCHING", "url": None, "app_name": app_name,
+                "message": "still provisioning; check again shortly."}
+    return {"status": "STOPPED", "url": None, "app_name": app_name,
+            "message": "no running notebook for this app."}
+
+
+def stop_notebook(app_name: str) -> dict:
+    """Tear down a background notebook (stops the GPU + billing) by its app name."""
+    import signal
+
+    sd = _state_dir()
+    pidf = sd / f"{app_name}.pid"
+    if not pidf.exists():
+        return {"status": "STOPPED", "app_name": app_name,
+                "message": "no running notebook for this app."}
+    try:
+        pid = int(pidf.read_text().strip())
+        # The server runs in its own session (start_new_session); kill the group so
+        # app.run() exits and Modal releases the GPU.
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except (ValueError, ProcessLookupError, PermissionError):
+        pass
+    finally:
+        pidf.unlink(missing_ok=True)
+    return {"status": "STOPPED", "app_name": app_name, "message": "notebook stopped (GPU released)."}
 
 
 __all__ = [
@@ -206,4 +330,7 @@ __all__ = [
     "routes_to_modal",
     "build_notebook_submission",
     "launch_notebook",
+    "spawn_notebook",
+    "notebook_status",
+    "stop_notebook",
 ]

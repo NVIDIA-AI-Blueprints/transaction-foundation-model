@@ -33,19 +33,22 @@ spending launch. Surface:
 
 Do not start the live launch until the user confirms after seeing the plan + cost.
 
-## 3. Run — launch the notebook
-Run the `notebook` verb with the user's flags (default to `--dry-run` when only a
-preview was asked for; pass `--gpu` / `--no-datastore` through). On a live launch it
-prints a notebook URL once the container is up — **surface that URL** and tell the
-user to keep the session terminal open, that the datastore/Client API is available
-inside, and that **stopping the session stops the GPU billing**.
+## 3. Run — call the `loom_notebook` tool
+Call the **`loom_notebook`** tool. Default (no `launch`) PLANS — it returns the spec,
+no spend; use that to show the user the plan. To actually spin the notebook up, call
+`loom_notebook` with **`launch: true`** (pass `gpu` / `no_datastore` as needed). It
+is non-blocking: it backgrounds the GPU notebook and returns a status —
+**`LAUNCHED` with a `url`** (surface it), or **`LAUNCHING`** if the first-launch
+container pull is still going (then call `loom_notebook` with `status: true` to fetch
+the URL once it's up). The launch is gated (never auto-fired) — only set
+`launch: true` after the user confirms the cost.
 
 ## 4. Verify
-- **Dry run** → confirm the printed plan (app / GPU / image / port / datastore) and
-  remind them to drop `--dry-run` (with a Modal token set) to actually launch.
-- **Live** → confirm a notebook URL was produced; if a non-Modal target was given it
-  refuses with an actionable message; if `modal` isn't installed/authenticated it
-  refuses with install/auth steps.
+- **Plan** → confirm the spec (app / GPU / image / port / datastore); remind that
+  `launch: true` actually spins it up.
+- **Launch** → confirm a `url` came back (`LAUNCHED`), or report `LAUNCHING` and offer
+  to fetch the URL via `status: true`. A non-Modal target / missing `modal`+token
+  refuses with an actionable message. Stop it with `stop: true` (releases the GPU).
 
 ## 5. Deliver — narrate, hand back the URL
 - Lead with whether this was a **free dry-run preview** or a **live GPU launch**, then
