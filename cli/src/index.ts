@@ -15,7 +15,7 @@ import { validatePiInstallation } from "./pi/runtime.js";
 const DEFAULT_LOOM_PYTHON = "/Users/anub/Work/Loom/.venv/bin/python";
 
 /**
- * The 15 Loom verbs. The agentic front door accepts `loom <verb> ...` and maps
+ * The Loom verbs. The agentic front door accepts `loom <verb> ...` and maps
  * it to the `/loom-<verb>` slash-command prompt. The authoritative source is the
  * verb manifest; this static set is only used for top-level routing before the child
  * boots, so a stale entry just falls through to a freeform prompt.
@@ -28,6 +28,7 @@ const LOOM_VERBS = new Set([
 	"eda",
 	"features",
 	"ingest",
+	"notebook",
 	"ops",
 	"pipeline",
 	"report",
@@ -84,7 +85,7 @@ function printHelp(version: string | undefined): void {
 		["understand", "ingest  eda  validate  viz  datasets  doctor"],
 		["build", "features  pipeline  run"],
 		["operate", "report  ops"],
-		["gated", "deploy  train  collab  skillopt   (explicit confirm)"],
+		["gated", "deploy  train  collab  skillopt  notebook   (explicit confirm)"],
 	]);
 	section("Commands", [
 		["loom <verb> [--flags]", "jump to a verb workflow (/loom-<verb>)"],
