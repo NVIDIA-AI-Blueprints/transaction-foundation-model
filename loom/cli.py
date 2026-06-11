@@ -200,13 +200,16 @@ _VERB_TIER = {
     "deploy": "irreversible",
     "collab": "irreversible",
     "skillopt": "irreversible",
+    "notebook": "irreversible",
 }
 
-# The four verbs whose gated mutate must never be model-auto-invoked
+# The verbs whose gated mutate must never be model-auto-invoked
 # (disable-model-invocation: true in the skill frontmatter). These are exactly
 # the irreversible/external actions behind an off-by-default flag (deploy
-# --apply, train --launch, collab --send, skillopt --apply).
-_DISABLE_MODEL_INVOCATION = {"deploy", "train", "collab", "skillopt"}
+# --apply, train --launch, collab --send, skillopt --apply, notebook --launch).
+# notebook plans/dry-runs freely; the real GPU spin-up (--launch) is the gated
+# action the model must not auto-fire — same posture as train.
+_DISABLE_MODEL_INVOCATION = {"deploy", "train", "collab", "skillopt", "notebook"}
 
 # Verbs that ship a VERDICT/status line in their typed summary (CONVENTIONS §5).
 # The value is the summary key carrying the verb's headline VERDICT/status. A

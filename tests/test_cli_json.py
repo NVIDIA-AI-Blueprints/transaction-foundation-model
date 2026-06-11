@@ -201,7 +201,7 @@ _MANIFEST_KEYS = {
     "tier",
     "disable_model_invocation",
 }
-_IRREVERSIBLE_DMI_VERBS = {"deploy", "train", "collab", "skillopt"}
+_IRREVERSIBLE_DMI_VERBS = {"deploy", "train", "collab", "skillopt", "notebook"}
 _TIERS = {"read-only", "workspace-write", "expensive", "irreversible"}
 
 
@@ -212,7 +212,7 @@ def test_verbs_json_emits_full_manifest() -> None:
 
     manifest = json.loads(stdout)
     assert isinstance(manifest, list)
-    assert len(manifest) == 15  # the 15 flat lifecycle verbs
+    assert len(manifest) == 16  # the flat lifecycle verbs + notebook (gated launcher)
 
     for entry in manifest:
         assert set(entry.keys()) == _MANIFEST_KEYS
@@ -257,7 +257,7 @@ def test_verbs_human_table_without_json() -> None:
     """`loom verbs` (no --json) prints a human table, not JSON."""
     code, stdout, _ = _run_handler(["verbs"])
     assert code == 0
-    assert stdout.startswith("Loom verbs (15):")
+    assert stdout.startswith("Loom verbs (16):")
     # The table marks the disable-model-invocation verbs and shows tiers.
     assert "[no-model-invoke]" in stdout
     assert "read-only" in stdout
