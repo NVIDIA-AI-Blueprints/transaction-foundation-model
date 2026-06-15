@@ -70,7 +70,7 @@ variable "subnetwork" {
 }
 
 variable "enable_external_ip" {
-  description = "Attach an external IP for SSH. Jupyter still binds only to localhost on the VM."
+  description = "Attach an external IP for SSH. marimo still binds only to localhost on the VM."
   type        = bool
   default     = true
 }

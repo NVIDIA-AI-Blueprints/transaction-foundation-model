@@ -102,7 +102,7 @@ One gotcha preserved in the config comments: use `torchrun` directly for multi-G
 
 ## The NGC container: the version-matching service
 
-CUDA / PyTorch / RAPIDS / NeMo each have mutual version constraints; resolving them by hand is a lost afternoon (RAPIDS pip installs are especially unforgiving). The **NGC** (NVIDIA GPU Cloud) container `nvcr.io/nvidia/nemo:25.09.01` ships the whole matrix pre-resolved. That's the entire reason [setup](../01-getting-started/02-environment-setup.md) says "run in the container" — it's not dogma, it's dependency hygiene. The few extras (xgboost, seaborn, plotly…) are `%pip install`ed per-notebook.
+CUDA / PyTorch / RAPIDS / NeMo each have mutual version constraints; resolving them by hand is a lost afternoon (RAPIDS pip installs are especially unforgiving). The **NGC** (NVIDIA GPU Cloud) container `nvcr.io/nvidia/nemo:25.09.01` ships the whole matrix pre-resolved. That's the entire reason [setup](../01-getting-started/02-environment-setup.md) says "run in the container" — it's not dogma, it's dependency hygiene. The few extras (xgboost, seaborn, plotly, marimo) are installed once from `requirements.txt`.
 
 ## Git LFS: why the checkpoint needs a special pull
 

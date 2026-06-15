@@ -30,7 +30,7 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
 - **seaborn** — Statistical plotting for dataset exploration
 - **plotly** — Interactive 3D embedding visualization
 - **tqdm** — Progress bars in notebook inference workflows
-- **ipywidgets** — Notebook widget support
+- **marimo** — Open-source reactive Python notebooks, stored as executable `.py` files
 - **torchdata** — Stateful data loading for model training
 
 > **Third-Party Software Notice**
@@ -126,11 +126,11 @@ scripts/gcp-gpu-down.sh
 
 | # | Notebook | Description |
 |---|----------|-------------|
-| 1 | `01_dataset_baseline.ipynb` | Load the TabFormer financial transaction dataset, create temporal train/val/test splits, and train a GPU-accelerated XGBoost baseline for fraud detection. |
-| 2 | `02_seq_preproc_tokenization.ipynb` | Build a custom GPU-accelerated tokenizer pipeline that converts transaction records into domain-specific token sequences. |
-| 3 | `03_foundation_model_training.ipynb` | Pretrain a decoder-only foundation model (\~29M parameters) on tokenized transaction sequences using NeMo AutoModel with causal language modeling. |
-| 4 | `04_inference_embedding_extraction.ipynb` | Load the pretrained model, run GPU inference, extract 512-dimensional embeddings via last-token pooling, and visualize with UMAP. |
-| 5 | `05_xgboost_fraud_detection.ipynb` | Compare XGBoost fraud detection using raw features, foundation model embeddings, and combined features. |
+| 1 | `01_dataset_baseline.py` | Load the TabFormer financial transaction dataset, create temporal train/val/test splits, and train a GPU-accelerated XGBoost baseline for fraud detection. |
+| 2 | `02_seq_preproc_tokenization.py` | Build a custom GPU-accelerated tokenizer pipeline that converts transaction records into domain-specific token sequences. |
+| 3 | `03_foundation_model_training.py` | Pretrain a decoder-only foundation model (\~29M parameters) on tokenized transaction sequences using NeMo AutoModel with causal language modeling. |
+| 4 | `04_inference_embedding_extraction.py` | Load the pretrained model, run GPU inference, extract 512-dimensional embeddings via last-token pooling, and visualize with UMAP. |
+| 5 | `05_xgboost_fraud_detection.py` | Compare XGBoost fraud detection using raw features, foundation model embeddings, and combined features. |
 
 Run the notebooks sequentially. Notebooks 04 and 05 require the pretrained checkpoint from Git LFS. In the primary Conductor + GCP workflow, `scripts/gcp-sync-workspace.sh` also runs `scripts/gcp-sync-models.sh` to copy the resolved checkpoint into the VM's durable model mount.
 
@@ -143,27 +143,29 @@ Use this path only if you are already on a Linux host with an NVIDIA GPU, Docker
    docker run --gpus all --rm -it \
      -v $(pwd):/workspace \
      --shm-size=8g \
-     -p 8888:8888 \
+     -p 8080:8080 \
      --ulimit memlock=-1 \
      nvcr.io/nvidia/nemo:25.09.01
    ```
    - `--shm-size=8g` — increases shared memory to prevent DataLoader crashes under PyTorch multi-process loading
-   - `-p 8888:8888` — publishes the Jupyter port to the host browser
+   - `-p 8080:8080` — publishes the marimo port to the host browser
    - `--ulimit memlock=-1` — removes the locked-memory limit required by some CUDA operations
-2. Inside the container, install Git LFS, fetch the checkpoint artifacts, and start Jupyter:
+2. Inside the container, install Git LFS, fetch the checkpoint artifacts, install notebook dependencies, and start marimo:
    ```bash
+   cd /workspace
    git config --global --add safe.directory /workspace
    apt-get update && apt-get install -y git-lfs
    git lfs install
    git lfs pull
-   jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   export PATH="$HOME/.local/bin:$PATH"
+   uv pip install --python "$(which python)" -r requirements.txt
+   marimo edit --headless --host 0.0.0.0 --port 8080
    ```
    > **Note:** The `safe.directory` line is required because the repository is bind-mounted from the host, which causes a Git ownership mismatch inside the container. Without it, `git lfs pull` will fail.
 
-   Each notebook installs its own dependencies (e.g. `%pip install xgboost ...`) so a separate `requirements.txt` is not needed.
-
-   Open `http://localhost:8888/?token=...` in your browser.
-3. Run `01_dataset_baseline.ipynb` to download the dataset and establish an XGBoost baseline.
+   Open the printed marimo URL in your browser, or use `http://localhost:8080`.
+3. Run `01_dataset_baseline.py` to download the dataset and establish an XGBoost baseline.
 4. Continue through notebooks 02\–05 sequentially.
 
 **Pre-trained Model Checkpoint (required for notebooks 04\–05)**
@@ -197,18 +199,19 @@ For a direct Linux NVIDIA host:
    ```bash
    docker pull nvcr.io/nvidia/nemo:25.09.01
    ```
-2. Launch with GPU access, mount this repository, and publish the Jupyter port:
+2. Launch with GPU access, mount this repository, and publish the marimo port:
    ```bash
    docker run --gpus all --rm -it \
      -v $(pwd):/workspace \
      --shm-size=8g \
-     -p 8888:8888 \
+     -p 8080:8080 \
      --ulimit memlock=-1 \
      nvcr.io/nvidia/nemo:25.09.01
    ```
-   > **Remote host**: If running on a remote machine, add SSH port forwarding (`ssh -L 8888:localhost:8888 user@host`) so Jupyter is reachable from your local browser.
+   > **Remote host**: If running on a remote machine, add SSH port forwarding (`ssh -L 8080:localhost:8080 user@host`) so marimo is reachable from your local browser.
 3. Install Git LFS and pull the pre-trained checkpoint:
    ```bash
+   cd /workspace
    git config --global --add safe.directory /workspace
    apt-get update && apt-get install -y git-lfs
    git lfs install
@@ -216,12 +219,14 @@ For a direct Linux NVIDIA host:
    ```
    > **Note:** The `safe.directory` line is needed because bind-mounting the repo causes a Git ownership mismatch inside the container.
 
-   Each notebook installs its own dependencies inline, so no separate `requirements.txt` is needed.
-4. Start Jupyter inside the container:
+4. Install dependencies and start marimo inside the container:
    ```bash
-   jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   export PATH="$HOME/.local/bin:$PATH"
+   uv pip install --python "$(which python)" -r requirements.txt
+   marimo edit --headless --host 0.0.0.0 --port 8080
    ```
-   Open the URL printed in the terminal (e.g. `http://localhost:8888/?token=...`) in your browser.
+   Open the URL printed in the terminal, or use `http://localhost:8080`.
 5. Run notebooks 01\–05 sequentially. Notebooks 04 and 05 require the pre-trained checkpoint downloaded by `git lfs pull` in step 3 (see [Pre-trained Model Checkpoint](#quickstart) above).
 
 ---

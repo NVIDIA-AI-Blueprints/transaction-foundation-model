@@ -48,7 +48,7 @@ elif [[ "$VM_STATUS" == "RUNNING" ]]; then
   wait_for_gcp_ssh 12 5
 elif [[ "$VM_STATUS" != "RUNNING" ]]; then
   echo
-  echo "VM $GCP_INSTANCE is currently $VM_STATUS. Wait for it to become RUNNING before starting Jupyter."
+  echo "VM $GCP_INSTANCE is currently $VM_STATUS. Wait for it to become RUNNING before starting marimo."
 fi
 
 echo

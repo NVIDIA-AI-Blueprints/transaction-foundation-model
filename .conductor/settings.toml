@@ -4,5 +4,5 @@ file_include_globs = ".env.gcp\n"
 
 [scripts]
 setup = "scripts/gcp-setup-check.sh || true"
-run = "scripts/gcp-jupyter.sh"
+run = "scripts/gcp-marimo.sh"
 run_mode = "nonconcurrent"

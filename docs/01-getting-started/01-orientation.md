@@ -11,11 +11,11 @@ The entire workflow lives in five numbered notebooks at the repo root, supported
 
 | Stage | Notebook | What happens | Reusable code |
 |-------|----------|--------------|---------------|
-| 1. Baseline | [`01_dataset_baseline.ipynb`](../../01_dataset_baseline.ipynb) | Load 24M credit-card transactions, split by time, train a classic XGBoost fraud model | — |
-| 2. Tokenize | [`02_seq_preproc_tokenization.ipynb`](../../02_seq_preproc_tokenization.ipynb) | Convert each transaction into ~12 domain tokens; stitch per-customer histories into "sentences" | [`src/tokenizer/`](../../src/tokenizer) |
-| 3. Pretrain | [`03_foundation_model_training.ipynb`](../../03_foundation_model_training.ipynb) | Train a ~29M-parameter decoder model to predict the next token | [`scripts/train_decoder_model.py`](../../scripts/train_decoder_model.py), [`src/clm_data.py`](../../src/clm_data.py), [`configs/`](../../configs) |
-| 4. Embed | [`04_inference_embedding_extraction.ipynb`](../../04_inference_embedding_extraction.ipynb) | Use the trained model to turn transaction histories into 512-d vectors | [`src/decoder_inference.py`](../../src/decoder_inference.py) |
-| 5. Evaluate | [`05_xgboost_fraud_detection.ipynb`](../../05_xgboost_fraud_detection.ipynb) | Show that raw features + embeddings beat raw features alone | — |
+| 1. Baseline | [`01_dataset_baseline.py`](../../01_dataset_baseline.py) | Load 24M credit-card transactions, split by time, train a classic XGBoost fraud model | — |
+| 2. Tokenize | [`02_seq_preproc_tokenization.py`](../../02_seq_preproc_tokenization.py) | Convert each transaction into ~12 domain tokens; stitch per-customer histories into "sentences" | [`src/tokenizer/`](../../src/tokenizer) |
+| 3. Pretrain | [`03_foundation_model_training.py`](../../03_foundation_model_training.py) | Train a ~29M-parameter decoder model to predict the next token | [`scripts/train_decoder_model.py`](../../scripts/train_decoder_model.py), [`src/clm_data.py`](../../src/clm_data.py), [`configs/`](../../configs) |
+| 4. Embed | [`04_inference_embedding_extraction.py`](../../04_inference_embedding_extraction.py) | Use the trained model to turn transaction histories into 512-d vectors | [`src/decoder_inference.py`](../../src/decoder_inference.py) |
+| 5. Evaluate | [`05_xgboost_fraud_detection.py`](../../05_xgboost_fraud_detection.py) | Show that raw features + embeddings beat raw features alone | — |
 
 ## The idea in one picture
 

@@ -44,11 +44,11 @@ Average Precision is the metric that matters at ~0.1% fraud rates — it measure
 
 The whole system is five notebooks run in order (reusable code lives in [`src/`](../../src)):
 
-1. **[`01_dataset_baseline.ipynb`](../../01_dataset_baseline.ipynb)** — load the **TabFormer** dataset (24.4M synthetic card transactions, 2,000 users, 2002–2019, 0.12% fraud), split by *time* (train on past, test on future — anything else cheats), train the raw-feature XGBoost baseline.
-2. **[`02_seq_preproc_tokenization.ipynb`](../../02_seq_preproc_tokenization.ipynb)** — build the transaction tokenizer, show why GPT's text tokenizer would be ~3× wasteful and semantically destructive, write the training corpus.
-3. **[`03_foundation_model_training.ipynb`](../../03_foundation_model_training.ipynb)** — pretrain the decoder with NVIDIA NeMo AutoModel. (Runs a 2-minute demo; the real checkpoint — ~3,000 steps on 8× A100 — ships with the repo via Git LFS.)
-4. **[`04_inference_embedding_extraction.ipynb`](../../04_inference_embedding_extraction.ipynb)** — extract 512-d embeddings for ~1.2M transactions; visualize the space with UMAP.
-5. **[`05_xgboost_fraud_detection.ipynb`](../../05_xgboost_fraud_detection.ipynb)** — the three-way comparison above.
+1. **[`01_dataset_baseline.py`](../../01_dataset_baseline.py)** — load the **TabFormer** dataset (24.4M synthetic card transactions, 2,000 users, 2002–2019, 0.12% fraud), split by *time* (train on past, test on future — anything else cheats), train the raw-feature XGBoost baseline.
+2. **[`02_seq_preproc_tokenization.py`](../../02_seq_preproc_tokenization.py)** — build the transaction tokenizer, show why GPT's text tokenizer would be ~3× wasteful and semantically destructive, write the training corpus.
+3. **[`03_foundation_model_training.py`](../../03_foundation_model_training.py)** — pretrain the decoder with NVIDIA NeMo AutoModel. (Runs a 2-minute demo; the real checkpoint — ~3,000 steps on 8× A100 — ships with the repo via Git LFS.)
+4. **[`04_inference_embedding_extraction.py`](../../04_inference_embedding_extraction.py)** — extract 512-d embeddings for ~1.2M transactions; visualize the space with UMAP.
+5. **[`05_xgboost_fraud_detection.py`](../../05_xgboost_fraud_detection.py)** — the three-way comparison above.
 
 Everything runs on NVIDIA GPUs inside one container ([setup guide](../01-getting-started/02-environment-setup.md)): RAPIDS for data processing, NeMo for training.
 

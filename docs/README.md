@@ -29,8 +29,8 @@ The documentation follows a **level scaffolding** (think university course numbe
 1. [Orientation](01-getting-started/01-orientation.md) — what this repo is and what you'll build
 2. [Level 100](03-learning-path/level-100-the-big-picture.md) — the big picture
 3. [Environment setup](01-getting-started/02-environment-setup.md) — get the notebooks running
-4. If you are on macOS/Conductor, use the [GCP GPU notebook runtime](../infra/gcp-notebook/README.md)
-5. Run notebook `01_dataset_baseline.ipynb`
+4. If you are on macOS/Conductor, use the [GCP GPU marimo runtime](../infra/gcp-notebook/README.md)
+5. Run notebook `01_dataset_baseline.py`
 
 **"I want to actually understand it"** (2–3 days)
 1. The five [Concepts primers](02-concepts/README.md) that are new to you

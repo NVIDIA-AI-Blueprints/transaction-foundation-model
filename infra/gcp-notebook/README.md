@@ -1,6 +1,6 @@
-# GCP GPU Notebook Runtime
+# GCP GPU marimo Runtime
 
-This directory defines the repeatable GCP runtime for working from macOS and Conductor while executing GPU notebooks on Compute Engine.
+This directory defines the repeatable GCP runtime for working from macOS and Conductor while executing GPU marimo notebooks on Compute Engine.
 
 The first runtime image is NVIDIA NeMo because the current notebooks need CUDA, RAPIDS, PyTorch, and NeMo preinstalled. The VM and scripts are image-agnostic: change `NOTEBOOK_IMAGE` when the project moves to a different FM or recommendation-system stack.
 
@@ -11,9 +11,9 @@ The first runtime image is NVIDIA NeMo because the current notebooks need CUDA, 
 | Conductor + editor | macOS | Workspaces, branches, code edits, local orchestration |
 | Terraform + `gcloud` | macOS | Create and manage the GCP VM, disk, bucket, IAM, and metadata |
 | GPU host | GCP Compute Engine | NVIDIA driver, Docker, NVIDIA Container Toolkit, Ops Agent, persistent disk |
-| Notebook runtime | Docker container on GCP | Jupyter, CUDA libraries, RAPIDS, PyTorch, NeMo or replacement image |
+| Notebook runtime | Docker container on GCP | marimo, CUDA libraries, RAPIDS, PyTorch, NeMo or replacement image |
 | Observability | GCP Cloud Monitoring/Logging | CPU, memory, disk, and GPU metrics from the Ops Agent |
-| Browser | macOS | Opens Jupyter through an SSH local port forward |
+| Browser | macOS | Opens marimo through an SSH local port forward |
 
 Your Mac does not run CUDA. It controls a Linux/NVIDIA host and forwards the notebook UI back to `localhost`.
 
@@ -26,10 +26,10 @@ gcloud auth login
 gcloud auth application-default login
 scripts/gcp-gpu-up.sh
 scripts/gcp-sync-workspace.sh
-scripts/gcp-jupyter.sh
+scripts/gcp-marimo.sh
 ```
 
-Open the URL printed by `scripts/gcp-jupyter.sh`.
+Open the URL printed by `scripts/gcp-marimo.sh`.
 
 Stop the VM when you are done:
 
@@ -39,28 +39,24 @@ scripts/gcp-gpu-down.sh
 
 ## Day-to-Day Development Loop
 
-Once Jupyter is visible through the tunnel, treat Conductor as the source of truth and Jupyter as the GPU execution surface.
+Once marimo is visible through the tunnel, treat Conductor as the source of truth and marimo as the GPU execution surface.
 
 Use this loop for normal code changes:
 
 1. Edit code, configs, docs, and notebooks locally in the Conductor workspace.
-2. Ask agents to make repo changes in Conductor, not inside the remote Jupyter container.
+2. Ask agents to make repo changes in Conductor, not inside the remote marimo container.
 3. Sync the current workspace to the GPU VM:
    ```bash
    scripts/gcp-sync-workspace.sh
    ```
-4. In Jupyter, rerun the affected cells.
-5. If you changed Python modules under `src/`, either restart the kernel or enable autoreload:
-   ```python
-   %load_ext autoreload
-   %autoreload 2
-   ```
+4. In marimo, rerun the affected cells.
+5. If you changed Python modules under `src/`, restart the marimo session before rerunning dependent cells.
 6. Keep generated outputs on the VM under `/workspace/data`, `/workspace/models`, and `/workspace/artifacts`.
 7. Commit or open a PR from Conductor after validation.
 
-Important: avoid editing repo-tracked source files directly inside Jupyter. The current sync direction is local-to-remote only, so remote edits can drift or be overwritten by the next `scripts/gcp-sync-workspace.sh`. If you intentionally edit a notebook in Jupyter, copy that change back into the Conductor workspace before treating it as committed work.
+Important: avoid editing repo-tracked source files directly inside marimo. The current sync direction is local-to-remote only, so remote edits can drift or be overwritten by the next `scripts/gcp-sync-workspace.sh`. If you intentionally edit a notebook in marimo, copy that change back into the Conductor workspace before treating it as committed work.
 
-The Conductor Run button starts or reconnects the remote Jupyter tunnel through `scripts/gcp-jupyter.sh`. It does **not** sync local changes first. After any local edit, run:
+The Conductor Run button starts or reconnects the remote marimo tunnel through `scripts/gcp-marimo.sh`. It does **not** sync local changes first. After any local edit, run:
 
 ```bash
 scripts/gcp-sync-workspace.sh
@@ -72,7 +68,7 @@ For agent work, use one Conductor workspace per coherent change:
 
 1. Let the agent edit locally.
 2. Sync to the GPU VM.
-3. Validate in Jupyter.
+3. Validate in marimo.
 4. Feed notebook results or errors back to the agent.
 5. Have the agent update code, tests, and docs locally.
 6. Sync and rerun until the change is ready.
@@ -99,7 +95,7 @@ If GCP returns a zone stockout, move `GCP_ZONE` to one of the zones suggested in
 
 ### `.env.gcp`
 
-`.env.gcp` is a local, gitignored file copied from `.env.gcp.example`. All helper scripts source it before applying defaults. Explicit shell environment overrides take precedence, so `JUPYTER_PORT=18888 scripts/gcp-jupyter.sh` temporarily overrides the local file.
+`.env.gcp` is a local, gitignored file copied from `.env.gcp.example`. All helper scripts source it before applying defaults. Explicit shell environment overrides take precedence, so `MARIMO_PORT=18888 scripts/gcp-marimo.sh` temporarily overrides the local file.
 
 Current local defaults:
 
@@ -112,8 +108,7 @@ GCP_INSTANCE=tfm-gpu-notebook
 GCP_BUCKET=level-mark-437714-b1-tfm-gpu-artifacts
 NOTEBOOK_IMAGE=nvcr.io/nvidia/nemo:25.09.01
 GPU_TEST_IMAGE=nvidia/cuda:12.4.1-base-ubuntu22.04
-JUPYTER_PORT=8888
-JUPYTER_TOKEN=tfm-dev
+MARIMO_PORT=8080
 ```
 
 Change only `.env.gcp` for local machine preferences. Commit defaults only when they should apply to everyone.
@@ -124,8 +119,8 @@ Change only `.env.gcp` for local machine preferences. Commit defaults only when 
 
 - `file_include_globs = ".env.gcp\n"` copies your local GCP settings into new workspaces.
 - `setup = "scripts/gcp-setup-check.sh || true"` reports missing local tools or stale auth without blocking workspace creation.
-- `run = "scripts/gcp-jupyter.sh"` makes the Conductor Run button start the remote notebook/tunnel workflow.
-- `run_mode = "nonconcurrent"` avoids multiple workspaces fighting over one Jupyter port and one remote VM.
+- `run = "scripts/gcp-marimo.sh"` makes the Conductor Run button start the remote notebook/tunnel workflow.
+- `run_mode = "nonconcurrent"` avoids multiple workspaces fighting over one marimo port and one remote VM.
 
 ## Terraform Resources
 
@@ -237,7 +232,7 @@ It excludes:
 - large generated data and model-output directories;
 - temporary notebook rerun outputs.
 
-This is a workspace copy, not a Git remote. Rerun it after local edits you want available inside Jupyter.
+This is a workspace copy, not a Git remote. Rerun it after local edits you want available inside marimo.
 
 `scripts/gcp-sync-workspace.sh` also attempts `scripts/gcp-sync-models.sh`, which copies the resolved Git LFS checkpoint from local `models/decoder-foundation-model/` into the VM's durable `/mnt/tfm/models/decoder-foundation-model/` mount. If the local checkpoint is still a 133-byte Git LFS pointer, workspace sync still completes and model sync prints the exact `git lfs pull` command to run locally.
 
@@ -253,9 +248,9 @@ It:
 4. creates `/mnt/tfm/models/decoder-foundation-model`;
 5. copies the model files into that directory.
 
-This script exists because the Jupyter container mounts `/mnt/tfm/models` at `/workspace/models`. That durable mount intentionally hides the synced repo's `models/` directory, so the checkpoint must be copied into the VM model mount instead of relying on `git lfs pull` inside the container.
+This script exists because the marimo container mounts `/mnt/tfm/models` at `/workspace/models`. That durable mount intentionally hides the synced repo's `models/` directory, so the checkpoint must be copied into the VM model mount instead of relying on `git lfs pull` inside the container.
 
-### `scripts/gcp-jupyter.sh`
+### `scripts/gcp-marimo.sh`
 
 Starts the notebook container on the VM and opens the local tunnel.
 
@@ -266,7 +261,7 @@ It:
 3. waits for `/opt/tfm/bootstrap.done` so host startup work has finished before the GPU container starts;
 4. checks `nvidia-smi` exists on the VM;
 5. verifies Docker can run a short-lived CUDA container with GPU access;
-6. removes any existing `tfm-jupyter` container;
+6. removes any existing `tfm-marimo` container;
 7. pulls `NOTEBOOK_IMAGE`;
 8. starts the container with:
    - `--gpus all`;
@@ -276,11 +271,15 @@ It:
    - `/mnt/tfm/workspace` mounted as `/workspace`;
    - durable `data`, `models`, and `artifacts` mounts;
 9. warns if the pretrained checkpoint is missing from `/mnt/tfm/models/decoder-foundation-model`;
-10. starts Jupyter on remote port `8888` inside the container;
-11. verifies the running Jupyter container can initialize NVML with `nvidia-smi`;
-12. opens an SSH local port forward from `localhost:$JUPYTER_PORT` to the VM.
+10. starts marimo on port `8080` inside the container and binds it to `127.0.0.1:$MARIMO_PORT` on the VM;
+11. verifies the running marimo container can initialize NVML with `nvidia-smi`;
+12. opens an SSH local port forward from `localhost:$MARIMO_PORT` to the VM.
 
 The final SSH process intentionally stays open. Closing it closes the browser tunnel, but the remote container continues running.
+
+### `scripts/gcp-jupyter.sh`
+
+Deprecated compatibility wrapper. It prints a warning and delegates to `scripts/gcp-marimo.sh` so old Conductor muscle memory starts the new marimo workflow.
 
 ### `scripts/gcp-gpu-down.sh`
 
@@ -346,7 +345,7 @@ Workspace:
 gcloud compute ssh tfm-gpu-notebook \
   --zone us-central1-f \
   --project level-mark-437714-b1 \
-  --command 'cd /mnt/tfm/workspace && ls README.md scripts/gcp-jupyter.sh'
+  --command 'cd /mnt/tfm/workspace && ls README.md scripts/gcp-marimo.sh'
 ```
 
 Ops Agent:
@@ -408,15 +407,15 @@ Exit code `0` means the deployed infra matches the repo config. Exit code `2` me
 | `gcloud.auth.print-access-token` says reauthentication failed | Local `gcloud` user credentials expired while the workspace was idle | Run `gcloud auth login`, then rerun `scripts/gcp-gpu-up.sh` |
 | Terraform reports expired Application Default Credentials | Local ADC credentials expired; Terraform uses ADC separately from the active `gcloud` account | Run `gcloud auth application-default login`, then rerun `scripts/gcp-gpu-up.sh` |
 | `failed to connect to backend` or `Failed to connect to port 22` right after VM start | GCP reported the VM as running before SSH was ready, or the local environment forced IAP unnecessarily | Rerun the helper script after a minute. The scripts now wait for SSH readiness and only use IAP when `GCP_TUNNEL_THROUGH_IAP=1` |
-| Browser cannot reach Jupyter | SSH tunnel is closed or port differs | Keep `scripts/gcp-jupyter.sh` running and open the printed URL |
+| Browser cannot reach marimo | SSH tunnel is closed or port differs | Keep `scripts/gcp-marimo.sh` running and open the printed URL |
 | `docker run --gpus all` fails | NVIDIA Container Toolkit not installed/configured | Check `/opt/tfm/bootstrap.done`, `docker info`, and `nvidia-container-toolkit` package status |
 | Notebook 04 says `Decoder checkpoint not found at /workspace/models/decoder-foundation-model` | The VM model mount is missing the resolved Git LFS checkpoint | Run `git lfs pull --include='models/decoder-foundation-model/**' --exclude=''` locally, then run `scripts/gcp-sync-models.sh` |
 | GCP Console does not show GPU utilization | Ops Agent missing, stopped, missing IAM, or no active GPU work yet | Rerun `scripts/gcp-gpu-up.sh`, verify `systemctl is-active google-cloud-ops-agent`, then wait a few minutes while a notebook or `nvidia-smi` workload uses the GPU |
-| Notebook errors with `CUDA_ERROR_NO_DEVICE`, `cudaErrorDevicesUnavailable`, or container `nvidia-smi` says `Failed to initialize NVML: Unknown Error` | The running Jupyter container lost GPU device access after host service changes, usually because it was started before VM bootstrap fully finished | Rerun `scripts/gcp-jupyter.sh` to delete and recreate only the Jupyter container, then restart the notebook kernel and rerun cells |
+| Notebook errors with `CUDA_ERROR_NO_DEVICE`, `cudaErrorDevicesUnavailable`, or container `nvidia-smi` says `Failed to initialize NVML: Unknown Error` | The running marimo container lost GPU device access after host service changes, usually because it was started before VM bootstrap fully finished | Rerun `scripts/gcp-marimo.sh` to delete and recreate only the marimo container, then restart the notebook kernel and rerun cells |
 
 ## Safety
 
-Jupyter is bound to `127.0.0.1` on the VM and reached through SSH port forwarding. The helper scripts do not expose port 8888 publicly.
+marimo is bound to `127.0.0.1` on the VM and reached through SSH port forwarding. The helper scripts do not expose port 8080 publicly.
 
 Stop the VM when you are done:
 

@@ -8,8 +8,9 @@ repo_root() {
 load_gcp_env() {
   local root override_gcp_project override_gcp_region override_gcp_zone override_gcp_instance
   local override_gcp_machine_type override_gcp_bucket override_notebook_image
-  local override_gpu_test_image override_jupyter_port override_jupyter_token
+  local override_gpu_test_image override_marimo_port override_jupyter_port override_jupyter_token
   local override_remote_workspace override_gcp_tunnel_through_iap
+  local effective_jupyter_port
 
   root="$(repo_root)"
   override_gcp_project="${GCP_PROJECT-}"
@@ -20,6 +21,7 @@ load_gcp_env() {
   override_gcp_bucket="${GCP_BUCKET-}"
   override_notebook_image="${NOTEBOOK_IMAGE-}"
   override_gpu_test_image="${GPU_TEST_IMAGE-}"
+  override_marimo_port="${MARIMO_PORT-}"
   override_jupyter_port="${JUPYTER_PORT-}"
   override_jupyter_token="${JUPYTER_TOKEN-}"
   override_remote_workspace="${REMOTE_WORKSPACE-}"
@@ -40,7 +42,9 @@ load_gcp_env() {
   GCP_BUCKET="${override_gcp_bucket:-${GCP_BUCKET:-${GCP_PROJECT}-tfm-gpu-artifacts}}"
   NOTEBOOK_IMAGE="${override_notebook_image:-${NOTEBOOK_IMAGE:-nvcr.io/nvidia/nemo:25.09.01}}"
   GPU_TEST_IMAGE="${override_gpu_test_image:-${GPU_TEST_IMAGE:-nvidia/cuda:12.4.1-base-ubuntu22.04}}"
-  JUPYTER_PORT="${override_jupyter_port:-${JUPYTER_PORT:-8888}}"
+  effective_jupyter_port="${override_jupyter_port:-${JUPYTER_PORT:-}}"
+  MARIMO_PORT="${override_marimo_port:-${MARIMO_PORT:-${effective_jupyter_port:-8080}}}"
+  JUPYTER_PORT="${effective_jupyter_port:-$MARIMO_PORT}"
   JUPYTER_TOKEN="${override_jupyter_token:-${JUPYTER_TOKEN:-tfm-dev}}"
   REMOTE_WORKSPACE="${override_remote_workspace:-${REMOTE_WORKSPACE:-/mnt/tfm/workspace}}"
   GCP_TUNNEL_THROUGH_IAP="${override_gcp_tunnel_through_iap:-${GCP_TUNNEL_THROUGH_IAP:-0}}"

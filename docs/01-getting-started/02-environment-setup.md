@@ -60,7 +60,7 @@ From your clone of this repo:
 docker run --gpus all --rm -it \
   -v $(pwd):/workspace \
   --shm-size=8g \
-  -p 8888:8888 \
+  -p 8080:8080 \
   --ulimit memlock=-1 \
   nvcr.io/nvidia/nemo:25.09.01
 ```
@@ -70,10 +70,10 @@ Flag-by-flag, because each one prevents a real failure mode:
 - `--gpus all` — exposes the GPU(s); without it, `torch.cuda.is_available()` is `False` and cuDF won't import.
 - `-v $(pwd):/workspace` — bind-mounts the repo; your edits and data persist outside the container.
 - `--shm-size=8g` — PyTorch DataLoader workers exchange tensors via shared memory; the 64 MB default causes cryptic crashes.
-- `-p 8888:8888` — publishes Jupyter to your browser.
+- `-p 8080:8080` — publishes marimo to your browser.
 - `--ulimit memlock=-1` — removes the locked-memory cap some CUDA operations need.
 
-> **Remote machine?** Add SSH port forwarding so Jupyter reaches your laptop: `ssh -L 8888:localhost:8888 user@host`.
+> **Remote machine?** Add SSH port forwarding so marimo reaches your laptop: `ssh -L 8080:localhost:8080 user@host`.
 
 ## Step 2 — Pull the pretrained checkpoint (Git LFS)
 
@@ -82,6 +82,7 @@ The ~56 MB pretrained checkpoint in [`models/decoder-foundation-model/`](../../m
 Inside the container:
 
 ```bash
+cd /workspace
 git config --global --add safe.directory /workspace
 apt-get update && apt-get install -y git-lfs
 git lfs install
@@ -96,13 +97,16 @@ Verify it worked — the safetensors file should be ~56 MB, not a few hundred by
 ls -lh models/decoder-foundation-model/
 ```
 
-## Step 3 — Start Jupyter
+## Step 3 — Install dependencies and start marimo
 
 ```bash
-jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+uv pip install --python "$(which python)" -r requirements.txt
+marimo edit --headless --host 0.0.0.0 --port 8080
 ```
 
-Open the printed `http://localhost:8888/?token=...` URL. Each notebook installs its own extra pip dependencies (e.g. `%pip install xgboost`) in its first cells, so there's no separate `requirements.txt` step.
+Open the printed marimo URL, or `http://localhost:8080`. Dependencies are installed once from `requirements.txt`; the notebooks no longer run inline package-install cells.
 
 ## Step 4 — Get the dataset
 
@@ -121,11 +125,11 @@ If the automated download fails, fetch `transactions.tgz` manually from the [IBM
 
 | Run | Produces | Needed by |
 |-----|----------|-----------|
-| `01_dataset_baseline.ipynb` | `data/TabFormer/temporal_split/{train,val,test}.parquet` + eval subsets | 02, 04, 05 |
-| `02_seq_preproc_tokenization.ipynb` | `data/decoder_corpus/{train,val,test}_corpus.txt` | 03 |
-| `03_foundation_model_training.ipynb` *(optional)* | `models/decoder-demo/` (30-step demo checkpoint) | — (educational) |
-| `04_inference_embedding_extraction.ipynb` | `data/embeddings/*.npy` | 05 |
-| `05_xgboost_fraud_detection.ipynb` | Final comparison results | — |
+| `01_dataset_baseline.py` | `data/TabFormer/temporal_split/{train,val,test}.parquet` + eval subsets | 02, 04, 05 |
+| `02_seq_preproc_tokenization.py` | `data/decoder_corpus/{train,val,test}_corpus.txt` | 03 |
+| `03_foundation_model_training.py` *(optional)* | `models/decoder-demo/` (30-step demo checkpoint) | — (educational) |
+| `04_inference_embedding_extraction.py` | `data/embeddings/*.npy` | 05 |
+| `05_xgboost_fraud_detection.py` | Final comparison results | — |
 
 **Important:** notebook 03 is a 2-minute, 30-step *demo* of the training pipeline — its output goes to `models/decoder-demo/` and is **not** what notebooks 04–05 use. They load the LFS checkpoint at `models/decoder-foundation-model/` (trained ~3,000 steps on 8× A100). You can skip 03 entirely and still complete the workflow.
 
