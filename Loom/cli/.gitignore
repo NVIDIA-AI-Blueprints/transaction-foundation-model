@@ -4,3 +4,13 @@ dist/
 *.tsbuildinfo
 .loom/
 npm-debug.log*
+
+# Pi home/ is part source (SYSTEM.md, settings.json, themes/, agents/) and part
+# RUNTIME-generated. Never track the runtime parts — auth.json can hold creds,
+# and bin/ is multi-MB tool binaries.
+home/auth.json
+home/trust.json
+home/.loom-bootstrap.json
+home/sessions/
+home/bin/
+home/npm/
