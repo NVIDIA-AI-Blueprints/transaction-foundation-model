@@ -39,12 +39,16 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
 
 > 📚 **New to foundation models?** Start with the **[documentation](docs/README.md)** — a didactic, level-based learning path (100 → 400) for data scientists, plus guides on adding new datasets (including public blockchain data via BigQuery), a research literature review with improvement ideas, and our experimentation workflow.
 
+> **Primary development workflow:** this repo is set up for humans supervising local [Conductor](https://conductor.build/) coding agents from macOS while notebooks run on a remote GCP NVIDIA GPU VM. Use Conductor for repo edits and agent work; use Jupyter for GPU execution.
+
 ## Table of Contents
 
 - [Documentation](docs/README.md)
 - [Developing with Loom (internal)](#developing-with-loom-internal)
 - [Quickstart](#quickstart)
+  - [Primary Workflow: Conductor + GCP GPU](#primary-workflow-conductor--gcp-gpu)
   - [Notebooks](#notebooks)
+  - [Direct Linux GPU Host](#direct-linux-gpu-host)
 - [Deployment](#deployment)
   - [Prerequisites](#prerequisites)
   - [Steps](#steps)
@@ -74,6 +78,50 @@ pipeline in `.github/workflows/ci.yml` stays Loom-free.
 
 ### Quickstart
 
+#### Primary Workflow: Conductor + GCP GPU
+
+This is the recommended workflow for local machines, especially macOS laptops. Your Mac runs Conductor, agents, Git, Terraform, and the browser. GCP runs the NVIDIA GPU VM and the NeMo Jupyter container.
+
+From a Conductor workspace:
+
+```bash
+gcloud auth login
+gcloud auth application-default login
+scripts/gcp-gpu-up.sh
+scripts/gcp-sync-workspace.sh
+scripts/gcp-jupyter.sh
+```
+
+Open the URL printed by `scripts/gcp-jupyter.sh`, then run `01_dataset_baseline.ipynb`.
+
+The first time you need notebooks 04/05, install Git LFS locally and pull the shipped checkpoint before syncing:
+
+```bash
+brew install git-lfs
+git lfs install
+git lfs pull --include='models/decoder-foundation-model/**' --exclude=''
+scripts/gcp-sync-models.sh
+```
+
+For normal development:
+
+1. Edit code, configs, docs, and notebooks locally in Conductor.
+2. Ask agents to make repo changes in the Conductor workspace.
+3. Sync local changes to the GPU VM:
+   ```bash
+   scripts/gcp-sync-workspace.sh
+   ```
+4. Rerun the affected cells in Jupyter.
+5. Keep generated outputs under `/workspace/data`, `/workspace/models`, and `/workspace/artifacts`.
+
+Do **not** pull or run the NeMo container directly on macOS. Docker Desktop on macOS does not expose an NVIDIA CUDA GPU to `docker run --gpus all`. The GCP runbook documents the full environment, script behavior, and day-to-day dev loop: [`infra/gcp-notebook/README.md`](infra/gcp-notebook/README.md).
+
+Stop the GPU VM when you are done:
+
+```bash
+scripts/gcp-gpu-down.sh
+```
+
 #### Notebooks
 
 | # | Notebook | Description |
@@ -83,6 +131,12 @@ pipeline in `.github/workflows/ci.yml` stays Loom-free.
 | 3 | `03_foundation_model_training.ipynb` | Pretrain a decoder-only foundation model (\~29M parameters) on tokenized transaction sequences using NeMo AutoModel with causal language modeling. |
 | 4 | `04_inference_embedding_extraction.ipynb` | Load the pretrained model, run GPU inference, extract 512-dimensional embeddings via last-token pooling, and visualize with UMAP. |
 | 5 | `05_xgboost_fraud_detection.ipynb` | Compare XGBoost fraud detection using raw features, foundation model embeddings, and combined features. |
+
+Run the notebooks sequentially. Notebooks 04 and 05 require the pretrained checkpoint from Git LFS. In the primary Conductor + GCP workflow, `scripts/gcp-sync-workspace.sh` also runs `scripts/gcp-sync-models.sh` to copy the resolved checkpoint into the VM's durable model mount.
+
+#### Direct Linux GPU Host
+
+Use this path only if you are already on a Linux host with an NVIDIA GPU, Docker, and NVIDIA Container Toolkit. It is not the recommended path for macOS + Conductor.
 
 1. Pull and launch the [NeMo Framework container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo) (25.09.01+) with GPU access and port mapping:
    ```bash
@@ -134,6 +188,10 @@ Notebook 03 runs a short 30-step demo to illustrate the training pipeline; its o
 | Python | 3.10+ |
 
 #### Steps
+
+For the primary Conductor + GCP workflow, use [`infra/gcp-notebook/README.md`](infra/gcp-notebook/README.md). It provisions the VM, persistent disk, bucket, service account, NVIDIA driver, Docker runtime, Ops Agent monitoring, workspace sync, and Jupyter tunnel.
+
+For a direct Linux NVIDIA host:
 
 1. Pull the NeMo container:
    ```bash

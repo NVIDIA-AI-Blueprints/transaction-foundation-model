@@ -7,3 +7,11 @@ tmp_nb_rerun_results/
 tmp_nb_test_results/
 src/__pycache__/
 src/tokenizer/__pycache__/
+.env.gcp
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.auto.tfvars.json
+.terraform/
+infra/**/.terraform/

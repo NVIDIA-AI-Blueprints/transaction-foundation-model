@@ -1,0 +1,8 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+file_include_globs = ".env.gcp\n"
+
+[scripts]
+setup = "scripts/gcp-setup-check.sh || true"
+run = "scripts/gcp-jupyter.sh"
+run_mode = "nonconcurrent"

@@ -18,7 +18,7 @@ The documentation follows a **level scaffolding** (think university course numbe
 |---------|-------------------|--------------|
 | [01 — Getting Started](01-getting-started/01-orientation.md) | Orientation, environment setup, glossary | First contact with the repo |
 | [02 — Concepts](02-concepts/README.md) | Primers on everything you might not know yet (foundation models, tokenization, NeMo, RAPIDS, …) | Whenever a term in the learning path is unfamiliar |
-| [03 — Learning Path](03-learning-path/README.md) | **The core curriculum**: Levels 100 → 400, from big picture to design contracts | In order, at your own pace |
+| [03 — Learning Path](03-learning-path/README.md) | **The core curriculum**: Levels 100 → 500, from big picture to line-by-line code anatomy | In order, at your own pace |
 | [04 — Data](04-data/README.md) | Dataset catalog + step-by-step guides for adding new data — public blockchain data from BigQuery (EVM, Solana, Stellar, Celo) and ZKAI's internal Embed pipeline datasets | When you want to train on new/your own data |
 | [05 — Research](05-research/README.md) | Literature review and concrete ideas for improving this model | When you move from "using" to "researching" |
 | [06 — Experimentation](06-experimentation/README.md) | How we run disciplined experiments with [Loom](https://github.com/ZKAI-Network/loom) | Before you launch your first training run variant |
@@ -29,13 +29,17 @@ The documentation follows a **level scaffolding** (think university course numbe
 1. [Orientation](01-getting-started/01-orientation.md) — what this repo is and what you'll build
 2. [Level 100](03-learning-path/level-100-the-big-picture.md) — the big picture
 3. [Environment setup](01-getting-started/02-environment-setup.md) — get the notebooks running
-4. Run notebook `01_dataset_baseline.ipynb`
+4. If you are on macOS/Conductor, use the [GCP GPU notebook runtime](../infra/gcp-notebook/README.md)
+5. Run notebook `01_dataset_baseline.ipynb`
 
 **"I want to actually understand it"** (2–3 days)
 1. The five [Concepts primers](02-concepts/README.md) that are new to you
 2. [Level 200](03-learning-path/level-200-the-building-blocks.md) — the building blocks
 3. [Level 300](03-learning-path/level-300-the-pipeline-in-code.md) — the pipeline in code, alongside notebooks 02–05
 4. [Level 400](03-learning-path/level-400-design-contracts-and-extensions.md) — contracts, caveats, extension points
+
+**"I'm about to modify the pipeline or port it to new data"** (add half a day)
+1. [Level 500](03-learning-path/level-500-the-code-anatomy.md) — the notebook flow as a production DAG, every tokenizer class and method, the GPU parallelization model, and the porting surface
 
 **"I'm here to do research / train on new data"**
 1. Everything above, then:

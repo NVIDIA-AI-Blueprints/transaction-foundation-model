@@ -72,6 +72,8 @@ These rows are, deliberately, an experiment menu — several reappear as [improv
 6. **Balanced-train, stratified-eval protocol.** XGBoost trains at ~2.5% fraud but is *evaluated* at ~0.1%. Sound — but quote test-set numbers only, and never compare against papers using different prevalence without noting it.
 7. **No tests, no CI.** The repo is a blueprint. Before research forks diverge, pin behavior with golden tests: token output for a fixed sample row, vocab size/hash stability, corpus line format, embedding shape. Cheap insurance against silent contract breaks (C1–C3 especially).
 8. **GPU-only path.** cuDF imports at module load; there is no CPU fallback for the tokenizer pipeline. Plan dev workflows accordingly (small GPU instance > laptop).
+9. **`MONTH_12` and `CARD_0` share vocabulary ID 2179** (and ID 2167 is an unused hole): `FixedVocabTokenizer` uses raw `min_val`-based values as local indices while the offset packer advances by count, so any step with `min_val > 0` overruns into the next step's ID range — MONTH (`min_val=1`) is the one such step in the default config. The shipped checkpoint was *trained with* this layout, so don't hot-fix the tokenizer without retraining (C1 cuts both ways). Mechanism, verification snippet, and porting rule (`min_val=0` always) in [Level 500](level-500-the-code-anatomy.md#23-tokenizerpipeline--the-engine-method-by-method).
+10. **The `-100` label masking is inert.** `FinancialTabularTokenizer.encode(line, max_length=…)` pre-pads every sequence to full length, so `FinancialCLMDataset.__getitem__`'s `-100` fill is always fully overwritten — pad positions are trained as `<pad>`-prediction targets instead of being masked. Negligible on TabFormer (only tail chunks are short); a real loss-dilution risk on short-history datasets. Two-line fix and golden test in [Level 500](level-500-the-code-anatomy.md#25-financialtabulartokenizer--clm_datapy--the-lm-facing-adapter-and-the-training-boundary).
 
 ## 4. Extension recipes
 
@@ -104,4 +106,6 @@ Add a classification head over the pooled state and fine-tune (full or LoRA) on 
 
 > The system is held together by six contracts — vocabulary, determinism, corpus grammar, tensor interface, checkpoint format, evaluation hygiene. Most "mysterious" failures are a contract silently broken; most extensions are a contract consciously renegotiated (then: regenerate corpus, retrain, re-extract). Know the contracts and the repo is yours to reshape.
 
-**Next stops:** [Research — what the literature suggests trying](../05-research/README.md) · [Data — feeding new datasets in](../04-data/README.md) · [Experimentation — running it all with Loom](../06-experimentation/01-loom-workflow.md).
+**Next:** [Level 500 — The Code Anatomy](level-500-the-code-anatomy.md): the notebooks cell by cell, every tokenizer class and method, the GPU parallelization model, and the porting surface — the level for people about to *rebuild* this for their own dataset.
+
+**Then:** [Research — what the literature suggests trying](../05-research/README.md) · [Data — feeding new datasets in](../04-data/README.md) · [Experimentation — running it all with Loom](../06-experimentation/01-loom-workflow.md).

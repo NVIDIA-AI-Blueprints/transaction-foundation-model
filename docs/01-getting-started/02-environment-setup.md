@@ -19,6 +19,39 @@ The stack is GPU-native end to end. You will run everything inside NVIDIA's **Ne
 
 No A100 at hand? You can still read everything, run notebook 01–02 on a smaller GPU (e.g. 24 GB) with reduced sample sizes, and use the shipped checkpoint for notebooks 04–05. Cloud GPU instances (one A100 for an afternoon) are the pragmatic path for full runs.
 
+## Working from macOS + Conductor
+
+If you are working from a Mac, do **not** try to run this stack locally. Docker Desktop on macOS does not expose an NVIDIA CUDA GPU to `docker run --gpus all`, and Apple Silicon runs Linux/arm64 containers while this notebook stack expects NVIDIA CUDA on Linux/x86_64.
+
+Use the repo's GCP notebook runtime instead:
+
+```bash
+gcloud auth login
+gcloud auth application-default login
+scripts/gcp-gpu-up.sh
+scripts/gcp-sync-workspace.sh
+scripts/gcp-jupyter.sh
+```
+
+That workflow keeps Conductor and your editor local, creates or updates a GCP A100 VM, syncs the current workspace to `/mnt/tfm/workspace`, starts the NeMo container remotely, and forwards Jupyter back to your browser at `localhost:8888`.
+
+The GCP VM also installs Google's Ops Agent and grants its service account Cloud Logging/Monitoring write roles. This is what makes GPU utilization appear in the GCP Console monitoring tab; metric data can take a few minutes to show up after the VM boots or the agent is installed.
+
+The current GCP default is `a2-highgpu-1g` (A100 40GB) because that quota is available in the project. Treat it as the working bootstrap target; full-size preprocessing or longer training may still require A100 80GB/H100 quota or reduced notebook sample sizes.
+
+After Jupyter is open, keep development source-of-truth in Conductor. Edit locally, run `scripts/gcp-sync-workspace.sh`, then rerun cells in Jupyter. The Conductor Run button starts the remote tunnel, but it does not sync local changes first.
+
+Notebooks 04 and 05 require the shipped Git LFS checkpoint. In the Conductor + GCP workflow, pull it on your Mac and sync it to the VM model mount:
+
+```bash
+brew install git-lfs
+git lfs install
+git lfs pull --include='models/decoder-foundation-model/**' --exclude=''
+scripts/gcp-sync-models.sh
+```
+
+The full runbook is [`infra/gcp-notebook/README.md`](../../infra/gcp-notebook/README.md). It documents the Terraform resources, persistent disk layout, Conductor integration, and each helper script.
+
 ## Step 1 — Launch the NeMo container
 
 From your clone of this repo:
@@ -121,6 +154,7 @@ Note the `--dataset.data_path` style: any key in [`configs/pretrain_financial_de
 |---------|-------|-----|
 | `git lfs pull` fails with "dubious ownership" | Bind-mount ownership mismatch | `git config --global --add safe.directory /workspace` |
 | Notebook 04/05 errors loading model / shape mismatch | LFS pointer files instead of real weights | `git lfs pull`, verify file sizes |
+| Notebook 04 says checkpoint not found under `/workspace/models` on GCP | VM model mount was not populated | Pull LFS locally, then run `scripts/gcp-sync-models.sh` |
 | DataLoader workers crash | Shared memory too small | Relaunch container with `--shm-size=8g` |
 | `cudf` import error | Running outside the container / no GPU | Use the NeMo container on a GPU host |
 | OOM during notebook 01 | 24M rows on a small GPU | Reduce sample sizes in the notebook, or use a bigger GPU |

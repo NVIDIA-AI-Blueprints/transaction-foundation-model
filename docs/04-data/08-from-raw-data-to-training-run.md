@@ -117,6 +117,8 @@ class ChainTokenizerPipeline(TokenizerPipeline):
         return df.reset_index(drop=True)
 ```
 
+> ⚠️ **Before you copy the `MONTH` step:** as shipped, `FixedVocabTokenizer` with `min_val > 0` shifts its global IDs up by `min_val`, colliding its top token with the next step's first token — here `MONTH_12` would share an ID with `TDIF_0`, exactly the [`MONTH_12 ≡ CARD_0` defect in the financial pipeline](../03-learning-path/level-400-design-contracts-and-extensions.md#3-sharp-edges-read-before-deploying-or-publishing-numbers) (sharp edge #9). Since you're training from scratch anyway, use `min_val=0` everywhere and shift in `preprocess()` (`df["month"] = ts.dt.month - 1`, tokens `MONTH_00`–`MONTH_11`), or fix the engine first — mechanism in [Level 500](../03-learning-path/level-500-the-code-anatomy.md#23-tokenizerpipeline--the-engine-method-by-method). Then assert `len(tok.id_to_token) == len(tok.vocab)` as your collision sentinel.
+
 **Vocabulary accounting** (you need this number twice below): 5 specials + 8 AMT + 2 DIR + 5000 CTPY + 256 MTH + 2 ST + 7 GAS + 24 HOUR + 7 DOW + 12 MONTH + 32 TDIF = **5,355**.
 
 **Tokens per event:** 10 (+1 `<sep>`) → `chunk_size = 4096 // 11 ≈ 372` events per sequence.
