@@ -14,4 +14,4 @@ export const LOOM_ASCII_LOGO: string[] = [
 	"╚══════╝ ╚═════╝  ╚═════╝  ╚═╝     ╚═╝",
 ];
 
-export const LOOM_TAGLINE = "an agentic CLI for data science";
+export const LOOM_TAGLINE = "an agent harness for training foundation models";

@@ -65,16 +65,14 @@ function printHelp(version: string | undefined): void {
 
 	section("Getting started", [
 		["loom", "open the agent (interactive)"],
-		['loom "profile my data"', "start with a goal, in plain English"],
-		["loom doctor", "health-check the local stack"],
-		["loom doctor --fix", "let Claude or Codex resolve any issues"],
+		['loom "tokenize my transactions and baseline them"', "start with a goal, in plain English"],
+		["loom <verb> [--flags]", "jump straight to a verb workflow"],
 		["loom update", "pull + rebuild the CLI + refresh the engine"],
 	]);
 	section("Verbs", [
-		["understand", "ingest  eda  validate  viz  datasets  doctor"],
-		["build", "features  pipeline  run"],
-		["operate", "report  ops"],
-		["gated", "deploy  train  collab  skillopt  notebook   (explicit confirm)"],
+		["ingest", "register a dataset as a versioned data object + leakage scan"],
+		["tokenize", "compile a tokenizer spec into a contract-checked training corpus"],
+		["baseline", "compute the control a model must beat (popularity / repeat-last)"],
 	]);
 	section("Commands", [
 		["loom <verb> [--flags]", "jump to a verb workflow (/loom-<verb>)"],
@@ -83,7 +81,7 @@ function printHelp(version: string | undefined): void {
 		["loom --version", "show version"],
 	]);
 	section("Tips", [
-		["--model <provider/id>", "pick the LLM (or set ANTHROPIC_API_KEY etc.)"],
+		["--model <provider/id>", "pick the LLM (default Anthropic; e.g. openrouter/auto)"],
 		["LOOM_PYTHON", "advanced — override the engine runtime path"],
 	]);
 
