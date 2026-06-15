@@ -97,6 +97,8 @@ Following the [universal recipe](08-from-raw-data-to-training-run.md), with the 
 
 The multi-protocol structure also sets up the in-house version of the [transfer-learning bet](../05-research/02-improvement-ideas.md#d3--the-blockchainfiat-transfer-study-the-original-contribution-bet): does DEX-pretraining transfer to Hyperliquid wallets? To Polymarket bettors? Same evaluation harness, zero new data work.
 
+> **Ready to build it?** The [Dataset & Training Roadmap](../05-research/03-dataset-and-training-roadmap.md) sequences this into a gated plan, and [`docs/backlog/phase-1-first-production-run.md`](../backlog/phase-1-first-production-run.md) is the step-by-step spec for the first run on the DEX slice of the cross-chain mart (preceded by the [Phase 0 guardrails](../backlog/phase-0-guardrails.md)).
+
 ## 5. Checklist before your first corpus
 
 - [ ] Catalog service reachable; `describe_data_product` returns **live schema** for your chosen product (manifests won't tell you columns)

@@ -6,6 +6,7 @@ This section connects the blueprint you just learned to the **research frontier*
 |------|----------|
 | [01 — Literature Review](01-literature-review.md) | The transaction-foundation-model landscape: production systems (Visa, Revolut, Nubank…), architecture & objective findings, blockchain-native models, datasets & benchmarks, open problems |
 | [02 — Improvement Ideas](02-improvement-ideas.md) | A ranked backlog of experiments for *this* repo: tokenization upgrades, objective variants, scaling, evaluation hardening, graph augmentation — with effort estimates and literature backing |
+| [03 — Dataset & Training Roadmap](03-dataset-and-training-roadmap.md) | The **sequence**: how ZKAI turns the idea menu into a gated build — the three data forks decided (small-first; no synthetic in-corpus; alt-data adapter-only), two product lineages (crypto + fiat), and the phase plan. Executable steps in [`docs/backlog/`](../backlog/README.md) |
 
 ## Where this material comes from
 

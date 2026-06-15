@@ -20,8 +20,9 @@ The documentation follows a **level scaffolding** (think university course numbe
 | [02 — Concepts](02-concepts/README.md) | Primers on everything you might not know yet (foundation models, tokenization, NeMo, RAPIDS, …) | Whenever a term in the learning path is unfamiliar |
 | [03 — Learning Path](03-learning-path/README.md) | **The core curriculum**: Levels 100 → 500, from big picture to line-by-line code anatomy | In order, at your own pace |
 | [04 — Data](04-data/README.md) | Dataset catalog + step-by-step guides for adding new data — public blockchain data from BigQuery (EVM, Solana, Stellar, Celo) and ZKAI's internal Embed pipeline datasets | When you want to train on new/your own data |
-| [05 — Research](05-research/README.md) | Literature review and concrete ideas for improving this model | When you move from "using" to "researching" |
+| [05 — Research](05-research/README.md) | Literature review, concrete improvement ideas, and the sequenced [dataset & training roadmap](05-research/03-dataset-and-training-roadmap.md) | When you move from "using" to "researching" |
 | [06 — Experimentation](06-experimentation/README.md) | How we run disciplined experiments with [Loom](https://github.com/ZKAI-Network/loom) | Before you launch your first training run variant |
+| [Backlog](backlog/README.md) | Step-by-step execution specs for the near-term roadmap phases (Phase 0, Phase 1, …) | When you're ready to *build* the next phase |
 
 ## Recommended paths
 
@@ -45,7 +46,9 @@ The documentation follows a **level scaffolding** (think university course numbe
 1. Everything above, then:
 2. [Research section](05-research/README.md) — what the literature says and where this model can improve
 3. [Data section](04-data/README.md) — bring in new datasets (e.g., on-chain transaction data)
-4. [Experimentation with Loom](06-experimentation/01-loom-workflow.md) — run changes as disciplined, tracked experiments
+4. [Dataset & training roadmap](05-research/03-dataset-and-training-roadmap.md) — the sequenced, gated build plan (small-first, blockchain-led, two product lineages)
+5. [Backlog](backlog/README.md) — when you're ready to build it: executable Phase 0 / Phase 1 specs
+6. [Experimentation with Loom](06-experimentation/01-loom-workflow.md) — run changes as disciplined, tracked experiments
 
 ## Documentation conventions
 
