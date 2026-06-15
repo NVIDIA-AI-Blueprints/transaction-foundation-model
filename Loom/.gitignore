@@ -1,0 +1,31 @@
+# Secrets / local environment
+.env
+# Local-dev Metaflow datastore env written by scripts/setup_metaflow_minikube.sh
+.env.metaflow
+
+# Python build / cache artifacts
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
+.venv/
+
+# Metaflow local metadata/datastore
+.metaflow/
+
+# Runtime data, run outputs, and corpus records (kept out of version control)
+data/
+runs/
+corpus/*.jsonl
+
+# Generated task inputs (recreated by each task's prepare_data.py)
+tasks/*/input/
+logs/
+# AIDE per-run workspaces + Metaflow local run logs (ephemeral, created at cwd)
+workspaces/
+# Flywheel learnings rollups (created at cwd; the moat corpus, not source)
+learnings/
+
+# Telemetry corpus (distillation data — local, like learnings/)
+telemetry/

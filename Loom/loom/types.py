@@ -1,0 +1,302 @@
+"""Core data types for Loom.
+
+These types are the *locked contract* every other Loom module depends on, so
+this module is deliberately dependency-light: it imports only from the Python
+standard library and must remain importable in any environment.
+
+The most important invariant is :class:`ExecutionResult`, which is **field
+identical** to AIDE's ``aide.interpreter.ExecutionResult``. Field parity is what
+lets any Loom :class:`~loom.providers.ExecutionProvider` be used directly as an
+AIDE ``exec_callback`` (after a trivial type-shim conversion in the AIDE
+adapter). The contract reference is::
+
+    /tmp/ds-research/aideml/aide/interpreter.py  (lines 26-37)
+
+If AIDE's ExecutionResult ever changes shape, this dataclass MUST be updated to
+match it verbatim.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ExecutionResult:
+    """Result of executing a code snippet.
+
+    Field-identical to ``aide.interpreter.ExecutionResult`` so that a Loom
+    execution provider's output can be converted into AIDE's type with a
+    straight field-for-field copy (``aide.interpreter.ExecutionResult(
+    **dataclasses.asdict(result))``) and vice versa.
+
+    Attributes:
+        term_out: Captured stdout/stderr lines from the run, in order. The
+            interpreter appends a final ``"Execution time: ..."`` (or
+            ``"TimeoutError: ..."``) line.
+        exec_time: Wall-clock execution time in seconds.
+        exc_type: Class name of the raised exception, or ``None`` if the code
+            ran to completion without raising. A timeout is reported as the
+            string ``"TimeoutError"``.
+        exc_info: Mapping of selected exception attributes (``args``, ``name``,
+            ``msg``, ``obj``) when available; ``None`` otherwise.
+        exc_stack: Extracted traceback frames as ``(filename, lineno, name,
+            line)`` tuples; ``None`` if there was no exception.
+    """
+
+    term_out: list[str]
+    exec_time: float
+    exc_type: str | None
+    exc_info: dict | None = None
+    exc_stack: list[tuple] | None = None
+
+
+@dataclass
+class RunResult:
+    """Outcome of running a Loom **lifecycle flow** through the MLOps interface.
+
+    Where :class:`ExecutionResult` is the AIDE-shaped result of executing one
+    *candidate snippet* (the search "muscle"), :class:`RunResult` is the result
+    of running a whole **lifecycle command's flow** (EDA, connect, validate, ...)
+    through :meth:`loom.providers.ExecutionProvider.run_flow`. Every lifecycle
+    command's mandated artifact is a **Metaflow run + an ``@card``** (design-spec
+    §3), so this type carries the run's pathspec, whether it succeeded, the
+    located ``@card`` reference, a small JSON-able summary of the run's output
+    artifacts (large output stays in Metaflow, never inlined), and an error
+    string when the run could not be started or read.
+
+    Attributes:
+        pathspec: The Metaflow run pathspec (e.g. ``"EdaFlow/123"``) identifying
+            the produced run, or ``None`` if no run was created (e.g. the flow
+            failed to start).
+        successful: Whether the flow run completed successfully.
+        card_path: Reference to the run's ``@card`` (its datastore card path), or
+            ``None`` if the run produced no card / it could not be located. The
+            shareable, versioned render the command hands back.
+        summary: A small, JSON-able dict summarizing the run's output artifacts
+            (e.g. the profile dict an EDA flow produced). Kept small by contract;
+            bulk output stays in Metaflow as artifacts referenced by pathspec.
+        error: Human-readable description of why the run failed or could not be
+            read, or ``None`` on success. Mirrors the degraded-result style the
+            execution provider uses for its candidate runs.
+    """
+
+    pathspec: str | None
+    successful: bool
+    card_path: str | None = None
+    summary: dict = field(default_factory=dict)
+    error: str | None = None
+
+
+@dataclass
+class Task:
+    """A single experiment to run through Loom.
+
+    Loom's input data is a **Metaflow data object (an Artifact)** referenced by
+    **pathspec** and read only through the Metaflow Client API; the datastore
+    backing it (local or S3/minio) is an opaque detail Metaflow owns. Two fields
+    carry that reference, exactly one of which the active provider consumes:
+
+    * the ``metaflow`` provider uses :attr:`dataset_ref` (a pathspec produced by
+      ``loom ingest`` -> :class:`flows.ingest_dataset.IngestDataset`), and
+      materializes it to a host-local ``./input`` via the Client API;
+    * the ``local`` provider (the Metaflow-free dev fallback) uses
+      :attr:`data_dir`, a plain local directory copied into ``./input``.
+
+    Attributes:
+        data_dir: Path to a local directory holding the task's input data. Used
+            by the ``local`` (Metaflow-free) execution provider, which copies it
+            into the workspace's ``./input``. May be empty when the Metaflow
+            data-object path (``dataset_ref``) is used instead.
+        goal: Natural-language description of what the solution should achieve.
+        eval: Natural-language description of how a solution is evaluated
+            (the validation metric the search provider should optimize).
+        experiment_id: Stable identifier used to group runs/leaderboard entries
+            and to key corpus records.
+        tenant: Logical tenant the task belongs to (multi-tenant boundary).
+            Defaults to ``"default"``.
+        dataset_ref: Optional Metaflow **pathspec** (e.g.
+            ``"IngestDataset/123"``) identifying the ingested data object to use
+            as input. This is the reference the ``metaflow`` provider reads via
+            the Metaflow Client API (``loom.dataio.materialize_dataset``); Loom
+            never touches the underlying datastore (S3/minio/local) directly.
+            ``None`` for the local-dev path, which uses ``data_dir`` instead.
+    """
+
+    data_dir: str
+    goal: str
+    eval: str
+    experiment_id: str
+    tenant: str = "default"
+    dataset_ref: str | None = None
+
+
+@dataclass
+class SearchResult:
+    """Outcome of a search provider's run over a task.
+
+    Attributes:
+        best_code: Source code of the best solution found, or ``None`` if no
+            viable solution was produced.
+        best_metric: Validation metric of the best solution, or ``None``.
+        journal_path: Filesystem path to the persisted search journal/log.
+        tree_path: Filesystem path to the persisted search tree (e.g. an HTML
+            visualization), if any.
+        node_count: Total number of search nodes explored.
+    """
+
+    best_code: str | None
+    best_metric: float | None
+    journal_path: str | None = None
+    tree_path: str | None = None
+    node_count: int = 0
+
+
+@dataclass
+class NodeRecord:
+    """One finished search node, persisted by the corpus.
+
+    Emitted by a search provider via the ``on_node`` callback as each node
+    finishes, and appended (as JSONL) by :class:`loom.corpus.Corpus`. The
+    ``owned_by`` field is the IP boundary: records owned by a specific tenant
+    are tagged and excluded from the cross-tenant "general" corpus.
+
+    Attributes:
+        experiment_id: Experiment this node belongs to.
+        node_id: Identifier of this node within the search tree.
+        parent_id: Identifier of the parent node, or ``None`` for a draft/root.
+        stage: Search stage that produced the node (e.g. ``"draft"``,
+            ``"improve"``, ``"debug"``).
+        code: Source code evaluated at this node.
+        term_out: Captured terminal output lines from executing the code.
+        exc_type: Exception class name if the run raised, else ``None``.
+        metric: Validation metric reported for this node, or ``None``.
+        judge_summary: Short natural-language review/summary of the run.
+        model: Identifier of the model that generated the code.
+        tokens: Token count attributed to generating this node.
+        tenant: Tenant the node belongs to.
+        owned_by: IP owner of the record; ``"general"`` means it may be used by
+            a cross-tenant moat model, any other value tags it as tenant-owned.
+        ts: Epoch timestamp (seconds) when the record was created.
+    """
+
+    experiment_id: str
+    node_id: str
+    parent_id: str | None
+    stage: str
+    code: str
+    term_out: list[str]
+    exc_type: str | None
+    metric: float | None
+    judge_summary: str | None
+    model: str | None
+    tokens: int | None
+    tenant: str = "default"
+    owned_by: str = "general"
+    ts: float = field(default=0.0)
+
+
+@dataclass
+class ArtifactRef:
+    """A model-builder output: a Metaflow run pathspec + a small JSON-able summary.
+
+    The model-builder analogue of :class:`RunResult`. The crux of constraint 1
+    of the ``ModelBuilderProvider`` port: a backbone/tokenizer/embeddings/model
+    is **only ever a pathspec** here, never a ``.nemo`` file or an object-store
+    URI. Bulk stays in Metaflow as named artifacts referenced by the pathspec.
+
+    Attributes:
+        pathspec: The Metaflow run pathspec (e.g. ``"PretrainFlow/123"``)
+            identifying the produced run, or ``None`` on failure / refusal.
+        kind: The kind of artifact produced — one of ``"backbone"``,
+            ``"tokenizer"``, ``"embeddings"``, ``"model"``, or ``"endpoint"``.
+        summary: A small, JSON-able dict summarizing the output (e.g. dims,
+            vocab size, objective, fingerprint). Kept small by contract; bulk
+            stays in Metaflow as artifacts referenced by ``pathspec``.
+        error: Human-readable description of why the build failed or was
+            refused, or ``None`` on success.
+    """
+
+    pathspec: str | None
+    kind: str
+    summary: dict = field(default_factory=dict)
+    error: str | None = None
+
+
+@dataclass
+class Scores:
+    """The scalar(s) ``evaluate`` returns.
+
+    Parallels :attr:`SearchResult.best_metric` / :attr:`RunResult.summary`: a
+    derived number plus a small detail dict, never rows.
+
+    Attributes:
+        metric: The metric name (e.g. ``"fraud-pr-auc"``, ``"roc_auc"``).
+        value: The scalar metric value, or ``None`` if it could not be computed.
+        detail: A small JSON-able dict of supporting detail (e.g.
+            ``{"baseline": .., "lift": .., "n_holdout": ..}``).
+    """
+
+    metric: str
+    value: float | None
+    detail: dict = field(default_factory=dict)
+
+
+@dataclass
+class Capability:
+    """One capability a model-builder backend declares, with its AIDE-search mode.
+
+    Attributes:
+        name: The capability name — one of ``"tokenize"``, ``"pretrain"``,
+            ``"finetune"``, ``"embed"``, ``"evaluate"``, ``"serve"``.
+        mode: The AIDE-search mode — ``"searchable"`` (AIDE may tree-search it)
+            or ``"launch-and-track"`` (heavy/external; AIDE never searches it).
+        supported: Whether the backend actually supports this capability.
+        notes: A REQUIRED honesty note for stand-ins/limited capabilities
+            ("don't over-sell"); e.g. why a CPU stand-in is not a real
+            transformer, or that ``serve`` is batch-only.
+    """
+
+    name: str
+    mode: str
+    supported: bool
+    notes: str = ""
+
+
+@dataclass
+class CapabilityManifest:
+    """What :meth:`loom.providers.ModelBuilderProvider.manifest` returns.
+
+    The negotiation contract a backend exposes up front: what it can do, the
+    mode of each capability, and the honesty notes the refusal logic reads.
+
+    Attributes:
+        backend: The backend name (e.g. ``"local"``, ``"nemo"``).
+        capabilities: Mapping of capability name -> :class:`Capability`.
+    """
+
+    backend: str
+    capabilities: dict[str, Capability]
+
+    def supports(self, name: str) -> bool:
+        """Return whether ``name`` is a declared, supported capability."""
+        cap = self.capabilities.get(name)
+        return bool(cap and cap.supported)
+
+    def mode_of(self, name: str) -> str | None:
+        """Return the declared mode of ``name``, or ``None`` if undeclared."""
+        cap = self.capabilities.get(name)
+        return cap.mode if cap else None
+
+
+__all__ = [
+    "ExecutionResult",
+    "RunResult",
+    "Task",
+    "SearchResult",
+    "NodeRecord",
+    "ArtifactRef",
+    "Scores",
+    "Capability",
+    "CapabilityManifest",
+]

@@ -1,0 +1,18 @@
+# Node deps + build output (reproducible via `npm install && npm run build`)
+node_modules/
+dist/
+
+# Pi runtime data + installed packages written into the branded agent home
+home/sessions/
+home/auth.json
+home/.cache/
+home/npm/
+home/agents/
+home/.loom-bootstrap.json
+home/mcp-npx-cache.json
+home/trust.json
+home/models.json
+
+# misc
+*.log
+.DS_Store
