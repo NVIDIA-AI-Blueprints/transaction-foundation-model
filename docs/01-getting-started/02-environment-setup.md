@@ -30,16 +30,16 @@ gcloud auth login
 gcloud auth application-default login
 scripts/gcp-gpu-up.sh
 scripts/gcp-sync-workspace.sh
-scripts/gcp-jupyter.sh
+scripts/gcp-marimo.sh
 ```
 
-That workflow keeps Conductor and your editor local, creates or updates a GCP A100 VM, syncs the current workspace to `/mnt/tfm/workspace`, starts the NeMo container remotely, and forwards Jupyter back to your browser at `localhost:8888`.
+That workflow keeps Conductor and your editor local, creates or updates a GCP A100 VM, syncs the current workspace to `/mnt/tfm/workspace`, starts the NeMo container remotely, and forwards marimo back to your browser at `localhost:8080`.
 
 The GCP VM also installs Google's Ops Agent and grants its service account Cloud Logging/Monitoring write roles. This is what makes GPU utilization appear in the GCP Console monitoring tab; metric data can take a few minutes to show up after the VM boots or the agent is installed.
 
 The current GCP default is `a2-highgpu-1g` (A100 40GB) because that quota is available in the project. Treat it as the working bootstrap target; full-size preprocessing or longer training may still require A100 80GB/H100 quota or reduced notebook sample sizes.
 
-After Jupyter is open, keep development source-of-truth in Conductor. Edit locally, run `scripts/gcp-sync-workspace.sh`, then rerun cells in Jupyter. The Conductor Run button starts the remote tunnel, but it does not sync local changes first.
+After marimo is open, keep development source-of-truth in Conductor. Edit locally, run `scripts/gcp-sync-workspace.sh`, then rerun cells in marimo. The Conductor Run button starts the remote tunnel, but it does not sync local changes first.
 
 Notebooks 04 and 05 require the shipped Git LFS checkpoint. In the Conductor + GCP workflow, pull it on your Mac and sync it to the VM model mount:
 

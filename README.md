@@ -39,7 +39,7 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
 
 > 📚 **New to foundation models?** Start with the **[documentation](docs/README.md)** — a didactic, level-based learning path (100 → 400) for data scientists, plus guides on adding new datasets (including public blockchain data via BigQuery), a research literature review with improvement ideas, and our experimentation workflow.
 
-> **Primary development workflow:** this repo is set up for humans supervising local [Conductor](https://conductor.build/) coding agents from macOS while notebooks run on a remote GCP NVIDIA GPU VM. Use Conductor for repo edits and agent work; use Jupyter for GPU execution.
+> **Primary development workflow:** this repo is set up for humans supervising local [Conductor](https://conductor.build/) coding agents from macOS while notebooks run on a remote GCP NVIDIA GPU VM. Use Conductor for repo edits and agent work; use marimo for GPU execution.
 
 ## Table of Contents
 
@@ -80,7 +80,7 @@ pipeline in `.github/workflows/ci.yml` stays Loom-free.
 
 #### Primary Workflow: Conductor + GCP GPU
 
-This is the recommended workflow for local machines, especially macOS laptops. Your Mac runs Conductor, agents, Git, Terraform, and the browser. GCP runs the NVIDIA GPU VM and the NeMo Jupyter container.
+This is the recommended workflow for local machines, especially macOS laptops. Your Mac runs Conductor, agents, Git, Terraform, and the browser. GCP runs the NVIDIA GPU VM and the NeMo marimo container.
 
 From a Conductor workspace:
 
@@ -89,10 +89,10 @@ gcloud auth login
 gcloud auth application-default login
 scripts/gcp-gpu-up.sh
 scripts/gcp-sync-workspace.sh
-scripts/gcp-jupyter.sh
+scripts/gcp-marimo.sh
 ```
 
-Open the URL printed by `scripts/gcp-jupyter.sh`, then run `01_dataset_baseline.ipynb`.
+Open the URL printed by `scripts/gcp-marimo.sh`, then run `01_dataset_baseline.py`.
 
 The first time you need notebooks 04/05, install Git LFS locally and pull the shipped checkpoint before syncing:
 
@@ -111,7 +111,7 @@ For normal development:
    ```bash
    scripts/gcp-sync-workspace.sh
    ```
-4. Rerun the affected cells in Jupyter.
+4. Rerun the affected cells in marimo.
 5. Keep generated outputs under `/workspace/data`, `/workspace/models`, and `/workspace/artifacts`.
 
 Do **not** pull or run the NeMo container directly on macOS. Docker Desktop on macOS does not expose an NVIDIA CUDA GPU to `docker run --gpus all`. The GCP runbook documents the full environment, script behavior, and day-to-day dev loop: [`infra/gcp-notebook/README.md`](infra/gcp-notebook/README.md).
@@ -191,7 +191,7 @@ Notebook 03 runs a short 30-step demo to illustrate the training pipeline; its o
 
 #### Steps
 
-For the primary Conductor + GCP workflow, use [`infra/gcp-notebook/README.md`](infra/gcp-notebook/README.md). It provisions the VM, persistent disk, bucket, service account, NVIDIA driver, Docker runtime, Ops Agent monitoring, workspace sync, and Jupyter tunnel.
+For the primary Conductor + GCP workflow, use [`infra/gcp-notebook/README.md`](infra/gcp-notebook/README.md). It provisions the VM, persistent disk, bucket, service account, NVIDIA driver, Docker runtime, Ops Agent monitoring, workspace sync, and marimo tunnel.
 
 For a direct Linux NVIDIA host:
 
