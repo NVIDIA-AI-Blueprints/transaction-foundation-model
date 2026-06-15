@@ -57,20 +57,18 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
 
 ### Developing with Loom (internal)
 
-> Internal to ZKAI Labs. This repo is the development home and first pilot for **Loom**, our
-> agentic data-science CLI, which lives in-tree under [`Loom/`](Loom/) and is dogfooded to build
-> the model in this repo. (Loom's standalone repo `ZKAI-Network/Loom` is frozen; its full history
-> was carried in via `git subtree`.)
+> Internal to ZKAI Labs. This repo is the development home and first pilot for **Loom** — our
+> agentic tool for training a SOTA foundation model — which lives in-tree under [`Loom/`](Loom/).
+>
+> **Loom is being rebuilt from scratch** (2026-06-15), narrowed from a generic data-science CLI to a
+> tool focused solely on training a SOTA foundation model, with this repo's TFM as the first use
+> case. See [`Loom/DESIGN.md`](Loom/DESIGN.md) for the current design proposal. The previous
+> generic-DS engine is archived under [`Loom-legacy/`](Loom-legacy/) for reference (installable via
+> `pip install -e ./Loom-legacy`). Loom's standalone repo `ZKAI-Network/Loom` is frozen; its full
+> history was carried in via `git subtree`.
 
-Two-step setup from the repo root — the Python engine (editable) and the Node CLI front-end:
-
-```bash
-pip install -r requirements-loom.txt   # engine: editable install of ./Loom (live edits, no reinstall)
-cd Loom/cli && npm install             # the `loom` agentic CLI (Node >= 22.19)
-```
-
-Then `python -m loom --help` (engine) or the `loom` CLI verbs. Loom is intentionally **not** in
-`requirements.txt`, so the NeMo GPU notebook pipeline in `.github/workflows/ci.yml` stays Loom-free.
+Loom dependencies stay in `requirements-loom.txt` (not `requirements.txt`), so the NeMo GPU notebook
+pipeline in `.github/workflows/ci.yml` stays Loom-free.
 
 ---
 
