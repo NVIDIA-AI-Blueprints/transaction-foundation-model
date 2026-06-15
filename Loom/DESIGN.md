@@ -86,30 +86,54 @@ never spawn twenty 8-GPU jobs.
 5. **Tokenizer-signature guardrails (E2)** — persist tokenizer config + vocab hash beside
    checkpoints; assert at load. Closes the silent C1-mismatch failure.
 
-## 6. Proposed v0.1 (TFM-first, smallest useful)
+## 6. Decisions (resolved 2026-06-15)
 
-Drive the first-wave experiments **E2 → T1 → T2** on TabFormer (the shipped recipe), using the
-repo's existing `src/` (tokenizer pipeline, `clm_data.py`, `scripts/train_decoder_model.py`,
-`decoder_inference.py`, notebook-05 eval) **as the backend Loom orchestrates** — those files are the
-contract ground-truth, so Loom wraps them rather than reimplementing.
+1. **Driver: both.** CLI verbs that a human runs *and* that double as tools an agent (Claude/Codex)
+   can call. Every verb is a typed command with a machine-readable result; the CLI is one front-end,
+   the agent-tool schema another, over the same engine.
+2. **Engine: clean reimplementation.** Loom gets its **own** engine (tokenizer, training
+   orchestration, eval) built from scratch for the general FM-training tool — *not* a wrapper around
+   this repo's `src/`. The repo's `src/` and `Loom-legacy/` are **reference**, not backend.
+3. **Contract conformance is how we de-risk the rewrite.** Because we're reimplementing, the C1–C6
+   contracts could drift. The repo's `src/` is the **conformance oracle**: golden tests assert
+   Loom's tokenizer produces the *identical* vocab, vocab-size, and corpus grammar as
+   `src/tokenizer/financial_pipeline.py`, and that pretrain's first-step loss ≈ ln(vocab). This *is*
+   experiment **E2** (tokenizer-signature guardrails + golden tests) — so the first slice both ships
+   value and pins the contracts.
+4. **Ports:** keep model-builder (NeMo) + execution (Metaflow) + data + search (AIDE, searchable
+   only); drop the broad lifecycle verbs. Mine the legacy NeMo/Modal/Metaflow seams as reference and
+   re-implement clean.
 
-v0.1 verbs: `ingest · tokenize · eda · pretrain(--launch gated) · embed · evaluate · report`, with
-`--experiment` threading, contract + leakage guardrails, `local` + Metaflow execution, and a Modal
-GPU target. **Reuse from `Loom-legacy/`:** the NeMo adapter, Modal GPU launcher, Metaflow executor
-seam, and the learnings/telemetry capture — these are FM-training-relevant and already proven.
+## 7. v0.1 build plan (TFM-first, smallest useful)
+
+Target the first-wave experiments **E2 → T1 → T2** on TabFormer. Build sequence, each slice landing
+a runnable verb + tests:
+
+1. **Skeleton** — package layout, `pyproject`, the engine/CLI/agent-tool split, the port interfaces
+   (empty), result/VERDICT types, `--experiment` threading.
+2. **E2 slice (contracts first)** — the tokenizer engine + contract checker (C1–C3) + the **golden
+   tests against `src/` as oracle**. Verbs: `tokenize`, `eda` (leakage gate). No GPU.
+3. **pretrain (launch-and-track)** — NeMo adapter + cost PLAN + `REFUSED_NO_GPU_TARGET` + `--launch`
+   gate + Modal GPU target; tokenizer signature attached to the checkpoint (C5/E2). The torch-free
+   CPU rehearsal builder lands here for GPU-free end-to-end dry runs.
+4. **embed + evaluate** — frozen-backbone extraction (C6 row-IDs) + a first `evaluate` (fraud AUPRC
+   vs baseline; the E1 multi-task battery grows column-by-column from here).
+5. **report** — model card per experiment (runs + metrics + lineage).
+
+Proposed layout:
+
+```
+Loom/
+  pyproject.toml
+  loom/
+    engine/        # tokenizer, contracts, corpus, eval — the clean reimplementation
+    ports/         # model_builder/ (nemo, local-cpu), execution/ (metaflow, local), search/ (aide), data/, llm/
+    verbs/         # ingest, tokenize, eda, pretrain, embed, evaluate, report — each = CLI cmd + agent tool
+    cli.py         # CLI front-end over verbs
+    tools.py       # agent-tool schema over the same verbs
+  tests/
+    golden/        # conformance oracle vs ../src and ../Loom-legacy
+```
 
 **v0.2:** data adapters (D5 internal trade streams via the embed-catalog; D2 chain corpora via
 BigQuery templates), the full E1 benchmark, A1 context-length scaling.
-
-## 7. Open questions for review
-
-1. **Primary driver — human or agent?** Is Loom mainly a CLI a data scientist runs, or is it meant
-   to be driven by an agent (Claude/Codex) too? (Affects whether the surface is CLI-first or an
-   SDK/tool-API the agent calls.) *Lean: both — CLI verbs that double as agent tools, as in the old
-   design.*
-2. **Wrap vs. reimplement** the repo's `src/` tokenizer + training code for v0.1. *Lean: wrap — the
-   contracts live there and Yassine's docs treat `src/` as ground truth.*
-3. **How much port generality now?** *Lean: keep model-builder + execution + data + search ports;
-   drop the broad lifecycle verbs; scope AIDE to searchable only.*
-4. **Reuse vs rewrite** the legacy NeMo/Modal/Metaflow adapters. *Lean: reuse as reference, port
-   forward the proven seams.*
