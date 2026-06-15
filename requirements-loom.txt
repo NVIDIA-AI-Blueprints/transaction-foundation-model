@@ -1,0 +1,10 @@
+# Loom — the agentic data-science CLI developed in-tree under Loom/ and dogfooded
+# to build this model. Editable install so engine edits are live with no reinstall.
+#
+# Deliberately SEPARATE from requirements.txt: that file is consumed by the NeMo
+# GPU notebook CI (.github/workflows/ci.yml) and must stay Loom-free. Install Loom
+# from the repo root with:  pip install -r requirements-loom.txt
+#
+# Pulls Loom's full engine deps (aideml from git, metaflow, ...); requires access
+# to the ZKAI-Network org repos.
+-e ./Loom

@@ -42,6 +42,7 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
 ## Table of Contents
 
 - [Documentation](docs/README.md)
+- [Developing with Loom (internal)](#developing-with-loom-internal)
 - [Quickstart](#quickstart)
   - [Notebooks](#notebooks)
 - [Deployment](#deployment)
@@ -51,6 +52,25 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
 - [Model Architecture](#model-architecture)
 - [License](#license)
 - [Terms of Use](#terms-of-use)
+
+---
+
+### Developing with Loom (internal)
+
+> Internal to ZKAI Labs. This repo is the development home and first pilot for **Loom**, our
+> agentic data-science CLI, which lives in-tree under [`Loom/`](Loom/) and is dogfooded to build
+> the model in this repo. (Loom's standalone repo `ZKAI-Network/Loom` is frozen; its full history
+> was carried in via `git subtree`.)
+
+Two-step setup from the repo root — the Python engine (editable) and the Node CLI front-end:
+
+```bash
+pip install -r requirements-loom.txt   # engine: editable install of ./Loom (live edits, no reinstall)
+cd Loom/cli && npm install             # the `loom` agentic CLI (Node >= 22.19)
+```
+
+Then `python -m loom --help` (engine) or the `loom` CLI verbs. Loom is intentionally **not** in
+`requirements.txt`, so the NeMo GPU notebook pipeline in `.github/workflows/ci.yml` stays Loom-free.
 
 ---
 
