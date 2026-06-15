@@ -1,0 +1,19 @@
+{
+  "theme": "loom",
+  "quietStartup": true,
+  "collapseChangelog": true,
+  "lastChangelogVersion": "0.79.0",
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-opus-4-8",
+  "packages": [
+    "npm:pi-mcp-adapter",
+    "npm:pi-subagents",
+    "npm:pi-web-access",
+    "npm:pi-docparser",
+    "npm:@walterra/pi-charts",
+    "npm:@kaiserlich-dev/pi-session-search",
+    "npm:pi-markdown-preview",
+    "npm:pi-mermaid",
+    "npm:@samfp/pi-memory"
+  ]
+}

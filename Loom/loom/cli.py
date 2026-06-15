@@ -14,8 +14,11 @@ import argparse
 import sys
 from typing import Any, Optional
 
+import json
+
 from .registry import REGISTRY, Verb, VerbContext
 from .store import default_store
+from .tools import all_tool_schemas
 from .types import Severity, Status, Tier, Verdict, VerbResult
 
 
@@ -139,6 +142,19 @@ def render_card(result: VerbResult) -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    # ``verbs`` is a CLI-ONLY manifest command, intercepted BEFORE the
+    # registry-driven argparse (DESIGN.md §2.1; PI.md §B.4 the bridge seam). It is
+    # deliberately NOT a registered Verb: registering it would enumerate it into
+    # ``all_tool_schemas()`` and thereby register it as a Pi tool the agent could
+    # call — but it is plumbing for the Node bridge, not a domain verb. It prints
+    # ``json.dumps(all_tool_schemas())`` (the 3 verb schemas, each carrying
+    # ``_loom.{tier, capability_mode, disable_model_invocation}``) and exits 0 so
+    # the bridge can read the tool manifest without booting an agent.
+    args_list = sys.argv[1:] if argv is None else argv
+    if args_list and args_list[0] == "verbs":
+        print(json.dumps(all_tool_schemas()))
+        return 0
+
     parser = build_parser()
     ns = parser.parse_args(argv)
 

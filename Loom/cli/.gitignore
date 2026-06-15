@@ -1,0 +1,6 @@
+# Loom cli/ (Pi runtime) — local build/runtime artifacts (never commit)
+node_modules/
+dist/
+*.tsbuildinfo
+.loom/
+npm-debug.log*

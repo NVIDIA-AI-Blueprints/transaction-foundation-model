@@ -1,0 +1,39 @@
+{
+  "name": "@zkailabs.com/loom",
+  "version": "0.1.0",
+  "description": "Loom — standalone agentic data-science CLI, hosted on the Pi agent harness (drives the Python Loom engine via verb tools).",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "bin": {
+    "loom": "bin/loom.js"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "extensions/",
+    "prompts/",
+    "home/",
+    "assets/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "typecheck:ext": "tsc -p tsconfig.extensions.json",
+    "typecheck:test": "tsc -p tsconfig.test.json",
+    "test": "node --test --experimental-strip-types \"test/**/*.test.ts\"",
+    "start": "node bin/loom.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.79.0",
+    "@earendil-works/pi-ai": "0.79.0",
+    "@sinclair/typebox": "0.34.49"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
