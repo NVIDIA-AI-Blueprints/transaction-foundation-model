@@ -27,7 +27,11 @@ from .api import (  # noqa: F401
     financial_spec,
 )
 from .contracts import to_corpus_lines  # noqa: F401
-from .spec import corpus_lines, materialize_corpus_lines  # noqa: F401
+from .spec import (  # noqa: F401
+    corpus_lines,
+    materialize_corpus_lines,
+    spec_from_field_map,
+)
 
 __all__ = [
     "AmountStrategy",
@@ -50,4 +54,5 @@ __all__ = [
     "to_corpus_lines",
     "corpus_lines",
     "materialize_corpus_lines",
+    "spec_from_field_map",
 ]

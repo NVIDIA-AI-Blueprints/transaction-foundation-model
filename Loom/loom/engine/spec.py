@@ -82,6 +82,21 @@ DEX_SIDE_MAPPING = {"BUY": "BUY", "SELL": "SELL"}
 
 _MERCH_CLEAN_RE = re.compile(r"[^A-Z0-9\s\-]")
 
+# ── Custom field-map (bring-your-own-schema) defaults ───────────────────────
+# These mirror the Ground-1/A classifier constants. The continuous `amount`
+# strategy compiles to a FixedVocab over the COUNT of log-spaced thresholds
+# crossed (0..n_thresholds), i.e. `bins` tokens for `bins-1` thresholds — exactly
+# the financial AMT family (7 tokens from [10,50,100,500,1000,5000] thresholds).
+CONT_BINS_DEFAULT = 8
+TIMEDELTA_BINS_DEFAULT = 32
+# Calendar parts → (min, max, pad_width). MONTH is 0-based (the sharp-edge-#9 /
+# MONTH_12≡CARD_0 collision fix: shift the raw 1..12 month to 0..11 in preprocess).
+_CALENDAR_PARTS: dict[str, tuple[int, int, int]] = {
+    "hour": (0, 23, 2),
+    "dow": (0, 6, 0),
+    "month": (0, 11, 2),
+}
+
 
 # ── Preset factories ────────────────────────────────────────────────────────
 
@@ -179,6 +194,222 @@ def chain_spec(
         event="trade",
         amount_strategy=AmountStrategy.FIXED,
     )
+
+
+# ── Custom field-map → TokenizerSpec (bring-your-own-schema compile path) ───
+
+
+def _log_thresholds(n_bins: int) -> list[float]:
+    """``n_bins`` tokens ⇒ ``n_bins - 1`` log-spaced thresholds (the AMT family).
+
+    Mirrors the worked AMT example (8 tokens from the 7 thresholds
+    ``[0.001,0.01,0.1,1,10,100,1000]`` → tokens 0..7): a value crossing ``k`` of
+    the thresholds maps to token ``k`` in ``0..n_bins-1``. Deterministic, config
+    only (C2-clean) — no fitting, no data. Thresholds span 10**-3 .. 10**(n-4) so
+    8 bins reproduces the documented decade ladder."""
+    n_thresh = max(1, int(n_bins) - 1)
+    # Decade ladder starting two decades below 1.0 (matches the AMT worked example
+    # at n_bins=8: exponents -3..3 → [0.001 … 1000]).
+    start_exp = -(n_thresh // 2) - 1
+    return [10.0 ** (start_exp + i) for i in range(n_thresh)]
+
+
+def _unique_prefix(base: str, seen_prefixes: set[str], *, explicit: bool = False) -> str:
+    """A unique UPPER token prefix so two fields never ACCIDENTALLY collide.
+
+    C1 injectivity: two fields sharing a prefix over overlapping local indices emit
+    the SAME ``PREFIX_<i>`` token strings and collide. When a field's AUTO-DERIVED
+    prefix is already claimed (e.g. a second ``calendar`` field over a second
+    timestamp column reuses ``HOUR``, or two amount fields named ``amt``), append a
+    numeric suffix (``HOUR``→``HOUR1``→``HOUR2``) so each field gets a disjoint id
+    block — the multi-timestamp / repeated-name schema compiles out of the box.
+
+    An EXPLICIT user-written ``prefix:`` is honored VERBATIM (never suffixed): a
+    human who deliberately writes two identical prefixes is authoring a genuinely
+    bad spec, and C1 must REFUSE it with the named diff (the safety net, INVARIANT
+    #2) rather than silently rewrite it into a different vocab than they declared.
+    The prefix is still recorded so a later auto-derived one steps around it."""
+    if explicit:
+        seen_prefixes.add(base)
+        return base
+    p = base
+    i = 1
+    while p in seen_prefixes:
+        p = f"{base}{i}"
+        i += 1
+    seen_prefixes.add(p)
+    return p
+
+
+def _field_step_from_entry(entry: dict, *, corpus_events: int, seen_prefixes: set[str]) -> FieldStep:
+    """Translate ONE declarative field-map entry → a :class:`FieldStep`.
+
+    Each ``entry`` is ``{name, source, strategy, ...params}`` where ``strategy`` is
+    one of the Ground-1/A strategy names. This is a pure config→dataclass mapping;
+    it instantiates an EXISTING :class:`Strategy` so the result flows through the
+    LOCKED ``compile_spec`` + C1/C2/C3 unchanged. ``corpus_events`` sizes the Hash
+    bucket count when a field-map omits an explicit ``buckets``. ``seen_prefixes``
+    tracks claimed token prefixes so two fields with AUTO-DERIVED prefixes never
+    accidentally collide (C1 — e.g. two timestamp/amount columns); an EXPLICIT
+    ``prefix:`` is honored verbatim so a deliberate collision still trips C1."""
+    name = str(entry["name"])
+    source = str(entry.get("source", name))
+    strat = str(entry["strategy"]).lower()
+    has_explicit_prefix = "prefix" in entry
+    prefix = _unique_prefix(
+        str(entry.get("prefix", name)).upper(), seen_prefixes, explicit=has_explicit_prefix
+    )
+
+    if strat in ("fixedvocab", "fixed", "fixed_vocab"):
+        min_val = int(entry.get("min", 0))
+        max_val = int(entry["max"])
+        pad = int(entry.get("pad_width", entry.get("pad", 0)))
+        return FieldStep(name, source, FixedVocab(prefix, min_val, max_val, pad))
+
+    if strat in ("mapping", "map"):
+        values = tuple(str(v) for v in entry.get("values", ()))
+        default = str(entry.get("default", "UNK"))
+        return FieldStep(name, source, MappingPassthrough(prefix, values, default))
+
+    if strat in ("hash", "categorical_hash"):
+        buckets = entry.get("buckets")
+        if buckets is None:
+            buckets = _hash_buckets(corpus_events)
+        return FieldStep(name, source, Hash(prefix, int(buckets)))
+
+    if strat in ("amount", "continuous", "logbins", "numeric", "numerical"):
+        # Log-threshold bins → FixedVocab over the bin index 0..bins-1. C2-clean
+        # (deterministic thresholds, NO fitted artifact). The bin index is derived
+        # by the preprocess from a recipe-encoded source (``__amt__<col>__<bins>``)
+        # so the spec ALONE drives materialize — no separate field-map needed.
+        bins = int(entry.get("bins", CONT_BINS_DEFAULT))
+        bins = max(2, min(bins, 32))
+        return FieldStep(name, f"__amt__{source}__{bins}", FixedVocab(prefix, 0, bins - 1, 0))
+
+    if strat in ("timedelta", "time_delta", "gap"):
+        # Inter-event gap (seconds) per entity, derived from the timestamp source.
+        bins = int(entry.get("bins", TIMEDELTA_BINS_DEFAULT))
+        return FieldStep(
+            name,
+            f"__gap__{source}",
+            TimeDelta(prefix, bins, float(entry.get("max_years", 10.0))),
+        )
+
+    raise ValueError(
+        f"field {name!r}: unknown strategy {strat!r} "
+        "(expected one of: fixedvocab, mapping, hash, amount, calendar, timedelta)"
+    )
+
+
+def _hash_buckets(corpus_events: int) -> int:
+    """``buckets = clamp(round(corpus_events / 10_000), 256, 65_536)`` (Ground-1/B
+    sizing rule, the "≈ corpus_events / 5K–50K" mid-divisor)."""
+    raw = round(int(corpus_events) / 10_000) if corpus_events else 256
+    return max(256, min(int(raw) or 256, 65_536))
+
+
+def spec_from_field_map(field_map: dict, *, context_len: int = 4096) -> TokenizerSpec:
+    """Build a :class:`TokenizerSpec` from a declarative FIELD-MAP (the SpecDraft).
+
+    The field-map is a plain dict (parsed from the ``loom-fieldmap/1`` YAML the
+    ``propose`` verb emits). Shape::
+
+        entity: account_id          # EXCLUDED from the vocab (T2)
+        event: txn
+        target: is_fraud            # EXCLUDED (leakage)
+        context_len: 4096
+        fields:
+          - {name: amt,  source: txn_amount, strategy: amount,   bins: 8}
+          - {name: mcc,  source: mcc,        strategy: hash,      buckets: 4096}
+          - {name: chan, source: channel,    strategy: mapping,   values: [...], default: UNK}
+          - {name: drcr, source: dr_cr,      strategy: fixedvocab, min: 0, max: 1}
+          - {name: ts,   source: txn_ts,     strategy: calendar}   # → HOUR+DOW+MONTH
+          - {name: gap,  source: txn_ts,     strategy: timedelta, bins: 32}
+
+    Each ``fields[]`` entry is instantiated as the matching existing
+    :class:`Strategy` so the returned spec compiles through the LOCKED
+    ``compile_spec`` + C1/C2/C3 **unchanged** — ARBITRARY columns now compile, and a
+    bad field-map (e.g. two fields → colliding tokens) is REFUSED by C1 with the
+    named diff (HARD INVARIANT #2). ``preset="custom"`` keeps the financial/chain
+    dual-driver byte-identity untouched (HARD INVARIANT #1) while ``materialize``
+    branches on it.
+
+    HARD INVARIANT #4: the ``entity`` and any ``target`` column are NEVER emitted as
+    field steps — the proposer excludes them upstream, and this compiler additionally
+    refuses any ``fields[]`` entry whose ``source`` is the entity/target so a
+    hand-edited field-map cannot smuggle an identity/leakage token back in.
+
+    A ``calendar`` field with no ``part`` EXPANDS to three steps (HOUR, DOW, MONTH)
+    sharing the timestamp source — the doc §2 calendar-token family; ``part: hour``
+    emits just that one. MONTH is laid out 0-based (the MONTH_12≡CARD_0 fix)."""
+    entity = field_map.get("entity")
+    event = field_map.get("event")
+    target = field_map.get("target")
+    ctx_len = int(field_map.get("context_len", context_len))
+    corpus_events = int(field_map.get("corpus_events", 0) or 0)
+
+    excluded = {c for c in (entity, target) if c}
+
+    steps: list[FieldStep] = []
+    # Track the UPPER token prefixes already claimed so two fields can never emit
+    # the same token strings (C1 injectivity). A schema with two timestamp columns
+    # (created_at + updated_at) would otherwise emit two HOUR_* blocks that collide;
+    # `_unique_prefix` disambiguates the second (HOUR, HOUR1, …) so disjoint blocks.
+    seen_prefixes: set[str] = set()
+    for entry in field_map.get("fields", ()):
+        source = str(entry.get("source", entry.get("name", "")))
+        if source in excluded or entry.get("name") in excluded:
+            # T2 / leakage guard — never tokenize the entity or the target, even if
+            # a hand-edited field-map lists it (HARD INVARIANT #4).
+            raise ValueError(
+                f"field {entry.get('name')!r} sources the "
+                f"{'entity (T2)' if source == entity else 'target (leakage)'} "
+                f"column {source!r}; it must NOT be tokenized — drop it from fields."
+            )
+        strat = str(entry["strategy"]).lower()
+        if strat == "calendar":
+            steps.extend(_calendar_steps(entry, source, seen_prefixes))
+        else:
+            steps.append(
+                _field_step_from_entry(entry, corpus_events=corpus_events, seen_prefixes=seen_prefixes)
+            )
+
+    return TokenizerSpec(
+        steps=tuple(steps),
+        preset="custom",
+        entity=entity,
+        event=event,
+        amount_strategy=AmountStrategy.FIXED,
+    )
+
+
+def _calendar_steps(entry: dict, source: str, seen_prefixes: set[str]) -> list[FieldStep]:
+    """Expand a ``calendar`` field-map entry into FixedVocab calendar step(s).
+
+    No ``part`` ⇒ the full HOUR(24)+DOW(7)+MONTH(12) family (doc §2). A single
+    ``part`` (``hour``/``dow``/``month``) emits just that step. Each part is a
+    FixedVocab whose preprocess column the field-map preprocess derives from the
+    timestamp ``source``. The step name is ``"{name}_{part}"`` so two calendar
+    fields over different timestamps never collide on a logical name; the TOKEN
+    prefix is uniquified via ``_unique_prefix`` (``HOUR``→``HOUR1`` for the second
+    timestamp column) so the two calendar blocks are DISJOINT and pass C1 — a
+    multi-timestamp schema (created_at + updated_at) compiles out of the box."""
+    base = str(entry.get("name", "ts"))
+    part = entry.get("part")
+    parts = [part.lower()] if part else ["hour", "dow", "month"]
+    out: list[FieldStep] = []
+    for p in parts:
+        if p not in _CALENDAR_PARTS:
+            raise ValueError(
+                f"calendar field {base!r}: unknown part {p!r} (expected hour/dow/month)"
+            )
+        lo, hi, pad = _CALENDAR_PARTS[p]
+        step_name = f"{base}_{p}"
+        prefix = _unique_prefix(p.upper(), seen_prefixes)
+        out.append(
+            FieldStep(step_name, f"__cal__{source}__{p}", FixedVocab(prefix, lo, hi, pad))
+        )
+    return out
 
 
 # ── The financial CPU preprocess (pandas; build brief constants) ────────────
@@ -319,6 +550,96 @@ def preprocess_chain(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _amount_bin_thresholds(amt: pd.Series, thresholds: list[float]) -> pd.Series:
+    """``bin = sum(amt >= t for t in thresholds)`` → 0..len(thresholds) (generic).
+
+    The bring-your-own-schema analogue of :func:`_amount_bin`: log-spaced
+    deterministic threshold bins (C2-clean, no fitted artifact). Tolerates a
+    ``"$1,234.50"``-style string column the same way the financial preprocess does."""
+    f = (
+        amt.astype(str)
+        .str.replace("$", "", regex=False)
+        .str.replace(",", "", regex=False)
+    )
+    f = pd.to_numeric(f, errors="coerce").fillna(0.0)
+    bin_ = pd.Series(0, index=amt.index, dtype="int64")
+    for t in thresholds:
+        bin_ = bin_ + (f >= t).astype("int64")
+    return bin_
+
+
+def preprocess_field_map(df: pd.DataFrame, spec: TokenizerSpec) -> pd.DataFrame:
+    """Generic CPU preprocess for a custom field-map spec (the ``preset=="custom"``
+    path). Pure pandas, CPU-only, no fitted state.
+
+    Every step's ``source`` is honored generically:
+
+      * a recipe source ``__amt__<col>__<bins>`` → log-threshold bin index 0..bins-1;
+      * a recipe source ``__cal__<col>__<part>`` → the calendar part (hour/dow, or
+        MONTH shifted to 0-based so MONTH never collides with a 0-based block);
+      * a recipe source ``__gap__<col>`` → the per-ENTITY inter-event gap in seconds
+        (sorted by ``[entity, timestamp]`` — the C6 discipline);
+      * any other source → the RAW column passed through verbatim (FixedVocab on a
+        bounded int, Mapping, Hash — the strategy's own ``transform`` does the rest).
+
+    The entity column is carried under its raw name for grouping but is NEVER a
+    field step (the proposer + ``spec_from_field_map`` exclude it — T2)."""
+    out = pd.DataFrame(index=df.index)
+    entity = spec.entity
+
+    # Parse the timestamp column(s) once per distinct underlying source.
+    ts_cache: dict[str, pd.Series] = {}
+
+    def _ts(col: str) -> pd.Series:
+        if col not in ts_cache:
+            ts_cache[col] = pd.to_datetime(df[col], errors="coerce") if col in df.columns else pd.to_datetime(
+                pd.Series([0] * len(df), index=df.index), unit="s"
+            )
+        return ts_cache[col]
+
+    for step in spec.steps:
+        src = step.source
+        if src.startswith("__amt__"):
+            body = src[len("__amt__"):]
+            col, _, bins_s = body.rpartition("__")
+            bins = int(bins_s)
+            raw = df[col] if col in df.columns else pd.Series([0.0] * len(df), index=df.index)
+            out[src] = _amount_bin_thresholds(raw, _log_thresholds(bins))
+        elif src.startswith("__cal__"):
+            body = src[len("__cal__"):]
+            col, _, part = body.rpartition("__")
+            dt = _ts(col)
+            if part == "hour":
+                out[src] = dt.dt.hour.fillna(0).astype("int64")
+            elif part == "dow":
+                out[src] = dt.dt.dayofweek.fillna(0).astype("int64")
+            elif part == "month":
+                # 0-based month (1..12 → 0..11): the MONTH_12≡CARD_0 collision fix.
+                out[src] = (dt.dt.month.fillna(1).astype("int64") - 1).clip(0, 11)
+            else:  # pragma: no cover - guarded in _calendar_steps
+                out[src] = 0
+        elif src.startswith("__gap__"):
+            col = src[len("__gap__"):]
+            dt = _ts(col)
+            tmp = pd.DataFrame({"_dt": dt})
+            if entity and entity in df.columns:
+                tmp["_grp"] = df[entity].values
+                tmp = tmp.sort_values(["_grp", "_dt"], kind="stable")
+                gap = tmp.groupby("_grp")["_dt"].diff().dt.total_seconds()
+            else:
+                tmp = tmp.sort_values(["_dt"], kind="stable")
+                gap = tmp["_dt"].diff().dt.total_seconds()
+            out[src] = gap.reindex(out.index).fillna(0).clip(lower=0)
+        else:
+            # Plain pass-through: the strategy's transform handles dtype coercion.
+            out[src] = df[src] if src in df.columns else pd.Series([None] * len(df), index=df.index)
+
+    # Carry the grouping entity (never a field step) under its raw name.
+    if entity and entity in df.columns and entity not in out.columns:
+        out[entity] = df[entity].values
+    return out
+
+
 def materialize_corpus_lines(compiled, df: pd.DataFrame) -> tuple[list[str], int]:
     """Compile a raw frame into corpus lines for a :class:`CompiledTokenizer`.
 
@@ -338,6 +659,12 @@ def materialize_corpus_lines(compiled, df: pd.DataFrame) -> tuple[list[str], int
     if spec.preset == "chain":
         pre = preprocess_chain(df)
         group_source = "wallet"
+    elif spec.preset == "custom":
+        # Bring-your-own-schema: the generic field-map preprocess; the grouping key
+        # is the declared entity (never a field step — T2). The financial/chain
+        # branches below are byte-for-byte UNCHANGED (HARD INVARIANT #1).
+        pre = preprocess_field_map(df, spec)
+        group_source = spec.entity or "__none__"
     else:
         pre = preprocess_financial(df)
         group_source = "cust"
@@ -373,8 +700,10 @@ def corpus_lines(compiled, df: pd.DataFrame) -> list[str]:
 __all__ = [
     "financial_spec",
     "chain_spec",
+    "spec_from_field_map",
     "preprocess_financial",
     "preprocess_chain",
+    "preprocess_field_map",
     "materialize_corpus_lines",
     "corpus_lines",
     "AMOUNT_THRESHOLDS",
@@ -383,4 +712,6 @@ __all__ = [
     "CHIP_MAPPING",
     "ALL_STATES",
     "DEX_VENUES",
+    "CONT_BINS_DEFAULT",
+    "TIMEDELTA_BINS_DEFAULT",
 ]

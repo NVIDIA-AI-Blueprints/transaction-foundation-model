@@ -72,6 +72,11 @@ PREPARE_PARAMS: dict[str, Any] = {
             "description": "data-representation adapter name (default event-sequence)",
         },
         "in": {"type": "string", "description": "input IngestDataset/<n> pathspec"},
+        "spec": {"type": "string",
+                 "description": "a proposed/edited tokenizer field-map to compile instead of a "
+                                "preset: a TokenizerSpec/<n> pathspec (from `loom propose`) OR a "
+                                "path to a loom-fieldmap/1 YAML/JSON file. When set, the preset is "
+                                "ignored and the custom field-map is compiled + C1/C2/C3-checked."},
         "preset": {"type": "string", "description": "representation preset (event-sequence: financial | chain)",
                    "enum": ["financial", "chain"]},
         "include_time_delta": {"type": "boolean",
@@ -96,6 +101,11 @@ TOKENIZE_PARAMS: dict[str, Any] = {
     "type": "object",
     "properties": {
         "in": {"type": "string", "description": "input IngestDataset/<n> pathspec"},
+        "spec": {"type": "string",
+                 "description": "a proposed/edited tokenizer field-map to compile instead of a "
+                                "preset: a TokenizerSpec/<n> pathspec (from `loom propose`) OR a "
+                                "path to a loom-fieldmap/1 YAML/JSON file. When set, the preset is "
+                                "ignored and the custom field-map is compiled + C1/C2/C3-checked."},
         "preset": {"type": "string", "description": "tokenizer preset: financial | chain",
                    "enum": ["financial", "chain"]},
         "include_time_delta": {"type": "boolean",
@@ -190,6 +200,77 @@ def _load_rows(
         except (FileNotFoundError, OSError, ValueError):
             return None, obj.pathspec, parents
     return None, obj.pathspec, parents
+
+
+def _resolve_fieldmap_spec(spec_ref: Any, ctx: VerbContext) -> Any:
+    """Resolve the ``--spec`` reference to a field-map dict the adapter can compile.
+
+    ``--spec`` accepts two forms (the build brief's `<file-or-pathspec>`):
+
+    * a ``TokenizerSpec/<n>`` pathspec — the proposal object ``loom propose``
+      wrote. The editable field-map lives on the object (``extras.proposal.fieldmap``,
+      with the YAML mirror as the heavy payload). This is the path that needs
+      ``ctx.store``, which the adapter's pure ``_build_spec`` does NOT have — so the
+      verb layer (which holds ``ctx``) resolves it here and hands the adapter a
+      plain dict, preserving the port boundary (Ground 2 §3d).
+    * a filesystem path to a ``loom-fieldmap/1`` YAML/JSON file — a human-edited
+      spec. Read + parse it here so the adapter only ever sees a dict/str.
+
+    Anything else (already a dict, or unresolvable) is returned UNCHANGED so the
+    adapter can decide — an unknown/garbled spec then flows into the same
+    contract-checked refusal path, never a silent-broken corpus (INVARIANT #2).
+    This function only runs when ``--spec`` was passed; the preset path never
+    touches it, so ``tokenize --preset financial|chain`` stays byte-identical
+    (INVARIANT #1)."""
+    # Already a parsed field-map (e.g. an in-process/agent call) → pass through.
+    if isinstance(spec_ref, dict):
+        return spec_ref
+    if not isinstance(spec_ref, str) or not spec_ref:
+        return spec_ref
+
+    # A TokenizerSpec/<n> pathspec → resolve via the store and lift the field-map.
+    looks_like_pathspec = "/" in spec_ref and spec_ref.split("/", 1)[0] == "TokenizerSpec"
+    if looks_like_pathspec:
+        try:
+            obj = ctx.store.get(spec_ref)
+        except (KeyError, ValueError, FileNotFoundError, NotImplementedError, AttributeError):
+            return spec_ref  # leave it for the adapter to refuse with a named diff
+        proposal = (getattr(obj, "extras", {}) or {}).get("proposal") or {}
+        fieldmap = proposal.get("fieldmap")
+        if isinstance(fieldmap, dict) and fieldmap:
+            return fieldmap
+        # Fall back to the heavy YAML payload the proposal persisted.
+        payload_path = getattr(obj, "payload_path", None)
+        if payload_path:
+            loaded = _load_fieldmap_file(payload_path)
+            if loaded is not None:
+                return loaded
+        return spec_ref
+
+    # Otherwise treat it as a file path (human-edited YAML/JSON field-map).
+    loaded = _load_fieldmap_file(spec_ref)
+    return loaded if loaded is not None else spec_ref
+
+
+def _load_fieldmap_file(path: str) -> Optional[dict[str, Any]]:
+    """Parse a ``loom-fieldmap/1`` YAML or JSON file into a dict, or ``None`` on
+    any read/parse failure (the caller then leaves the raw ref for the adapter to
+    refuse with a named diff rather than crashing the verb)."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except (FileNotFoundError, OSError):
+        return None
+    try:
+        import yaml
+
+        data = yaml.safe_load(text)
+    except Exception:  # pragma: no cover - YAML is a declared dep; JSON is a subset
+        try:
+            data = json.loads(text)
+        except (ValueError, TypeError):
+            return None
+    return data if isinstance(data, dict) else None
 
 
 def _derived_numbers(spec, compiled) -> dict[str, Any]:
@@ -424,6 +505,17 @@ def _prepare_impl(
     repr_ = _resolve_representation(representation)
     if repr_ is None:
         return _unknown_representation_result(verb_name, representation, experiment)
+
+    # --- NEW additive --spec path: resolve a TokenizerSpec/<n> pathspec (via the
+    # store — the adapter's pure build_spec has no ctx) or a YAML/JSON file into a
+    # field-map dict the adapter compiles through `spec_from_field_map`. Runs ONLY
+    # when --spec was passed; the preset branch below is byte-identical to v0.1
+    # otherwise (INVARIANT #1). A bad/unresolvable spec flows into the SAME
+    # C1/C2/C3 refusal as any preset spec (INVARIANT #2) — never silently shipped.
+    spec_ref = args.get("spec")
+    if spec_ref:
+        args = dict(args)
+        args["spec"] = _resolve_fieldmap_spec(spec_ref, ctx)
 
     # --- compile the spec (data-free) via the PORT + collect its contract cards.
     spec = repr_.build_spec(dict(args))

@@ -20,8 +20,10 @@ _log = logging.getLogger("loom.verbs")
 # the ``representation="event-sequence"`` binding of the generic ``prepare`` verb
 # (ARCHITECTURE §4/§8), registered explicitly below after ``prepare`` imports.
 # ``ingest``/``baseline`` are unchanged; ``pretrain`` is the gated launch verb
-# (ARCHITECTURE §10 step 6).
-_VERB_MODULES = ("prepare", "ingest", "baseline", "pretrain")
+# (ARCHITECTURE §10 step 6). ``propose`` is the BYO-schema field→strategy proposer
+# that emits an editable tokenizer spec for `tokenize --spec` to compile (it
+# self-registers via @register, like ingest/baseline, so it lands by import here).
+_VERB_MODULES = ("prepare", "ingest", "baseline", "pretrain", "propose")
 
 for _name in _VERB_MODULES:
     try:

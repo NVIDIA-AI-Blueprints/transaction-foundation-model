@@ -41,7 +41,12 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from ..engine import AmountStrategy, compile_spec, materialize_corpus_lines
+from ..engine import (
+    AmountStrategy,
+    compile_spec,
+    materialize_corpus_lines,
+    spec_from_field_map,
+)
 from ..engine.api import CompiledTokenizer, TokenizerSpec
 from ..engine.spec import chain_spec, financial_spec
 from ..ports import (
@@ -59,6 +64,26 @@ from ..types import CostPlan, Diagnostic, Severity, Status, Verdict
 _TENSOR_CONTRACT = "clm/input_ids+labels/-100"
 
 
+def _load_field_map(spec_ref: Any) -> dict:
+    """Resolve a ``--spec`` reference to a field-map dict.
+
+    Accepts (1) an already-parsed field-map ``dict`` (the verb layer resolves a
+    ``TokenizerSpec/<n>`` pathspec via ``ctx.store`` and passes the dict here,
+    keeping the port free of any store dependency — Ground-2(d)); or (2) a plain
+    filesystem path to a ``loom-fieldmap/1`` YAML/JSON file. JSON is parsed without
+    a third-party dep; YAML uses PyYAML if present (it ships with the engine deps)."""
+    if isinstance(spec_ref, dict):
+        return spec_ref
+    path = str(spec_ref)
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    if path.endswith((".yaml", ".yml")):
+        import yaml  # PyYAML is a declared dep; YAML field-maps are the propose default.
+
+        return yaml.safe_load(text)
+    return json.loads(text)
+
+
 def _build_spec(args: dict[str, Any]) -> TokenizerSpec:
     """Build the requested :class:`TokenizerSpec` from CLI/agent args.
 
@@ -66,7 +91,21 @@ def _build_spec(args: dict[str, Any]) -> TokenizerSpec:
     delegation target), reproduced here so the adapter owns its spec assembly
     without the verb importing the adapter or vice-versa. Defaults to the
     ``financial`` preset (the conformance oracle); ``--preset chain`` selects the
-    DEX next-trade spec; ``--drop-step`` removes a named step (T2)."""
+    DEX next-trade spec; ``--drop-step`` removes a named step (T2).
+
+    ``--spec <field-map>`` is a NEW additive path (bring-your-own-schema): when
+    present it compiles a declarative field-map (a dict or a YAML/JSON file path)
+    into a ``preset="custom"`` spec via ``spec_from_field_map``, then returns. The
+    custom spec flows through the SAME ``compile`` → C1/C2/C3 gate, so a bad
+    stranger-schema spec is REFUSED with the named diff (HARD INVARIANT #2). When
+    ``--spec`` is ABSENT this function is byte-identical to before, so
+    ``tokenize --preset financial|chain`` stays byte-identical (HARD INVARIANT #1)."""
+    spec_ref = args.get("spec")
+    if spec_ref:
+        field_map = _load_field_map(spec_ref)
+        context_len = int(args.get("context_len") or field_map.get("context_len", 4096))
+        return spec_from_field_map(field_map, context_len=context_len)
+
     preset = (args.get("preset") or args.get("schema") or "financial").lower()
     drop = tuple(s for s in [args.get("drop_step")] if s)
 
