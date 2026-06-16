@@ -17,6 +17,8 @@ dependencies = [
     "pandas>=1.5",
     "PyYAML>=6.0",
     "packaging>=21.0",
+    "scikit-learn>=1.1",
+    "safetensors>=0.4",
 ]
 
 [project.optional-dependencies]

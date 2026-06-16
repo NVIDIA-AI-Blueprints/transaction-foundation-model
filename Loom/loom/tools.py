@@ -14,6 +14,11 @@ present so launch verbs inherit it unchanged.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import secrets
+import time
+from pathlib import Path
 from typing import Any, Optional
 
 from .registry import REGISTRY, Verb, VerbContext
@@ -86,16 +91,99 @@ def dispatch(
     return verb.fn(dict(input_json), ctx)
 
 
+_CONFIRM_TOKEN_TTL_SEC = 15 * 60  # 15-minute expiry (§5.3 / ARCHITECTURE §1)
+_CONFIRM_NONCE_KIND = "_ConfirmNonce"  # store kind where burned nonces live
+
+
+def _confirm_secret() -> bytes:
+    """The HMAC key. A per-workspace secret persisted under the store root so a
+    token minted in one process validates in the next (the PLAN→confirm round-trip
+    spans two calls), but is unforgeable without filesystem access. Falls back to a
+    process-stable secret when the workspace is unwritable."""
+    import os
+
+    base = Path(os.environ.get("LOOM_WORKSPACE") or os.getcwd()) / ".loom"
+    secret_path = base / "_confirm_secret"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        if secret_path.exists():
+            return secret_path.read_bytes()
+        secret = secrets.token_bytes(32)
+        # Atomic-ish create; if a concurrent driver won the race, read theirs.
+        try:
+            with open(secret_path, "xb") as fh:
+                fh.write(secret)
+        except FileExistsError:  # pragma: no cover - concurrent create
+            return secret_path.read_bytes()
+        return secret
+    except OSError:  # pragma: no cover - unwritable workspace
+        return b"loom-confirm-fallback-secret"
+
+
 def make_confirm_token(plan_hash: str) -> str:
     """Mint a single-use, plan-hash-scoped, expiring confirm_token (§5.3).
 
-    STUB: launch verbs will implement minting (bound to the compiled-plan hash,
-    default 15-min expiry, single-use). Cheap verbs in this slice accept any
-    matching token. The signature is the locked shape."""
-    raise NotImplementedError
+    Shape: ``"<plan_hash>.<expiry_epoch>.<nonce>.<hmac>"`` where the HMAC (SHA-256)
+    is taken over ``(plan_hash, expiry, nonce)`` with the per-workspace secret.
+    Default 15-min expiry; the ``nonce`` is burned in the store on first
+    validation so the token is single-use."""
+    expiry = int(time.time()) + _CONFIRM_TOKEN_TTL_SEC
+    nonce = secrets.token_hex(16)
+    mac = _confirm_mac(plan_hash, expiry, nonce)
+    return f"{plan_hash}.{expiry}.{nonce}.{mac}"
+
+
+def _confirm_mac(plan_hash: str, expiry: int, nonce: str) -> str:
+    msg = f"{plan_hash}.{expiry}.{nonce}".encode("utf-8")
+    return hmac.new(_confirm_secret(), msg, hashlib.sha256).hexdigest()
 
 
 def validate_confirm_token(token: Optional[str], plan_hash: str) -> bool:
-    """Validate a confirm_token against a compiled-plan hash (single-use, unexpired,
-    bound to this plan). STUB — locked shape for gated verbs (§5.3, §9)."""
-    raise NotImplementedError
+    """Validate a confirm_token against a compiled-plan hash (§5.3, §9).
+
+    Returns True iff the token is well-formed, its HMAC verifies, it is bound to
+    THIS ``plan_hash``, it has not expired (15-min window), and its nonce has not
+    already been burned. A successful validation BURNS the nonce in the store
+    (single-use): a replay of the same token returns False."""
+    if not token:
+        return False
+    parts = token.split(".")
+    if len(parts) != 4:
+        return False
+    tok_plan, expiry_s, nonce, mac = parts
+    # Plan-hash-scoped: a token for a different plan never validates.
+    if not hmac.compare_digest(tok_plan, plan_hash):
+        return False
+    try:
+        expiry = int(expiry_s)
+    except ValueError:
+        return False
+    # Unforgeable: the HMAC must match (constant-time compare).
+    if not hmac.compare_digest(mac, _confirm_mac(tok_plan, expiry, nonce)):
+        return False
+    # Unexpired (15-min window).
+    if time.time() > expiry:
+        return False
+    # Single-use: burn the nonce in the store; a replay finds it already burned.
+    return _burn_nonce(nonce, plan_hash)
+
+
+def _burn_nonce(nonce: str, plan_hash: str) -> bool:
+    """Atomically record a nonce as consumed; return True iff it was fresh.
+
+    Uses an exclusive-create file under the workspace store as the burn ledger —
+    the same local stand-in for an atomic metadata service the ObjectStore uses.
+    If the directory is unwritable the token is accepted once (best-effort)."""
+    import os
+
+    burn_dir = Path(os.environ.get("LOOM_WORKSPACE") or os.getcwd()) / ".loom" / _CONFIRM_NONCE_KIND
+    try:
+        burn_dir.mkdir(parents=True, exist_ok=True)
+        marker = burn_dir / nonce
+        with open(marker, "xb") as fh:  # O_EXCL: fails iff already burned
+            fh.write(plan_hash.encode("utf-8"))
+        return True
+    except FileExistsError:
+        return False  # replay
+    except OSError:  # pragma: no cover - unwritable workspace
+        return True
