@@ -487,7 +487,7 @@ jobs:
           echo "::endgroup::"
 
           echo "Waiting 5 minutes for services to fully stabilize..."
-          sleep 600
+          sleep 300
           echo "Wait completed"
 
           SRC="${DEST}/notebook_output"
