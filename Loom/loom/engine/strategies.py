@@ -18,7 +18,9 @@ ordering, injectivity and grammar — NOT on the merchant hash-bucket identity
 from __future__ import annotations
 
 import hashlib
+import itertools
 import math
+from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
@@ -36,6 +38,86 @@ from .api import (
 
 # Matches the reference TimeDeltaTokenizer (timedelta.py).
 _SECONDS_PER_JULIAN_YEAR = 31556951.999999996
+
+
+# ---------------------------------------------------------------------------
+# KMer — a GENERIC fixed-alphabet sequence strategy (the DNA generality probe).
+#
+# This Strategy is defined HERE (not in api.py) on purpose: adding a new domain
+# (DNA/RNA/protein) must require only a new Strategy + the field-map/compile
+# wiring — NO change to the harness or contracts (the generality test, build
+# brief Fix 2). ``build_vocab``/``count``/``transform`` dispatch on it by
+# isinstance exactly like every existing strategy, so it flows through the LOCKED
+# ``compile_spec`` + C1/C2/C3 unchanged: the k-mer vocab is injective + dense
+# (it is the full ``len(alphabet)**k`` enumeration in a fixed lexical order, OR a
+# config-frozen observed subset), the grammar/chunk derive normally.
+#
+# Unlike the tabular strategies (one row → one token), a KMer field tokenizes a
+# whole SEQUENCE STRING into a per-position k-mer token SEQUENCE — "one input
+# sequence → many tokens". That fan-out is NOT in ``transform`` (which stays a
+# 1:1 value→token map like every other strategy); it happens in the preprocess
+# (``spec.preprocess_field_map``), which EXPLODES one sequence row into one row
+# per k-mer position before the per-step ``transform`` runs. So each k-mer
+# position is just one single-token "event" and the existing corpus grammar
+# (``<bos> KMER_x <sep> KMER_y … <eos>``) materializes it with zero new machinery.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class KMer:
+    """A fixed-alphabet k-mer vocabulary (DNA/RNA/protein, or any string over a
+    closed alphabet). Contributes one contiguous id block of EXACTLY
+    ``len(alphabet)**k`` tokens ``prefix_<KMER>`` (e.g. ``KMER_AAAA`` …
+    ``KMER_TTTT`` for DNA k=4), in a fixed lexical order over ``sorted(alphabet)``
+    — a pure function of config (alphabet, k), so it is C2-deterministic (no
+    fitting, no data dependence). The fixed alphabet enumerates a perfect-hash code:
+    the vocab is injective + dense by construction, so C1/C2/C3 derive unchanged.
+
+    ``stride`` and ``overlapping`` describe how the *preprocess* slices a sequence
+    string into k-mer positions; they do NOT change the vocabulary (the set of
+    possible k-mers is the same regardless of stride). ``observed`` optionally
+    pins the vocab to a config-frozen subset of k-mer strings (still C2-clean — the
+    list is part of the spec, not fitted at materialize time); when ``None`` the
+    vocab is the full dense ``alphabet**k`` enumeration.
+
+    There is NO out-of-vocab/UNK bucket: the preprocess (``split_kmers``) only emits
+    windows whose every symbol is in the alphabet (and, when ``observed`` is set,
+    only k-mers in that subset), so every materialized window is in-vocab — the
+    vocab stays EXACTLY the k-mer set, keeping ``count`` == ``alphabet**k`` for the
+    full enumeration (or ``len(observed)`` for a pinned subset)."""
+
+    prefix: str
+    k: int
+    alphabet: tuple[str, ...]
+    stride: int = 1
+    overlapping: bool = True
+    observed: tuple[str, ...] | None = None
+
+    def count(self) -> int:
+        from . import strategies
+        return strategies.count(self)
+
+    def tokens(self) -> list[str]:
+        from . import strategies
+        return strategies.build_vocab(self)
+
+
+def _kmer_strings(s: KMer) -> list[str]:
+    """The ordered k-mer STRINGS (without the prefix) this strategy enumerates.
+
+    Full enumeration is the cartesian product of ``sorted(alphabet)`` repeated
+    ``k`` times in lexical order (dense ``len(alphabet)**k``); a pinned
+    ``observed`` set is sorted (deduped) for a deterministic, config-only order.
+    No default/out-of-vocab token is appended — the vocab is EXACTLY the k-mer set
+    (the preprocess guarantees every emitted window is in-vocab)."""
+    if s.observed is not None:
+        return sorted(dict.fromkeys(str(m) for m in s.observed))
+    alpha = sorted(set(s.alphabet))
+    return ["".join(t) for t in itertools.product(alpha, repeat=int(s.k))]
+
+
+def _kmer_tokens(s: KMer) -> list[str]:
+    return [f"{s.prefix}_{m}" for m in _kmer_strings(s)]
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +189,8 @@ def build_vocab(strategy: Strategy) -> list[str]:
         return _mapping_passthrough_tokens(strategy)
     if isinstance(strategy, TimeDelta):
         return _time_delta_tokens(strategy)
+    if isinstance(strategy, KMer):
+        return _kmer_tokens(strategy)
     raise TypeError(f"unknown strategy: {strategy!r}")
 
 
@@ -120,6 +204,8 @@ def count(strategy: Strategy) -> int:
         return len(build_vocab(strategy))
     if isinstance(strategy, TimeDelta):
         return strategy.num_bins
+    if isinstance(strategy, KMer):
+        return len(build_vocab(strategy))
     raise TypeError(f"unknown strategy: {strategy!r}")
 
 
@@ -179,6 +265,21 @@ def _transform_time_delta(s: TimeDelta, series: pd.Series) -> pd.Series:
     )
 
 
+def _transform_kmer(s: KMer, series: pd.Series) -> pd.Series:
+    """Map a column of k-mer STRINGS (one per exploded sequence position) → tokens.
+
+    The preprocess (``split_kmers``) has already sliced each sequence row into one
+    in-vocab k-mer-string per position (the "one sequence → many tokens" fan-out
+    lives there, and it filters to alphabet/observed windows) — so here this is a
+    clean 1:1 value→token map like every other ``transform``: ``prefix_<kmer>``.
+    A stray value that is somehow not a vocab k-mer maps to the ``<unk>`` special
+    (id 4, always in the vocab) rather than minting an out-of-vocab token — keeping
+    the vocab EXACTLY the k-mer set (injective; no UNK k-mer token is minted)."""
+    allowed = set(_kmer_strings(s))
+    raw = series.astype(str)
+    return raw.map(lambda v: f"{s.prefix}_{v}" if v in allowed else "<unk>")
+
+
 def transform(strategy: Strategy, series: pd.Series) -> pd.Series:
     """Map a column of raw/preprocessed values to token strings."""
     if isinstance(strategy, FixedVocab):
@@ -193,7 +294,35 @@ def transform(strategy: Strategy, series: pd.Series) -> pd.Series:
         return _transform_passthrough(strategy, series)
     if isinstance(strategy, TimeDelta):
         return _transform_time_delta(strategy, series)
+    if isinstance(strategy, KMer):
+        return _transform_kmer(strategy, series)
     raise TypeError(f"unknown strategy: {strategy!r}")
 
 
-__all__ = ["build_vocab", "count", "transform", "stable_bucket"]
+def split_kmers(
+    seq: str,
+    k: int,
+    stride: int,
+    alphabet: set[str],
+    observed: set[str] | None = None,
+) -> list[str]:
+    """Slice ONE sequence string into its ordered in-vocab k-mer windows (config-only).
+
+    Upper-cases and keeps only alphabet symbols (a defensive clean so whitespace /
+    FASTA gaps don't shift the frame), then takes length-``k`` windows at the given
+    ``stride``. A window containing any out-of-alphabet symbol cannot occur (those
+    symbols are stripped first); when ``observed`` pins a vocab subset, a window not
+    in that subset is dropped (so every emitted window is in-vocab). Pure +
+    deterministic — no data fitting. This is the per-row primitive the preprocess
+    uses to EXPLODE a sequence row into one row per position (one sequence → many
+    tokens)."""
+    s = "".join(ch for ch in str(seq).upper() if ch in alphabet)
+    if k <= 0 or len(s) < k or stride <= 0:
+        return []
+    windows = [s[i : i + k] for i in range(0, len(s) - k + 1, stride)]
+    if observed is not None:
+        windows = [w for w in windows if w in observed]
+    return windows
+
+
+__all__ = ["build_vocab", "count", "transform", "stable_bucket", "KMer", "split_kmers"]

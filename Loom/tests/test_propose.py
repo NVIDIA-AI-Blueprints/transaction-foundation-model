@@ -183,28 +183,29 @@ def test_low_card_categoricals_get_mapping_plus_default():
 
 
 def test_high_card_categorical_gets_hash():
-    """A high-card categorical with enough events to clear the starvation floor
-    is hashed (~corpus_events/10K buckets)."""
+    """A high-cardinality categorical is routed to HASH and KEPT — NOT dropped as
+    "starved" (the sample-aware Fix 1: vocab safety for high-card fields comes from
+    the cardinality→strategy routing, not from the occupancy gate nuking them)."""
     rng = np.random.default_rng(1)
     n = 50_000
     df = pd.DataFrame({
         "account_id": rng.integers(0, 2000, n).astype(str),
         "amount": rng.lognormal(3, 1, n),
-        # ~3000 distinct merchants → high-card (>=500), buckets=round(50000/10000)=5
-        # → clamped to 256 (MIN); 50000/256 ~= 195 occ/tok < 1000 → would starve.
-        # Use MANY more events so 256 buckets clear the floor.
+        # ~3000 distinct merchants → high-card (>=500) → Hash, buckets clamped to
+        # 256 (MIN); 50000/256 ~= 195 occ/tok, which clears the LOW sample-aware
+        # floor (≤50), so the hash field is KEPT (high-card → hash, not starved).
         "merchant": rng.integers(0, 3000, n).astype(str),
         "ts": pd.to_datetime(rng.integers(1_700_000_000, 1_710_000_000, n), unit="s"),
     })
-    # Many events: 50000 events / 256 buckets ~= 195 < 1000 → starved.
     draft = propose_spec(schema=_sniff_schema(df), eda_flags=leakage_scan(df),
                          entity="account_id", event="txn", context_len=4096)
     by_src = {f.source: f for f in draft.fields}
     excl = {e.name: e for e in draft.excluded}
-    # merchant is proposed as hash but starves at this scale → excluded as starved.
-    assert "merchant" in excl and excl["merchant"].reason == "starved"
+    # high-card merchant → HASH, kept (NOT starved): the routing keeps the vocab safe.
+    assert "merchant" not in excl, f"high-card must hash, not be starved: {excl.get('merchant')}"
+    assert "merchant" in by_src and by_src["merchant"].strategy == "hash"
 
-    # With 100x the events the same hash bucketing clears the floor → kept.
+    # The same routing holds on a much larger corpus — still hash, still kept.
     big = pd.DataFrame({
         "account_id": rng.integers(0, 2000, 5_000_000).astype(str),
         "amount": rng.lognormal(3, 1, 5_000_000),
@@ -214,6 +215,37 @@ def test_high_card_categorical_gets_hash():
                           entity="account_id", event="txn", context_len=4096)
     by_src2 = {f.source: f for f in draft2.fields}
     assert "merchant" in by_src2 and by_src2["merchant"].strategy == "hash"
+
+
+def test_low_card_categorical_on_a_small_sample_is_kept_not_starved():
+    """Fix 1 acceptance: a healthy low-cardinality categorical on a ~2,500-row
+    SAMPLE is INCLUDED (mapping), NOT dropped as "starved". This is the exact flaw
+    the control experiment exposed — the old absolute 1K floor assumed the full
+    cloud corpus and nuked a 4-value field at ~640 occ/value and a 3-value field at
+    ~855 on a 2,565-row sample. Tokenizer design is a LOCAL laptop-SAMPLE activity.
+
+    Also pins the OLD inconsistency is gone: the gate is UNIFORM (no fixedvocab
+    exemption), yet the low sample-aware floor keeps every signal-bearing field."""
+    n = 2_565  # the control experiment's sample size
+    rng = np.random.default_rng(7)
+    df = pd.DataFrame({
+        "account_id": rng.integers(0, 300, n).astype(str),     # entity
+        "quad": rng.choice(["NW", "NE", "SW", "SE"], n),        # 4-value (~640 occ/val)
+        "tri": rng.choice(["LOW", "MID", "HIGH"], n),           # 3-value (~855 occ/val)
+        "amount": rng.lognormal(3, 1, n),                       # continuous float
+    })
+    draft = propose_spec(schema=_sniff_schema(df), eda_flags=leakage_scan(df),
+                         entity="account_id", event="txn", context_len=4096)
+    by_src = {f.source: f for f in draft.fields}
+    excl = {e.name: e for e in draft.excluded}
+    # The signal-bearing low-card categoricals are KEPT as mappings (not starved).
+    assert "quad" not in excl, f"4-value field must be kept on a 2.5K sample: {excl.get('quad')}"
+    assert "tri" not in excl, f"3-value field must be kept on a 2.5K sample: {excl.get('tri')}"
+    assert by_src["quad"].strategy == "mapping" and by_src["quad"].token_count == 4 + 1
+    assert by_src["tri"].strategy == "mapping" and by_src["tri"].token_count == 3 + 1
+    # ...and the continuous float still bins (no signal field dropped on a sample).
+    assert by_src["amount"].strategy == "amount"
+    assert not any(e.reason == "starved" for e in draft.excluded)
 
 
 def test_datetime_expands_to_calendar_plus_timedelta():

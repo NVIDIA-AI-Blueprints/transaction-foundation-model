@@ -58,10 +58,36 @@ TIMEDELTA_BINS = 32
 HASH_DIVISOR = 10_000
 HASH_MIN = 256
 HASH_MAX = 65_536
-#: "earns a token" occupancy floor: ≥ ~1K occurrences per token.
-MIN_OCC_PER_TOKEN = 1_000
+#: "earns a token" occupancy floor — SAMPLE-AWARE, UNIFORM (the build brief's
+#: Fix 1). Tokenizer design is a LOCAL laptop-SAMPLE activity: the old absolute
+#: 1K floor assumed the full cloud corpus and wrongly nuked healthy low-card
+#: categoricals on a 2.5K-row sample. The floor is now ``clamp(round(n_rows *
+#: SAMPLE_OCC_FRACTION), MIN_OCC_FLOOR, MIN_OCC_CAP)`` — it grows gently with the
+#: sample but stays LOW-CAPPED, so the intent (don't mint a token seen ~never) is
+#: preserved while a value/bin seen a handful of times on a small sample is KEPT.
+#: Applied UNIFORMLY across every strategy (no per-strategy exemption): vocab
+#: safety for high-cardinality fields comes from the cardinality→strategy routing
+#: (high-card → Hash), not from this gate dropping them.
+#: ``MIN_OCC_FLOOR`` — the absolute minimum: a token must appear ≥ this many times.
+MIN_OCC_FLOOR = 5
+#: ``MIN_OCC_CAP`` — the low cap: the floor never exceeds this even on a big corpus.
+MIN_OCC_CAP = 50
+#: ``SAMPLE_OCC_FRACTION`` — scale the floor to the (sample) corpus size.
+SAMPLE_OCC_FRACTION = 0.002
 #: coverage floor: present on ~every event.
 MIN_COVERAGE = 0.99
+
+
+def _occ_floor(corpus_events: int) -> int:
+    """The sample-aware per-token occupancy floor for a corpus of ``corpus_events``.
+
+    ``clamp(round(corpus_events * SAMPLE_OCC_FRACTION), MIN_OCC_FLOOR, MIN_OCC_CAP)``
+    — a low, sample-aware floor (≈5 on a 2.5K-row sample, ≤50 on any larger corpus)
+    rather than the old absolute 1K floor that assumed the full cloud corpus and
+    dropped healthy low-cardinality categoricals on a local SAMPLE. Uniform across
+    all strategies."""
+    scaled = round(int(corpus_events) * SAMPLE_OCC_FRACTION)
+    return int(max(MIN_OCC_FLOOR, min(MIN_OCC_CAP, scaled)))
 
 #: number of special tokens (specials occupy ids 0-4 before any field block).
 N_SPECIALS = 5
@@ -440,9 +466,10 @@ def propose_spec(
         if _is_float_dtype(meta):
             # continuous → log-spaced deterministic threshold bins (C2-clean).
             bins = CONT_BINS_DEFAULT
-            # occupancy: corpus_events / bins must clear the starvation floor.
-            if corpus_events / max(bins, 1) < MIN_OCC_PER_TOKEN:
-                bins = max(CONT_BINS_MIN, corpus_events // MIN_OCC_PER_TOKEN)
+            # occupancy: corpus_events / bins must clear the sample-aware floor.
+            occ_floor = _occ_floor(corpus_events)
+            if corpus_events / max(bins, 1) < occ_floor:
+                bins = max(CONT_BINS_MIN, corpus_events // max(occ_floor, 1))
                 bins = min(bins, CONT_BINS_MAX)
             proposal = FieldProposal(
                 name=_step_name(col),
@@ -505,11 +532,18 @@ def propose_spec(
             continue
 
         # B-gate (b): the "won't starve" occupancy check, applied AFTER a tentative
-        # bin/strategy count is chosen — drop if it can't reach ≥~1K occ/token.
+        # bin/strategy count is chosen — drop only if a token would be seen ~never
+        # even on this (possibly small) SAMPLE. The floor is sample-aware (≈5 on a
+        # 2.5K-row sample) and applied UNIFORMLY across every strategy — no field
+        # type is special. A healthy low-cardinality categorical on a small sample
+        # therefore SURVIVES (e.g. a 4-value field at ~640 occ/value clears 5).
+        # High-cardinality fields are NOT dropped here: the cardinality→strategy
+        # routing already sent them to Hash (a corpus-sized bucket vocab whose
+        # collisions are expected), and the low floor lets that hash survive — the
+        # routing, not this gate, is what keeps the vocab safe.
+        occ_floor = _occ_floor(corpus_events)
         occ = corpus_events / max(proposal.token_count, 1)
-        if occ < MIN_OCC_PER_TOKEN and proposal.strategy != "fixedvocab":
-            # FixedVocab on a tiny bounded range is exempt (its tokens are the
-            # values; starvation there is benign and unavoidable).
+        if occ < occ_floor:
             excluded.append(
                 ExclusionProposal(
                     name=col,
@@ -517,13 +551,15 @@ def propose_spec(
                     rationale=(
                         f"would starve: {proposal.token_count} tokens over "
                         f"{corpus_events} events = {occ:.0f} occ/token "
-                        f"(< {MIN_OCC_PER_TOKEN}); not discretizable to a healthy vocab"
+                        f"(< {occ_floor}, the sample-aware floor); a token would be "
+                        "seen ~never even on this sample — not a healthy vocab"
                     ),
                     eda=None,
                 )
             )
             warnings.append(
-                f"{col}: dropped — {proposal.token_count} tokens starve at {occ:.0f} occ/token"
+                f"{col}: dropped — {proposal.token_count} tokens starve at "
+                f"{occ:.0f} occ/token (< {occ_floor})"
             )
             continue
 
@@ -702,7 +738,9 @@ __all__ = [
     "HIGH_CARD_MAX",
     "CONT_BINS_DEFAULT",
     "TIMEDELTA_BINS",
-    "MIN_OCC_PER_TOKEN",
+    "MIN_OCC_FLOOR",
+    "MIN_OCC_CAP",
+    "SAMPLE_OCC_FRACTION",
     "MIN_COVERAGE",
     "N_SPECIALS",
 ]

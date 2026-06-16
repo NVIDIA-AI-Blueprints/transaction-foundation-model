@@ -27,6 +27,7 @@ from .api import (
     TimeDelta,
     TokenizerSpec,
 )
+from .strategies import KMer, split_kmers
 
 # ── VERBATIM reference constants (build brief / financial_pipeline.py) ──────
 
@@ -89,6 +90,10 @@ _MERCH_CLEAN_RE = re.compile(r"[^A-Z0-9\s\-]")
 # the financial AMT family (7 tokens from [10,50,100,500,1000,5000] thresholds).
 CONT_BINS_DEFAULT = 8
 TIMEDELTA_BINS_DEFAULT = 32
+# Default alphabet for the generic `kmer` strategy (DNA). RNA/protein/arbitrary
+# alphabets are supplied per field via `alphabet:` — the strategy is fixed-alphabet
+# generic, NOT DNA-special; DNA is only the default + the worked control.
+DNA_ALPHABET: tuple[str, ...] = ("A", "C", "G", "T")
 # Calendar parts → (min, max, pad_width). MONTH is 0-based (the sharp-edge-#9 /
 # MONTH_12≡CARD_0 collision fix: shift the raw 1..12 month to 0..11 in preprocess).
 _CALENDAR_PARTS: dict[str, tuple[int, int, int]] = {
@@ -295,9 +300,31 @@ def _field_step_from_entry(entry: dict, *, corpus_events: int, seen_prefixes: se
             TimeDelta(prefix, bins, float(entry.get("max_years", 10.0))),
         )
 
+    if strat in ("kmer", "k_mer", "kmers"):
+        # A fixed-alphabet biological/string sequence → per-position k-mer tokens.
+        # GENERIC: any alphabet (DNA {A,C,G,T} default / RNA / protein / arbitrary).
+        # The recipe source ``__kmer__<col>__<k>__<stride>`` tells the preprocess to
+        # EXPLODE one sequence row into one row per k-mer position (the "one sequence
+        # → many tokens" fan-out); the KMer strategy then maps each window 1:1 to its
+        # token. The vocab is the dense ``alphabet**k`` enumeration (or a config-pinned
+        # ``observed`` subset) — injective + dense, so C1/C2/C3 derive unchanged.
+        # ``prefix`` is the field name (a field named ``kmer`` → ``KMER_<kmer>``
+        # tokens), uniquified so a second k-mer field gets a disjoint block (C1-clean).
+        k = int(entry.get("k", 3))
+        stride = int(entry.get("stride", 1))
+        alphabet = entry.get("alphabet") or DNA_ALPHABET
+        alpha = tuple(str(c).upper() for c in alphabet)
+        observed = entry.get("observed")
+        obs = tuple(str(m).upper() for m in observed) if observed else None
+        return FieldStep(
+            name,
+            f"__kmer__{source}__{k}__{stride}",
+            KMer(prefix, k, alpha, stride=stride, observed=obs),
+        )
+
     raise ValueError(
         f"field {name!r}: unknown strategy {strat!r} "
-        "(expected one of: fixedvocab, mapping, hash, amount, calendar, timedelta)"
+        "(expected one of: fixedvocab, mapping, hash, amount, calendar, timedelta, kmer)"
     )
 
 
@@ -568,6 +595,91 @@ def _amount_bin_thresholds(amt: pd.Series, thresholds: list[float]) -> pd.Series
     return bin_
 
 
+def _is_kmer_spec(spec: TokenizerSpec) -> bool:
+    """True iff the spec is a SEQUENCE spec (any step sources a ``__kmer__`` recipe).
+
+    A k-mer field tokenizes a whole sequence STRING into a per-position token
+    sequence, so its preprocess EXPLODES one input row into many — fundamentally a
+    different row cardinality than the tabular per-row fields. We therefore route a
+    sequence spec to :func:`_preprocess_kmer`; the financial/chain/tabular-custom
+    paths are byte-for-byte unchanged (HARD INVARIANT #1)."""
+    return any(s.source.startswith("__kmer__") for s in spec.steps)
+
+
+def _parse_kmer_source(src: str) -> tuple[str, int, int]:
+    """``__kmer__<col>__<k>__<stride>`` → (col, k, stride). The column name may
+    itself contain ``__``; k and stride are the last two ``__``-delimited fields."""
+    body = src[len("__kmer__"):]
+    rest, _, stride_s = body.rpartition("__")
+    col, _, k_s = rest.rpartition("__")
+    return col, int(k_s), int(stride_s)
+
+
+# The synthetic per-sequence grouping key the k-mer preprocess emits — each input
+# (sequence) row becomes its OWN corpus line. Private name so it can't clash with a
+# user field/entity column (same discipline as the ``__group__`` carry in
+# ``materialize_corpus_lines``).
+KMER_SEQ_COL = "__seq__"
+
+
+def _preprocess_kmer(df: pd.DataFrame, spec: TokenizerSpec) -> pd.DataFrame:
+    """Explode each sequence row into one row per k-mer position (the sequence path).
+
+    "One input sequence → many tokens": for every k-mer step, slice its sequence
+    column into ordered length-``k`` windows (at the step's stride) and emit one
+    output row per window, carrying the recipe-source column = the k-mer STRING for
+    that position and a ``__seq__`` id = the originating input-row index (so every
+    sequence becomes ONE corpus line, in position order). The per-step ``transform``
+    then maps each window 1:1 to its ``KMER_<window>`` token — so the existing corpus
+    grammar materializes ``<bos> KMER_x <sep> KMER_y … <eos>`` with no new machinery.
+
+    All k-mer steps in one spec must share the SAME windowing (they tokenize the same
+    sequence positions); the first step defines the row layout and the rest align to
+    it. Pure pandas, CPU-only, config-only (no fitting). A row that yields no windows
+    (sequence shorter than k) contributes no positions (and thus no line)."""
+    kmer_steps = [s for s in spec.steps if s.source.startswith("__kmer__")]
+
+    seq_ids: list[int] = []
+    # One materialized column per step source (the k-mer string at each position).
+    cols: dict[str, list[str]] = {s.source: [] for s in kmer_steps}
+    # Carry the entity value (if a real entity column exists) per exploded position
+    # so a caller that groups by a real entity still works; otherwise __seq__ groups.
+    entity = spec.entity
+    carry_entity = bool(entity and entity in df.columns)
+    entity_vals: list = []
+
+    for row_pos in range(len(df)):
+        # Each step may slice a different sequence column / k / stride, but they must
+        # agree on the NUMBER of positions to stay row-aligned. We window each step's
+        # column and require equal length; the windows of the first step set the count.
+        per_step_windows: dict[str, list[str]] = {}
+        n_positions = None
+        for step in kmer_steps:
+            strat = step.strategy  # KMer
+            col, k, stride = _parse_kmer_source(step.source)
+            raw = df.iloc[row_pos][col] if col in df.columns else ""
+            obs = set(strat.observed) if strat.observed is not None else None
+            windows = split_kmers(raw, k, stride, set(strat.alphabet), observed=obs)
+            per_step_windows[step.source] = windows
+            if n_positions is None:
+                n_positions = len(windows)
+            else:
+                n_positions = min(n_positions, len(windows))
+        n_positions = n_positions or 0
+        for pos in range(n_positions):
+            seq_ids.append(row_pos)
+            if carry_entity:
+                entity_vals.append(df.iloc[row_pos][entity])
+            for src, windows in per_step_windows.items():
+                cols[src].append(windows[pos])
+
+    out = pd.DataFrame({src: pd.Series(vals, dtype=object) for src, vals in cols.items()})
+    out[KMER_SEQ_COL] = pd.Series(seq_ids, dtype="int64")
+    if carry_entity:
+        out[entity] = pd.Series(entity_vals)
+    return out.reset_index(drop=True)
+
+
 def preprocess_field_map(df: pd.DataFrame, spec: TokenizerSpec) -> pd.DataFrame:
     """Generic CPU preprocess for a custom field-map spec (the ``preset=="custom"``
     path). Pure pandas, CPU-only, no fitted state.
@@ -583,7 +695,15 @@ def preprocess_field_map(df: pd.DataFrame, spec: TokenizerSpec) -> pd.DataFrame:
         bounded int, Mapping, Hash — the strategy's own ``transform`` does the rest).
 
     The entity column is carried under its raw name for grouping but is NEVER a
-    field step (the proposer + ``spec_from_field_map`` exclude it — T2)."""
+    field step (the proposer + ``spec_from_field_map`` exclude it — T2).
+
+    A SEQUENCE spec (any ``kmer`` step) is routed to :func:`_preprocess_kmer`, which
+    EXPLODES one sequence row into one row per k-mer position (one sequence → many
+    tokens) — a different row cardinality than the tabular branch below, which is
+    byte-for-byte unchanged."""
+    if _is_kmer_spec(spec):
+        return _preprocess_kmer(df, spec)
+
     out = pd.DataFrame(index=df.index)
     entity = spec.entity
 
@@ -664,7 +784,12 @@ def materialize_corpus_lines(compiled, df: pd.DataFrame) -> tuple[list[str], int
         # is the declared entity (never a field step — T2). The financial/chain
         # branches below are byte-for-byte UNCHANGED (HARD INVARIANT #1).
         pre = preprocess_field_map(df, spec)
-        group_source = spec.entity or "__none__"
+        # A SEQUENCE (k-mer) spec groups by the synthetic per-sequence id the explode
+        # emitted — each input sequence row → ONE corpus line of its position tokens.
+        if _is_kmer_spec(spec) and KMER_SEQ_COL in pre.columns:
+            group_source = KMER_SEQ_COL
+        else:
+            group_source = spec.entity or "__none__"
     else:
         pre = preprocess_financial(df)
         group_source = "cust"
@@ -714,4 +839,6 @@ __all__ = [
     "DEX_VENUES",
     "CONT_BINS_DEFAULT",
     "TIMEDELTA_BINS_DEFAULT",
+    "DNA_ALPHABET",
+    "KMER_SEQ_COL",
 ]
