@@ -117,9 +117,7 @@ TOKENIZE_PARAMS: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # Representation resolution — the registry lookup that replaces the hard-wired
 # engine import (ARCHITECTURE §8: the ``spec.preset=="chain"`` switch becomes the
-# REPRESENTATIONS lookup). Parallel-build-safe: if the event-sequence adapter has
-# not registered yet, fall back to a tiny inline shim over ``loom.engine`` so
-# ``prepare`` is correct and byte-identical regardless of the adapter's landing.
+# REPRESENTATIONS lookup).
 # ---------------------------------------------------------------------------
 
 
@@ -134,12 +132,14 @@ _BUNDLED_ADAPTER_MODULES = {
 
 def _resolve_representation(name: str) -> Optional[DataRepresentation]:
     """Return the registered adapter for ``name``, importing the bundled adapter
-    module on demand if it has not registered yet (parallel-build-safe).
+    module on demand if it has not registered yet.
 
-    For the bundled ``event-sequence`` default, if its adapter module is absent or
-    mid-build, fall back to an inline engine-backed shim so ``prepare`` is correct
-    and byte-identical regardless of the adapter's landing. Any OTHER unknown name
-    returns ``None`` → a clean REFUSED_CONTRACT (no Corpus)."""
+    The bundled ``event-sequence`` adapter (``loom.adapters.event_sequence``) is a
+    pure CPU-engine delegation that imports cleanly with zero banned deps, so the
+    on-demand import always lands it. Any unknown name returns ``None`` → a clean
+    REFUSED_CONTRACT (no Corpus). There is no engine-backed shim fallback: the
+    adapter IS the delegation, so a missing adapter is a refusal, not a silent
+    re-implementation (ARCHITECTURE §5.2)."""
     adapter = REPRESENTATIONS.get(name)
     if adapter is not None:
         return adapter
@@ -147,102 +147,12 @@ def _resolve_representation(name: str) -> Optional[DataRepresentation]:
     if module is not None:
         try:
             __import__(module)
-        except Exception:  # pragma: no cover - adapter mid-build; shim covers it
+        except Exception:  # pragma: no cover - defensive; bundled adapter imports cleanly
             pass
         adapter = REPRESENTATIONS.get(name)
         if adapter is not None:
             return adapter
-    if name == DEFAULT_REPRESENTATION:
-        return _EngineShim()
     return None
-
-
-class _EngineShim:
-    """A minimal, behavior-preserving stand-in for the ``event-sequence`` adapter.
-
-    It delegates 1:1 to the EXISTING, exported ``loom.engine`` functions (the same
-    ones ``event_sequence.py`` wraps, ARCHITECTURE §5.2), so ``prepare`` produces a
-    Corpus byte-identical to the v0.1 ``tokenize`` whether or not the registered
-    adapter has landed. It implements only the Protocol methods ``prepare`` calls;
-    it is NOT registered (it never shadows the real adapter)."""
-
-    name = DEFAULT_REPRESENTATION
-    produces_tensor_contract = "clm/input_ids+labels/-100"
-
-    def build_spec(self, args: dict[str, Any]):
-        from ..engine import AmountStrategy
-        from ..engine.spec import chain_spec, financial_spec
-
-        preset = (args.get("preset") or args.get("schema") or "financial").lower()
-        drop = tuple(s for s in [args.get("drop_step")] if s)
-        if preset == "chain":
-            no_identity = args.get("no_identity_token", True)
-            return chain_spec(
-                item_hash_size=int(args.get("merchant_hash_size") or 5000),
-                include_identity_token=not no_identity,
-                drop_steps=drop,
-            )
-        amount_strategy = AmountStrategy(args.get("amount_strategy", "fixed"))
-        return financial_spec(
-            merchant_hash_size=int(args.get("merchant_hash_size") or 2000),
-            amount_strategy=amount_strategy,
-            include_time_delta=bool(args.get("include_time_delta", False)),
-            drop_steps=drop,
-        )
-
-    def compile(self, spec: Any, *, context_len: int):
-        from ..engine import compile_spec
-
-        return compile_spec(spec, context_len=context_len)
-
-    def contracts(self, compiled: Any) -> list[Diagnostic]:
-        return list(compiled.report.diagnostics)
-
-    def representation_passed(self, compiled: Any) -> bool:
-        # The contract-NAME-AGNOSTIC verdict. For event-sequence this is
-        # ``compiled.report.passed`` (already False on any ERROR card); we express
-        # it as the generic ERROR-scan so the shim and the registered adapter
-        # return the identical answer.
-        return not any(
-            d.severity is Severity.ERROR for d in self.contracts(compiled)
-        )
-
-    def refusal_summary(self, compiled: Any, diagnostics: list[Diagnostic]) -> Optional[str]:
-        # The OPTIONAL cosmetic hook (mirrors EventSequenceRepresentation): render
-        # the v0.1 ``tokenize.py`` REFUSED summary verbatim from this rep's OWN
-        # ERROR cards, so the engine-backed shim path is byte-identical to v0.1 on
-        # the refusal envelope too (invariant #3). Never decides the refusal.
-        errors = [d for d in diagnostics if d.severity is Severity.ERROR]
-        if any(d.contract == "C1" for d in errors):
-            preset = getattr(getattr(compiled, "spec", None), "preset", None)
-            return (
-                f"REFUSED_CONTRACT: C1 injectivity/density failed for preset "
-                f"'{preset}' — no Corpus written (the named diff explains the "
-                "collision; reordering shifts every id ⇒ vocab_hash changes ⇒ "
-                "retrain required)."
-            )
-        if any(d.contract == "C3" for d in errors):
-            return (
-                f"REFUSED_CONTRACT: C3 grammar failed — chunk_size="
-                f"{compiled.chunk_size} holds less than one transaction; no Corpus written."
-            )
-        return None
-
-    def signatures(self, compiled: Any) -> dict:
-        # The harness handoff dict (ARCHITECTURE §5.2): exactly the v0.1
-        # ``tokenize.py:399-407`` shape, plus ``representation``/
-        # ``representation_signature`` so the new pairing invariant (#7) travels.
-        return {
-            "representation": self.name,
-            "representation_signature": compiled.vocab_hash,
-            "vocab_hash": compiled.vocab_hash,
-            "vocab_size": compiled.vocab_size,
-            "tokens_per_txn": compiled.tokens_per_txn,
-            "chunk_size": compiled.chunk_size,
-            "context_len": compiled.context_len,
-            "has_fitted_artifact": compiled.report.has_fitted_artifact,
-            "encode_path": compiled.spec.preset,
-        }
 
 
 # ---------------------------------------------------------------------------

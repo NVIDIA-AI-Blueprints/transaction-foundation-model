@@ -72,19 +72,31 @@ from ..types import (
 # representation produces it, the builder+objective consume it — the narrow waist.
 _CLM_TENSOR_CONTRACT = "clm/input_ids+labels/-100"
 
-# Default per-triple model-builder. The TFM default is "nemo"; THIS slice supports
-# only the CPU-rehearsal "local" builder (NeMo is step 7), so resolution falls
-# back to "local" when "nemo" is selected but unregistered.
+# Default per-triple model-builder. The TFM default is "nemo"; the CPU-rehearsal
+# "local" builder is the GPU-free fallback when a GPU builder is selected but its
+# adapter is unregistered (e.g. a CPU-only install). Both are now landed.
 _DEFAULT_BUILDER = "local"
 _DEFAULT_EXECUTOR = "local"
 _DEFAULT_OBJECTIVE = "next-token"
+
+# The dollar threshold above which a PLAN requires a TYPED confirm token before a
+# launch (the gated-launch handshake, ARCHITECTURE §3). At or below it a launch
+# (human, CLI) proceeds on a valid token as before; above it the human must
+# explicitly confirm. Overridable via LOOM_CONFIRM_USD_THRESHOLD.
+_CONFIRM_USD_THRESHOLD = 5.0
+
+# Builders that require a reachable GPU (so the executor's gpu_available() gates
+# REFUSED_NO_GPU_TARGET). The CPU-rehearsal "local" builder is exempt.
+_GPU_BUILDERS = frozenset({"nemo"})
 
 PRETRAIN_PARAMS: dict[str, Any] = {
     "type": "object",
     "properties": {
         "in": {"type": "string", "description": "input Corpus/<n> pathspec (the PreparedCorpus)"},
         "model_builder": {"type": "string", "enum": ["local", "nemo"],
-                          "description": "model-builder port adapter (default per triple; this slice: local)"},
+                          "description": "model-builder port adapter (default per triple; TFM default: nemo)"},
+        "execution": {"type": "string", "enum": ["local", "gcp-vm"],
+                      "description": "executor port adapter — where heavy work runs (default local; nemo ⇒ gcp-vm)"},
         "objective": {"type": "string",
                       "description": "training objective (default next-token)"},
         "metric": {"type": "string", "description": "the metric the run optimizes/reports"},
@@ -93,8 +105,10 @@ PRETRAIN_PARAMS: dict[str, Any] = {
         "max_steps": {"type": "integer", "description": "binding max training steps"},
         "max_wall_clock_min": {"type": "integer", "description": "binding wall-clock cap (minutes)"},
         "launch": {"type": "boolean", "description": "request the actual launch (second-call, human-confirmed)"},
+        "confirm": {"type": "boolean", "description": "typed confirmation required above the $-threshold (with the token)"},
         "confirm_token": {"type": "string", "description": "the PLAN's single-use confirm token (§5.3)"},
-        "gpu_target": {"type": "string", "description": "GPU target (env LOOM_GPU_TARGET); only required by GPU builders"},
+        "gpu_target": {"type": "string", "description": "GPU machine type / target (env LOOM_GPU_TARGET); required by GPU builders"},
+        "nproc_per_node": {"type": "integer", "description": "GPUs per node for torchrun (nemo; default 1)"},
         "family": {"type": "string", "description": "model family (default decoder-clm)"},
     },
 }
@@ -109,18 +123,86 @@ PRETRAIN_PARAMS: dict[str, Any] = {
 
 
 def _ensure_adapters_loaded() -> None:
-    """Import the local builder + local executor so they self-register, if present."""
+    """Import the bundled adapters so they self-register, if present.
+
+    Best-effort: importing the NeMo builder + gcp-vm executor pulls in ZERO of
+    nemo/torch (HARD CONSTRAINT #1 — they are pure renderers/command-builders), so
+    this is safe on a CPU-only control plane. A still-mid-build adapter is skipped."""
     import importlib
 
     for mod in (
         "loom.adapters.local_builder",
         "loom.adapters.local_executor",
         "loom.adapters.event_sequence",
+        "loom.adapters.nemo_builder",
+        "loom.adapters.gcp_vm_executor",
     ):
         try:
             importlib.import_module(mod)
         except Exception:  # noqa: BLE001 - adapter not landed / optional in this slice
             pass
+
+
+def _default_executor_for(builder_name: str) -> str:
+    """The executor a builder defaults to when ``--execution`` is unset: the GPU
+    ``nemo`` builder ⇒ the single-VM ``gcp-vm`` executor; ``local`` ⇒ ``local``."""
+    return "gcp-vm" if builder_name in _GPU_BUILDERS else _DEFAULT_EXECUTOR
+
+
+def _confirm_usd_threshold() -> float:
+    import os
+
+    raw = os.environ.get("LOOM_CONFIRM_USD_THRESHOLD")
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return _CONFIRM_USD_THRESHOLD
+
+
+def _now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)
+
+
+def _with_run_dir(
+    corpus: PreparedCorpus, run_dir: str, *, checkpoint_dir: Optional[str] = None
+) -> PreparedCorpus:
+    """Return a copy of ``corpus`` carrying a store-anchored ``run_dir`` and a
+    durable ``checkpoint_dir`` on its ``extras`` so neither builder falls back to a
+    bare tempdir for the rendered YAML / JSONL / checkpoint (the §10 step-1-6
+    follow-up: record a real VM-or-GCS/workspace uri).
+
+    ``run_dir`` is the per-run control-plane workspace (rendered YAML + JSONL).
+    ``checkpoint_dir`` is where the local builder writes its consolidated
+    safetensors; when given (the Checkpoint object's OWN payload dir) the weights
+    persist WITH the object rather than in a sibling run dir."""
+    import dataclasses
+
+    extras = dict(corpus.extras or {})
+    extras["run_dir"] = run_dir
+    extras["checkpoint_dir"] = checkpoint_dir or run_dir
+    return dataclasses.replace(corpus, extras=extras)
+
+
+def _checkpoint_payload_dir(store: Any, ref: Any) -> str:
+    """The on-disk payload dir for a Checkpoint object, derived from the PUBLIC
+    store layout (``<objects_dir>/<kind>/<n>/payload``) — the same convention
+    ``ObjectStore.put`` writes payloads under. Used so the local builder writes its
+    safetensors directly into the object's payload dir (durable, co-located with the
+    object). Reads only public attributes (``store.objects_dir``, ``ref.kind/n``);
+    it does NOT edit or call into store.py internals (HARD CONSTRAINT #6). Falls
+    back to a workspace ``.loom/checkpoints`` dir if the store exposes no
+    ``objects_dir`` (a non-local store backend)."""
+    import os
+
+    objects_dir = getattr(store, "objects_dir", None)
+    if objects_dir is not None:
+        return os.path.join(str(objects_dir), ref.kind, str(ref.n), "payload", "checkpoint")
+    ws = os.environ.get("LOOM_WORKSPACE") or os.getcwd()
+    return os.path.join(ws, ".loom", "checkpoints", f"{ref.kind}-{ref.n}")
 
 
 # ---------------------------------------------------------------------------
@@ -343,9 +425,11 @@ def _pretrain(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
     corpus = _corpus_to_prepared(corpus_obj)
 
     # --- resolve the FM-kind triple -------------------------------------------
-    builder_name = (args.get("model_builder") or _DEFAULT_BUILDER).lower()
+    requested_builder = (args.get("model_builder") or _DEFAULT_BUILDER).lower()
+    builder_name = requested_builder
     if builder_name not in MODEL_BUILDERS and _DEFAULT_BUILDER in MODEL_BUILDERS:
-        # e.g. "nemo" requested but not registered in this no-GPU slice → fall back.
+        # A GPU builder selected but its adapter is unregistered (CPU-only install)
+        # → fall back to the CPU-rehearsal "local" builder rather than 500-ing.
         builder_name = _DEFAULT_BUILDER
     builder = MODEL_BUILDERS.get(builder_name)
     if builder is None:
@@ -355,21 +439,31 @@ def _pretrain(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
             diagnostics=[Diagnostic(
                 contract="C5", severity=Severity.ERROR,
                 message=f"MODEL_BUILDERS has no adapter {builder_name!r}",
-                fix="this slice supports --model-builder local",
+                fix="use --model-builder local (CPU) or nemo (GPU)",
             )],
             experiment=experiment,
         )
 
-    target_name = (args.get("execution") or _DEFAULT_EXECUTOR).lower()
-    executor = EXECUTORS.get(target_name) or EXECUTORS.get(_DEFAULT_EXECUTOR)
+    # --- resolve the executor (the §10 follow-up fix: --execution actually selects)
+    # An explicit --execution wins; otherwise a GPU builder defaults to gcp-vm and a
+    # CPU builder to local. A requested executor that is unregistered falls back to
+    # the builder's default (never silently to a CPU executor for a GPU builder
+    # unless that default is what's available).
+    requested_executor = (args.get("execution") or _default_executor_for(builder_name)).lower()
+    executor = EXECUTORS.get(requested_executor)
+    target_name = requested_executor
+    if executor is None:
+        fallback = _default_executor_for(builder_name)
+        executor = EXECUTORS.get(fallback) or EXECUTORS.get(_DEFAULT_EXECUTOR)
+        target_name = fallback if EXECUTORS.get(fallback) else _DEFAULT_EXECUTOR
     if executor is None:
         return _refused(
             Status.REFUSED_CONTRACT,
-            f"pretrain: no executor {target_name!r} registered",
+            f"pretrain: no executor {requested_executor!r} registered",
             diagnostics=[Diagnostic(
                 contract="C5", severity=Severity.ERROR,
-                message=f"EXECUTORS has no adapter {target_name!r}",
-                fix="this slice provides the local (in-process) executor",
+                message=f"EXECUTORS has no adapter {requested_executor!r}",
+                fix="use --execution local (in-process) or gcp-vm (single GPU VM)",
             )],
             experiment=experiment,
         )
@@ -392,14 +486,13 @@ def _pretrain(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
     # gpu_target echoes LOOM_GPU_TARGET; only GPU builders require it.
     import os
     gpu_target = args.get("gpu_target") or os.environ.get("LOOM_GPU_TARGET")
-    # The local CPU-rehearsal builder/executor run on CPU; a GPU builder asks the
-    # executor whether a GPU is reachable, gating REFUSED_NO_GPU_TARGET.
-    requires_gpu = bool(getattr(executor, "gpu_available", lambda: False)()) is False and (
-        builder_name not in ("local",) and target_name not in ("local",)
-    )
+    # A GPU builder (nemo) requires a GPU target; the CPU-rehearsal "local" builder
+    # runs on CPU and never gates on it.
+    requires_gpu = builder_name in _GPU_BUILDERS
+    nproc = int(args.get("nproc_per_node") or 1)
     compute = ComputeTarget(
         launcher=target_name,
-        nproc_per_node=1,
+        nproc_per_node=nproc,
         nnodes=1,
         accelerator="cpu" if builder_name == "local" else "gpu",
         gpu_target=gpu_target,
@@ -423,19 +516,39 @@ def _pretrain(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
             experiment=experiment,
         )
 
-    # --- GPU gate (only when the chosen builder/target REQUIRES a GPU) --------
-    if requires_gpu and not gpu_target:
-        return _refused(
-            Status.REFUSED_NO_GPU_TARGET,
-            f"pretrain REFUSED_NO_GPU_TARGET: builder {builder_name!r}/executor {target_name!r} "
-            "requires a GPU but no --gpu-target / LOOM_GPU_TARGET is set",
-            diagnostics=[Diagnostic(
-                contract="C5", severity=Severity.ERROR,
-                message="no GPU target for a GPU-requiring builder",
-                fix="set LOOM_GPU_TARGET or pass --gpu-target; or use --model-builder local (CPU)",
-            )],
-            experiment=experiment,
-        )
+    # --- GPU gate (only when the chosen builder REQUIRES a GPU) ---------------
+    # REFUSED_NO_GPU_TARGET fires when a GPU builder has no machine type, OR the
+    # chosen executor cannot reach a GPU at all (e.g. the in-process "local"
+    # executor under a nemo build). The CPU "local" builder never trips this.
+    if requires_gpu:
+        executor_has_gpu = bool(getattr(executor, "gpu_available", lambda: False)())
+        if not gpu_target:
+            return _refused(
+                Status.REFUSED_NO_GPU_TARGET,
+                f"pretrain REFUSED_NO_GPU_TARGET: builder {builder_name!r} requires a GPU "
+                "but no --gpu-target / LOOM_GPU_TARGET is set",
+                diagnostics=[Diagnostic(
+                    contract="C5", severity=Severity.ERROR,
+                    message="no GPU target (machine type) for a GPU-requiring builder",
+                    fix="pass --gpu-target a2-highgpu-1g (or set LOOM_GPU_TARGET); "
+                        "or use --model-builder local (CPU)",
+                )],
+                experiment=experiment,
+                data={"builder": builder_name, "executor": target_name},
+            )
+        if not executor_has_gpu:
+            return _refused(
+                Status.REFUSED_NO_GPU_TARGET,
+                f"pretrain REFUSED_NO_GPU_TARGET: executor {target_name!r} cannot reach a GPU "
+                f"for builder {builder_name!r}",
+                diagnostics=[Diagnostic(
+                    contract="C5", severity=Severity.ERROR,
+                    message=f"executor {target_name!r} reports no GPU availability",
+                    fix="use --execution gcp-vm (the single GPU VM) for a nemo build",
+                )],
+                experiment=experiment,
+                data={"builder": builder_name, "executor": target_name, "gpu_target": gpu_target},
+            )
 
     # --- 2. the derived cost PLAN (no launch) ---------------------------------
     # A provisional envelope (max_usd from args, else filled from the plan below).
@@ -492,26 +605,55 @@ def _pretrain(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
         )
 
     # --- 3/4. the gated handshake ---------------------------------------------
+    # The verb is EXPENSIVE/LAUNCH_AND_TRACK, so EVERY launch needs a valid,
+    # single-use, plan-hash-scoped confirm_token (the auto-gate). On top of that,
+    # a derived cost ABOVE the threshold additionally requires a TYPED confirm
+    # (an explicit ``confirm:true`` / a typed acknowledgment beyond replaying the
+    # token) — the >$threshold typed-confirm (ARCHITECTURE §3). Below the threshold
+    # (e.g. the ~$0 local rehearsal) a valid token alone launches, unchanged.
     token = ctx.confirm_token or args.get("confirm_token")
-    confirmed = launch_requested and validate_confirm_token(token, plan_hash)
+    over_threshold = (plan.usd or 0.0) > _confirm_usd_threshold()
+    typed_confirm = bool(args.get("confirm"))
+    # The typed-confirm gate is a SEPARATE obligation from the token: above the
+    # threshold a launch needs BOTH a valid token AND an explicit --confirm. The
+    # token alone is never the typed confirm (a token always accompanies a launch,
+    # so treating its mere presence as the confirm would defeat the gate).
+    typed_ok = (not over_threshold) or typed_confirm
+    # CRITICAL (finding #1): validate — and thereby BURN — the single-use token
+    # ONLY when the typed-confirm obligation is already met, so a launch that is
+    # missing --confirm falls through to a fresh PLAN WITHOUT consuming the token.
+    # Otherwise the human who follows the summary ("relaunch with the token AND
+    # --confirm") would replay a token already burned by the missing-confirm call
+    # and dead-end on a second PLAN. The token is burned iff it actually launches.
+    token_ok = launch_requested and typed_ok and validate_confirm_token(token, plan_hash)
+    confirmed = token_ok
 
     if not confirmed:
-        # First call (or no/invalid token, or no --launch): return the PLAN + a
-        # fresh single-use confirm_token scoped to this plan_hash, and STOP.
+        # First call (or no/invalid token, or no --launch, or over-threshold without
+        # a typed confirm): return the PLAN + a fresh single-use confirm_token scoped
+        # to this plan_hash, and STOP. The token was NOT burned unless it validated.
         confirm_token = make_confirm_token(plan_hash)
+        needs_typed = over_threshold
+        summary = (
+            f"PLAN: {builder_name} build over {corpus_obj.pathspec} → "
+            f"~${(plan.usd or 0.0):.4f} ({plan.confidence or 'LOW'}), "
+            f"envelope max_usd=${budget.max_usd:.2f}"
+            + (f", max_steps={budget.max_steps}" if budget.max_steps else "")
+        )
+        if needs_typed:
+            summary += (
+                f". Over ${_confirm_usd_threshold():.0f} — relaunch with the token AND "
+                "--confirm to authorize this spend."
+            )
+        else:
+            summary += ". Confirm to launch."
         return VerbResult(
             verb="pretrain",
             status=Status.PLAN,
             verdict=Verdict.REVIEW,
             tier=Tier.EXPENSIVE,
             capability_mode=CapabilityMode.LAUNCH_AND_TRACK,
-            summary=(
-                f"PLAN: {builder_name} build over {corpus_obj.pathspec} → "
-                f"~${(plan.usd or 0.0):.4f} ({plan.confidence or 'LOW'}), "
-                f"envelope max_usd=${budget.max_usd:.2f}"
-                + (f", max_steps={budget.max_steps}" if budget.max_steps else "")
-                + ". Confirm to launch."
-            ),
+            summary=summary,
             outputs=[],
             diagnostics=[],
             data={
@@ -523,11 +665,40 @@ def _pretrain(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
                 "tensor_contract": corpus.tensor_contract,
                 "corpus": corpus_obj.pathspec,
                 "requires_gpu": requires_gpu,
+                "over_confirm_threshold": over_threshold,
+                "requires_typed_confirm": needs_typed,
+                "confirm_usd_threshold": _confirm_usd_threshold(),
             },
             experiment=experiment,
             cost_plan=plan,
             confirm_token=confirm_token,
         )
+
+    # --- mint the Checkpoint ref UP FRONT so the builder can write the checkpoint
+    # straight into the object's OWN payload dir (the §10 step-1-6 follow-up: the
+    # Checkpoint DataObject must not point at an ephemeral tempdir — for the local
+    # builder, whose weights are produced on the control plane, the durable home is
+    # the object payload dir, so the safetensors travel WITH the object). new_ref is
+    # an atomic counter bump (store.py); minting it before launch never writes the
+    # object — only put() does that, after the run is terminal.
+    ckpt_ref = ctx.store.new_ref("Checkpoint")
+    payload_dir = _checkpoint_payload_dir(ctx.store, ckpt_ref)
+
+    # --- thread a store-anchored run_dir so the builder writes the rendered YAML,
+    # the JSONL progress log, and the checkpoint under an ADDRESSABLE workspace dir
+    # (never a bare tempdir — the §10 step-1-6 follow-up fix). The nemo builder
+    # reads ``corpus.extras['run_dir']`` (rendered YAML + JSONL are CONTROL-PLANE
+    # artifacts; the checkpoint itself lands on the VM/GCS, uri resolved by the
+    # executor). The local builder reads ``corpus.extras['checkpoint_dir']`` — we
+    # point it at the object payload dir so the weights persist WITH the object.
+    import os as _os
+    _ws = _os.environ.get("LOOM_WORKSPACE") or _os.getcwd()
+    _run_dir = _os.path.join(
+        _ws, ".loom", "runs",
+        f"{builder_name}-{(corpus.representation_signature or 'run')[:16]}-{int(_now_ms())}",
+    )
+    _os.makedirs(_run_dir, exist_ok=True)
+    corpus = _with_run_dir(corpus, _run_dir, checkpoint_dir=payload_dir)
 
     # --- 6. CONFIRMED launch — drive the builder through the executor ---------
     handle = builder.launch(
@@ -547,6 +718,17 @@ def _pretrain(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
 
     ckpt: CheckpointRef = handle.result()  # blocks until terminal
     final_status = handle.status()
+
+    # --- the BINDING-envelope hard-kill (ARCHITECTURE §2.3/§3) ----------------
+    # When the run tripped the budget (or otherwise did not cleanly succeed), tear
+    # the executor's job down so a partial/aborted job never keeps spending. The
+    # executor.kill() is idempotent (local: no-op; gcp-vm: gcp-gpu-down.sh).
+    budget_stopped = final_status == "stopped_at_budget"
+    if budget_stopped or final_status in ("failed", "killed"):
+        try:
+            executor.kill(getattr(handle, "job_id", "") or "")
+        except Exception:  # noqa: BLE001 - kill is best-effort; never mask the result
+            pass
 
     # Pairing invariant (§3/§7): the checkpoint MUST echo the corpus signature.
     sig_match = ckpt.representation_signature == corpus.representation_signature
@@ -582,8 +764,31 @@ def _pretrain(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
         else Verdict.FAIL
     )
 
+    # The STOPPED_AT_BUDGET branch (the §10 step-1-6 follow-up). There is no
+    # ``Status.STOPPED_AT_BUDGET`` enum member (HARD CONSTRAINT #6: zero edits to
+    # types.py), so a budget-stopped run carries its signal in the VERDICT
+    # (INCOMPLETE — the partial-checkpoint outcome, §6) + a resume token in the
+    # object's ``extras``. The DataObject ``status`` is no longer the no-op
+    # ``OK if … else OK``: a clean run is OK; a budget-stopped/failed run records
+    # the partial outcome (top-level Status stays OK only on a clean success).
+    resume_token: Optional[str] = None
+    if budget_stopped:
+        # The resume anchor: re-running pretrain with the same corpus + a higher
+        # max_steps continues from this checkpoint (a step-8 capability; the token
+        # records the stopped step + the durable checkpoint uri so the resume is
+        # addressable today).
+        resume_step = ckpt.metrics.get("step") if isinstance(ckpt.metrics, dict) else None
+        resume_token = (
+            f"resume:{ckpt.model_signature}:{resume_step if resume_step is not None else '?'}"
+        )
+
     # --- persist the Checkpoint DataObject ------------------------------------
-    ref = ctx.store.new_ref("Checkpoint")
+    # Use the ref minted UP FRONT (so the local builder already wrote the weights
+    # into THIS object's payload dir); record that durable checkpoint location on
+    # ``payload_path`` so the object carries the path to its own weights, never a
+    # tempdir (the §10 step-1-6 follow-up). For nemo the uri is the VM/GCS location
+    # the executor resolved (ckpt.uri); payload_path mirrors it for lineage.
+    ref = ckpt_ref
     cobj = DataObject(
         ref=ref,
         kind="Checkpoint",
@@ -608,8 +813,16 @@ def _pretrain(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
             "vocab_size": corpus.vocab_size,
         },
         verdict=terminal_verdict,
-        status=(Status.OK if final_status == "succeeded" else Status.OK),
+        # The DataObject status reflects the lifecycle: a clean run is OK; a
+        # budget-stopped/failed run is FAIL (its INCOMPLETE/partial nature is the
+        # verdict + the resume token in extras — no STOPPED_AT_BUDGET enum exists).
+        status=(Status.OK if final_status == "succeeded" else Status.FAIL),
         experiment=experiment,
+        # The DURABLE checkpoint location travels on the object: the local builder
+        # wrote it into THIS object's payload dir (co-located), the nemo builder
+        # onto the VM/GCS (ckpt.uri). Either way it is a real, addressable uri —
+        # never an ephemeral tempdir (the §10 step-1-6 follow-up).
+        payload_path=ckpt.uri,
         cost_actuals=cost_actuals,
         envelope=plan.envelope,
         extras={
@@ -620,6 +833,9 @@ def _pretrain(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
             },
             "job_id": getattr(handle, "job_id", None),
             "final_status": final_status,
+            "run_dir": (corpus.extras or {}).get("run_dir"),
+            "stopped_at_budget": budget_stopped,
+            "resume_token": resume_token,
             "progress_events": [
                 {
                     "step": e.step, "loss": e.loss, "usd_spent": e.usd_spent,
@@ -631,20 +847,26 @@ def _pretrain(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
     )
     stored = ctx.store.put(cobj)
 
-    plan.envelope = plan.envelope  # already bound
+    # Top-level status: OK on a clean success or a budget-stopped run (the latter is
+    # a VALID partial outcome — verdict INCOMPLETE + a resume token — not a failure);
+    # FAIL only on a genuine failed/killed run. exit_code keys off verdict/status.
+    top_status = Status.OK if final_status in ("succeeded", "stopped_at_budget") else Status.FAIL
+    summary = (
+        f"{stored.pathspec} verdict={terminal_verdict.value} "
+        f"builder={builder_name} executor={target_name} fmt={ckpt.fmt} "
+        f"sig={ckpt.representation_signature[:18]}… "
+        f"model_sig={ckpt.model_signature[:12]}… "
+        f"usd_spent=${cost_actuals['usd_spent']:.4f}"
+    )
+    if budget_stopped:
+        summary += f" — STOPPED_AT_BUDGET (resume: {resume_token})"
     return VerbResult(
         verb="pretrain",
-        status=Status.OK,
+        status=top_status,
         verdict=terminal_verdict,
         tier=Tier.EXPENSIVE,
         capability_mode=CapabilityMode.LAUNCH_AND_TRACK,
-        summary=(
-            f"{stored.pathspec} verdict={terminal_verdict.value} "
-            f"builder={builder_name} fmt={ckpt.fmt} "
-            f"sig={ckpt.representation_signature[:18]}… "
-            f"model_sig={ckpt.model_signature[:12]}… "
-            f"usd_spent=${cost_actuals['usd_spent']:.4f}"
-        ),
+        summary=summary,
         outputs=[stored.ref],
         diagnostics=[],
         data={
@@ -655,6 +877,8 @@ def _pretrain(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
             "representation_signature": ckpt.representation_signature,
             "model_signature": ckpt.model_signature,
             "final_status": final_status,
+            "stopped_at_budget": budget_stopped,
+            "resume_token": resume_token,
             "cost_actuals": cost_actuals,
             "n_events": len(events),
         },
