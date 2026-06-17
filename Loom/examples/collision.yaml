@@ -1,0 +1,23 @@
+# A DELIBERATELY BROKEN field-map — the contract-safety demo in TOKENIZATION.md.
+# Two fields are given the SAME explicit token prefix `DUP`, so their default token
+# `DUP_UNK` would be assigned to two different ids. The C1 (injectivity) contract
+# catches it and REFUSES — no Corpus is written, with a named diff and a fix.
+# Run it against the music dataset:
+#   loom tokenize --in IngestDataset/<music n> --spec examples/collision.yaml
+version: loom-fieldmap/1
+entity: user_id
+event: listen
+context_len: 4096
+fields:
+  - name: genre
+    source: genre
+    strategy: mapping
+    prefix: DUP
+    values: [pop, rock, jazz]
+    default: UNK
+  - name: artist
+    source: artist
+    strategy: mapping
+    prefix: DUP
+    values: [artist_00, artist_01, artist_02]
+    default: UNK
