@@ -296,12 +296,25 @@ def _propose(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
 
     included_block = _serialize_included(included)
     excluded_block = _serialize_excluded(excluded)
+    # ``data.fields`` is the at-a-glance INCLUDED-field view the card/--json reader
+    # surfaces: each tokenized field's logical ``name`` + its chosen ``strategy``,
+    # read straight off the SpecDraft.fields FieldProposals (via ``included_block``).
+    # Previously absent, so a reader of ``data.fields`` saw ``name: None`` and an
+    # INCLUDED count of 0 even though fields ARE included (GAP 2). ``fields_included``
+    # is the matching honest count. The richer ``included`` block (params, token_count,
+    # rationale) and the ``excluded`` block are unchanged — existing consumers
+    # (tests, ``tokenize``'s ``tokens_per_event``) keep reading ``included`` verbatim.
+    fields_block = [
+        {"name": f["name"], "strategy": f["strategy"]} for f in included_block
+    ]
     data_block: dict[str, Any] = {
         "input": obj.pathspec,
         "entity": entity,
         "event": event,
         "target": target,
         "fieldmap": fieldmap,
+        "fields": fields_block,
+        "fields_included": len(fields_block),
         "included": included_block,
         "excluded": excluded_block,
         "vocab_size": vocab_size,

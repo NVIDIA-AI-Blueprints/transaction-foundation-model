@@ -577,16 +577,26 @@ def preprocess_chain(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+#: characters stripped from a numeric/currency STRING before float-binning — mirrors
+#: the proposer's GAP-1 numeric-coercible-string detector (a leading/trailing ``$``,
+#: thousands ``,``, surrounding whitespace, a trailing ``%``) so a value the proposer
+#: classified as continuous also coerces here instead of falling back to 0.
+_AMT_STRIP_RE = re.compile(r"[\s$,]|%$")
+
+
 def _amount_bin_thresholds(amt: pd.Series, thresholds: list[float]) -> pd.Series:
     """``bin = sum(amt >= t for t in thresholds)`` → 0..len(thresholds) (generic).
 
     The bring-your-own-schema analogue of :func:`_amount_bin`: log-spaced
     deterministic threshold bins (C2-clean, no fitted artifact). Tolerates a
-    ``"$1,234.50"``-style string column the same way the financial preprocess does."""
+    ``"$1,234.50"``-style string column the same way the financial preprocess does —
+    stripping a leading/trailing ``$``, thousands ``,``, surrounding whitespace and a
+    trailing ``%`` (the exact formatting the GAP-1 proposer recognized as numeric) so
+    a ``$``-formatted ``amount`` column bins by magnitude instead of collapsing to 0."""
     f = (
         amt.astype(str)
-        .str.replace("$", "", regex=False)
-        .str.replace(",", "", regex=False)
+        .str.replace(_AMT_STRIP_RE, "", regex=True)
+        .str.strip()
     )
     f = pd.to_numeric(f, errors="coerce").fillna(0.0)
     bin_ = pd.Series(0, index=amt.index, dtype="int64")

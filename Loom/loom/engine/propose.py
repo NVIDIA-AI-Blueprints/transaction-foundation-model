@@ -76,6 +76,25 @@ MIN_OCC_CAP = 50
 SAMPLE_OCC_FRACTION = 0.002
 #: coverage floor: present on ~every event.
 MIN_COVERAGE = 0.99
+#: numeric-coercible-string detection floor (the build brief's GAP 1). A STRING
+#: column whose values parse to a number — after stripping common formatting (a
+#: leading/trailing ``$``, thousands ``,``, surrounding whitespace, a trailing
+#: ``%``) — on ≥ this fraction of non-null rows is treated as CONTINUOUS (the
+#: ``amount`` log-bin strategy), exactly like a float column. This recovers the
+#: magnitude ordering of a ``$``-formatted ``amount`` column (e.g. "$12.50") the
+#: schema sniff reports as a high-cardinality OBJECT/string (which would otherwise
+#: be hashed, losing the ordering). It runs AFTER the id/entity/target/near-unique
+#: exclusions so an id-shaped numeric-string (e.g. ``account_id``) is still
+#: EXCLUDED, never coerced to continuous.
+NUMERIC_STRING_FRACTION = 0.95
+#: characters stripped before the numeric-coercibility test / the amount preprocess.
+_NUMERIC_STRIP_RE = re.compile(r"[\s$,]|%$")
+#: the numeric/currency FORMATTING marks that distinguish a magnitude-bearing amount
+#: string (``"$12.50"``, ``"1,234.50"``, ``"3.2%"``) from a bare integer-CODE string
+#: (``"3812"`` — a merchant/region id that must still HASH, not bin). The
+#: numeric-string→continuous detector requires one of these marks on a high fraction
+#: of rows, so a column of bare integer codes is NOT mistaken for a continuous amount.
+_NUMERIC_FORMAT_RE = re.compile(r"[$,.%]")
 
 
 def _occ_floor(corpus_events: int) -> int:
@@ -399,8 +418,21 @@ def propose_spec(
         name_hit = _name_looks_like_identity(col)
         is_dt = _is_datetime_col(col, meta, event)
         is_numeric = _is_float_dtype(meta) or _is_int_dtype(meta)
-        # A near-unique numeric (no id-shaped name) is a continuous feature → bin it.
-        numeric_continuous = is_numeric and not name_hit
+        # GAP 1 — numeric-coercible STRING: a non-id-named OBJECT/string column whose
+        # values parse to a number after stripping common formatting ($, thousands ',',
+        # whitespace, trailing %) on a high fraction of non-null rows. This is a
+        # ``$``-formatted ``amount`` the schema sniff reports as a high-cardinality
+        # string; it is a CONTINUOUS feature (near-unique BY VALUE) and must be BINNED,
+        # not hashed or dropped. We only probe non-datetime, non-numeric-dtype, NON-id
+        # NAMED columns (so an ``account_id``-style numeric-string id stays excluded
+        # by the id-name gate below and is NEVER coerced to continuous).
+        is_numeric_string = False
+        if not is_dt and not is_numeric and not name_hit:
+            is_numeric_string = _is_numeric_coercible_string(rows, col)
+        # A near-unique numeric (no id-shaped name) is a continuous feature → bin it;
+        # the same exemption covers a numeric-coercible string (a ``$``-amount), so the
+        # near-unique gate below never strips a currency/numeric-string amount.
+        numeric_continuous = (is_numeric or is_numeric_string) and not name_hit
         if not is_dt and not numeric_continuous and (id_card is not None or near_unique or name_hit):
             if near_unique or (id_card and (id_card.get("data") or {}).get("near_unique")):
                 why = (
@@ -463,14 +495,20 @@ def propose_spec(
             )
             continue
 
-        if _is_float_dtype(meta):
-            # continuous → log-spaced deterministic threshold bins (C2-clean).
+        if _is_float_dtype(meta) or is_numeric_string:
+            # continuous → log-spaced deterministic threshold bins (C2-clean). Covers
+            # both a float column and a numeric-coercible STRING (a ``$``-formatted
+            # ``amount``); the generic ``amount`` preprocess strips ``$``/``,`` before
+            # binning so the magnitude ordering is preserved either way (GAP 1).
             bins = CONT_BINS_DEFAULT
             # occupancy: corpus_events / bins must clear the sample-aware floor.
             occ_floor = _occ_floor(corpus_events)
             if corpus_events / max(bins, 1) < occ_floor:
                 bins = max(CONT_BINS_MIN, corpus_events // max(occ_floor, 1))
                 bins = min(bins, CONT_BINS_MAX)
+            kind = "continuous float" if _is_float_dtype(meta) else (
+                "numeric-coercible string (currency/numeric formatting stripped)"
+            )
             proposal = FieldProposal(
                 name=_step_name(col),
                 source=col,
@@ -478,7 +516,7 @@ def propose_spec(
                 params={"bins": int(bins)},
                 token_count=int(bins),
                 rationale=(
-                    f"continuous float: {int(bins)} log-spaced deterministic "
+                    f"{kind}: {int(bins)} log-spaced deterministic "
                     "threshold bins (preferred over a fitted quantile binner — "
                     "no fitted artifact, C2-clean)"
                 ),
@@ -628,6 +666,44 @@ def _observed_values(rows: Any, col: str) -> Optional[list[str]]:
     return sorted({str(v) for v in series.unique()})
 
 
+def _is_numeric_coercible_string(rows: Any, col: str) -> bool:
+    """True iff ``col`` is a FORMATTED numeric STRING — a magnitude-bearing amount
+    the schema sniff reports as a high-cardinality OBJECT string (e.g. "$12.50",
+    "1,234.50", "3.2%") — that should bin like a float, NOT a bare integer-CODE
+    string (e.g. "3812", a merchant/region id that must still HASH).
+
+    The test (GAP 1): on the NON-null rows, after stripping common formatting (``$``,
+    thousands ``,``, surrounding whitespace, a trailing ``%``), ≥
+    ``NUMERIC_STRING_FRACTION`` parse to a number AND ≥ ``NUMERIC_STRING_FRACTION``
+    carry an actual numeric/currency formatting mark (``$ , . %``). The
+    formatting-mark requirement is what separates a ``$``/decimal amount from a column
+    of bare integer codes (which coerce but carry NO mark) — so an integer-string
+    merchant/region id is NOT swallowed into the continuous binner.
+
+    Returns ``False`` when no frame is available / the column is absent / the column
+    is empty (the caller then falls back to the categorical path — advisory, exactly
+    the existing ``n_values``-only degradation). Pure pandas, no fitting — inspects
+    only the cell text (config-time, C2-clean)."""
+    if rows is None:
+        return False
+    try:
+        if col not in getattr(rows, "columns", []):
+            return False
+        import pandas as pd
+
+        series = rows[col].dropna()
+        if len(series) == 0:
+            return False
+        text = series.astype(str)
+        stripped = text.str.replace(_NUMERIC_STRIP_RE, "", regex=True).str.strip()
+        coerced = pd.to_numeric(stripped, errors="coerce")
+        numeric_frac = float(coerced.notna().mean())
+        formatted_frac = float(text.str.contains(_NUMERIC_FORMAT_RE, regex=True).mean())
+        return numeric_frac >= NUMERIC_STRING_FRACTION and formatted_frac >= NUMERIC_STRING_FRACTION
+    except Exception:  # pragma: no cover - defensive (non-DataFrame rows)
+        return False
+
+
 def _categorical_proposal(
     col: str,
     n_unique: int,
@@ -742,5 +818,6 @@ __all__ = [
     "MIN_OCC_CAP",
     "SAMPLE_OCC_FRACTION",
     "MIN_COVERAGE",
+    "NUMERIC_STRING_FRACTION",
     "N_SPECIALS",
 ]
