@@ -60,7 +60,9 @@ def _sample_df(n: int = SAMPLE_N, *, seed: int = 0) -> pd.DataFrame:
       * ``region``       — a high-cardinality categorical (~thousands distinct) → Hash;
       * ``const_col``    — near-constant (1 value) → dropped (no information);
       * ``row_uuid``     — near-unique id-shaped non-entity → dropped/hashed;
-      * ``mostly_null``  — present on <1% of rows → dropped (sparse).
+      * ``mostly_null``  — present on <1% of rows but multi-valued → KEPT (its
+        values tokenized; the missing rows captured as the default token —
+        coverage no longer filters a column out).
 
     EVERY per-token occupancy here is well under the OLD 1K floor, so the OLD gate
     starved all of them; the NEW sample-aware gate must KEEP the healthy ones.
@@ -274,13 +276,18 @@ def test_near_unique_id_shaped_nonentity_is_still_excluded_or_hashed():
         assert any("row_uuid" in w for w in draft.warnings)
 
 
-def test_mostly_null_sparse_column_is_still_excluded():
-    """A mostly-null column (present on <1% of rows) is still EXCLUDED as sparse —
-    the coverage floor is independent of the occupancy fix and must STAY."""
+def test_partially_present_column_is_kept_with_a_default_token():
+    """A partially-present (even mostly-null) but multi-valued column is KEPT, not
+    filtered on coverage: its observed values are tokenized and the missing rows are
+    captured as the strategy's default token. A blank is itself signal (e.g. an
+    online transaction has no merchant location), so the tokenizer encodes it rather
+    than dropping the column — the human edits the spec to remove a field they don't
+    want. Only a no-information column (near-constant / near-unique) is excluded."""
     draft = _propose(_sample_df())
-    excl = _excl(draft)
-    assert "mostly_null" in excl and excl["mostly_null"].reason == "sparse"
-    assert "mostly_null" not in {f.source for f in draft.fields}
+    by_src = _by_src(draft)
+    assert "mostly_null" in by_src, "a sometimes-blank multi-valued column is kept, not dropped as 'sparse'"
+    assert by_src["mostly_null"].strategy == "mapping"   # values + a default token for the blanks
+    assert "mostly_null" not in _excl(draft)
 
 
 def test_entity_and_target_are_still_excluded():

@@ -125,6 +125,29 @@ def test_high_card_dollar_string_amount_is_continuous_not_hash():
     assert by_src["amount"].strategy != "hash"
 
 
+def test_numeric_code_column_is_not_binned_as_amount():
+    """A numeric CODE column — a postal/zip the schema sniff reads as a float (``"91750.0"``
+    → float) — must NOT be binned by magnitude: a zip is a categorical identifier, not an
+    amount. The code-name guard routes it to hash/mapping, while a real ``$``-amount in the
+    same frame still bins. Mirrors the TabFormer control where ``Zip`` was mis-read as ``amount``."""
+    rng = np.random.RandomState(7)
+    n = 20_000
+    df = pd.DataFrame(
+        {
+            "account_id": [f"A{i % 1500}" for i in range(n)],
+            "zip": rng.randint(10000, 99999, n).astype(float),          # a zip read as a FLOAT
+            "amount": _dollarize(rng.lognormal(3.0, 1.0, n).round(2)),  # a real $-amount
+        }
+    )
+    draft = _propose(df, entity="account_id")
+    by_src = {f.source: f.strategy for f in draft.fields}
+    assert by_src.get("zip") in ("hash", "mapping"), (
+        f"a numeric zip code must route to a categorical strategy, got {by_src.get('zip')!r}"
+    )
+    assert by_src.get("zip") != "amount", "a postal code must not be binned by magnitude"
+    assert by_src.get("amount") == "amount", "the genuine $-amount in the same frame must still bin"
+
+
 def test_dollar_string_amount_is_treated_like_a_float_column():
     """A numeric-coercible string amount earns the SAME proposal as the equivalent
     FLOAT column — same `amount` strategy and same bin count — so currency formatting

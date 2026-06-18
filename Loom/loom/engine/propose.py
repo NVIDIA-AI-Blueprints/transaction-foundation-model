@@ -89,12 +89,17 @@ MIN_COVERAGE = 0.99
 NUMERIC_STRING_FRACTION = 0.95
 #: characters stripped before the numeric-coercibility test / the amount preprocess.
 _NUMERIC_STRIP_RE = re.compile(r"[\s$,]|%$")
-#: the numeric/currency FORMATTING marks that distinguish a magnitude-bearing amount
-#: string (``"$12.50"``, ``"1,234.50"``, ``"3.2%"``) from a bare integer-CODE string
-#: (``"3812"`` — a merchant/region id that must still HASH, not bin). The
-#: numeric-string→continuous detector requires one of these marks on a high fraction
-#: of rows, so a column of bare integer codes is NOT mistaken for a continuous amount.
-_NUMERIC_FORMAT_RE = re.compile(r"[$,.%]")
+#: the CURRENCY/PERCENT mark that distinguishes a magnitude-bearing amount string
+#: (``"$12.50"``, ``"$1,234.50"``, ``"3.2%"``) from an IDENTIFIER-like numeric string:
+#: a bare integer code (``"3812"`` — a merchant/region id) OR a decimal-looking CODE
+#: such as a postal/zip (``"91750.0"``). Only an explicit ``$``/``%`` symbol counts —
+#: a bare ``.`` or ``,`` is NOT a magnitude signal (zips, ids, phone/version-like codes
+#: carry dots and commas too). The numeric-string→continuous detector requires this
+#: mark on a high fraction of rows, so neither an integer code nor a decimal-looking
+#: zip is mistaken for a continuous amount; an unmarked numeric string falls to the
+#: categorical/hash path, because a genuine continuous quantity arrives as a numeric
+#: dtype (handled separately) while an unmarked numeric STRING is far more likely a code.
+_NUMERIC_FORMAT_RE = re.compile(r"[$%]")
 
 
 def _occ_floor(corpus_events: int) -> int:
@@ -118,6 +123,17 @@ _HIGH_CORR = 0.95
 _IDENTITY_NAME_RE = re.compile(
     r"(?:^|[_\W])(id|uuid|guid|user|cust|customer|wallet|account|acct|"
     r"address|addr|hash|email|ssn|pan|card_?number|primary_?key|pk)(?:$|[_\W])",
+    re.IGNORECASE,
+)
+#: numeric IDENTIFIER-code names. A numeric column whose NAME marks it a CODE — a
+#: postal/zip, an industry/region code — is categorical by nature, NOT a magnitude,
+#: even when the schema sniff reads it as an int/float (e.g. a zip ``"91750.0"`` →
+#: float). Such a column must route to the categorical/hash path, never the
+#: continuous (log-bin) binner — binning a zip by size is meaningless. Kept SEPARATE
+#: from the identity family above: a code is KEPT (hashed/mapped), an identity is
+#: EXCLUDED.
+_CODE_NAME_RE = re.compile(
+    r"(?:^|[_\W])(zip|zipcode|postal|postcode|fips|sic|naics|code)(?:$|[_\W])",
     re.IGNORECASE,
 )
 
@@ -245,6 +261,12 @@ def _index_flags(eda_flags: Any) -> dict[str, list[dict[str, Any]]]:
 
 def _name_looks_like_identity(name: str) -> bool:
     return bool(_IDENTITY_NAME_RE.search(str(name)))
+
+
+def _name_looks_like_code(name: str) -> bool:
+    """A numeric column named like a CODE (zip/postal/industry code) — categorical,
+    not a magnitude. Routed to mapping/hash, never the continuous binner."""
+    return bool(_CODE_NAME_RE.search(str(name)))
 
 
 def _is_datetime_col(name: str, meta: dict[str, Any], event: Optional[str]) -> bool:
@@ -395,20 +417,17 @@ def propose_spec(
                 )
             )
             continue
-        # coverage — not present on ~every event.
-        if coverage < MIN_COVERAGE:
-            excluded.append(
-                ExclusionProposal(
-                    name=col,
-                    reason="sparse",
-                    rationale=(
-                        f"sparse: present on {coverage:.0%} of events "
-                        f"(< {MIN_COVERAGE:.0%}) — does not earn a token"
-                    ),
-                    eda=None,
-                )
-            )
-            continue
+        # coverage — partially-present columns are KEPT, not filtered. A blank is
+        # itself signal (an online transaction legitimately has no merchant
+        # location), so the missing rows are captured as the strategy's default
+        # token rather than dropping the column — the point of a tokenizer is to
+        # encode the nuances, not filter them. Only a near-constant column (no
+        # information, handled above), or a near-unique / free-text one (handled
+        # below), is excluded; coverage alone never drops a column. A column that is
+        # essentially all-blank collapses to a single default token → n_unique <= 1
+        # → already caught as near-constant. (Was: drop if coverage < 0.99, which
+        # silently filtered out meaningful-but-sometimes-blank columns like a
+        # Merchant State / Zip that are absent only for online transactions.)
         # near-unique / id-shaped (non-entity). Drop by default; human may hash.
         # This is a CATEGORICAL/string id test — continuous numerics are near-unique
         # BY VALUE and are meant to be BINNED, not dropped, so they are exempt (the
@@ -416,6 +435,10 @@ def propose_spec(
         id_card = _identity_card(col)
         near_unique = unique_ratio >= _NEAR_UNIQUE_RATIO
         name_hit = _name_looks_like_identity(col)
+        # A numeric column whose NAME marks it a CODE (zip/postal/industry code) is
+        # categorical, NOT a magnitude — route it to mapping/hash, never the binner
+        # (a zip read as a float "91750.0" would otherwise be binned by size).
+        is_code_name = _name_looks_like_code(col)
         is_dt = _is_datetime_col(col, meta, event)
         is_numeric = _is_float_dtype(meta) or _is_int_dtype(meta)
         # GAP 1 — numeric-coercible STRING: a non-id-named OBJECT/string column whose
@@ -432,7 +455,7 @@ def propose_spec(
         # A near-unique numeric (no id-shaped name) is a continuous feature → bin it;
         # the same exemption covers a numeric-coercible string (a ``$``-amount), so the
         # near-unique gate below never strips a currency/numeric-string amount.
-        numeric_continuous = (is_numeric or is_numeric_string) and not name_hit
+        numeric_continuous = (is_numeric or is_numeric_string) and not name_hit and not is_code_name
         if not is_dt and not numeric_continuous and (id_card is not None or near_unique or name_hit):
             if near_unique or (id_card and (id_card.get("data") or {}).get("near_unique")):
                 why = (
@@ -495,7 +518,7 @@ def propose_spec(
             )
             continue
 
-        if _is_float_dtype(meta) or is_numeric_string:
+        if (_is_float_dtype(meta) or is_numeric_string) and not is_code_name:
             # continuous → log-spaced deterministic threshold bins (C2-clean). Covers
             # both a float column and a numeric-coercible STRING (a ``$``-formatted
             # ``amount``); the generic ``amount`` preprocess strips ``$``/``,`` before
@@ -675,10 +698,11 @@ def _is_numeric_coercible_string(rows: Any, col: str) -> bool:
     The test (GAP 1): on the NON-null rows, after stripping common formatting (``$``,
     thousands ``,``, surrounding whitespace, a trailing ``%``), ≥
     ``NUMERIC_STRING_FRACTION`` parse to a number AND ≥ ``NUMERIC_STRING_FRACTION``
-    carry an actual numeric/currency formatting mark (``$ , . %``). The
-    formatting-mark requirement is what separates a ``$``/decimal amount from a column
-    of bare integer codes (which coerce but carry NO mark) — so an integer-string
-    merchant/region id is NOT swallowed into the continuous binner.
+    carry an explicit CURRENCY/PERCENT mark (``$`` or ``%``). Requiring a currency/
+    percent symbol — not a bare ``.`` or ``,`` — is what separates a real amount from
+    an identifier-like numeric string: a bare integer code (``"3812"``) OR a
+    decimal-looking code such as a postal/zip (``"91750.0"``) carries no ``$``/``%``
+    and so stays on the categorical/hash path, never binned by magnitude.
 
     Returns ``False`` when no frame is available / the column is absent / the column
     is empty (the caller then falls back to the categorical path — advisory, exactly
