@@ -6,10 +6,15 @@ Reproducible artifacts for the tokenization walkthrough in
 
 | File | What it is |
 |---|---|
+| **[`demo-tabformer.md`](./demo-tabformer.md)** | **The recordable demo** — step-by-step script for tokenizing the TabFormer transactions dataset with Loom, with screenshot cues and a "with Loom vs. going alone" comparison. |
+| `tabformer_sample.py` | Generates `tf.csv` — a faithful sample of the TabFormer credit-card schema (real 15 columns + quirks), seeded so the demo numbers reproduce. Use when the real 2.2 GB CSV isn't on hand. |
 | `listens.py` | Generates `listens.csv` — a synthetic music-listening event log (the lead example: exercises mapping / hash / amount / calendar / timedelta / entity-exclusion). |
 | `dna.py` | Generates `dna.csv` — 60 DNA reads over `{A,C,G,T}` (the "any domain" example). |
 | `dna_kmer.yaml` | A k-mer field-map that tokenizes DNA into 3-mer codons → a 69-token vocab. |
 | `collision.yaml` | A deliberately broken spec (two fields share a token prefix) that trips the C1 contract → `REFUSED`, no Corpus written. |
+
+For the **transactions / TabFormer demo** (with screenshots + the comparison), follow
+[`demo-tabformer.md`](./demo-tabformer.md). The generic walkthrough below uses the music + DNA examples.
 
 ## The ≈4-minute demo, end to end
 
