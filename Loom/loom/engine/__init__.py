@@ -32,6 +32,12 @@ from .spec import (  # noqa: F401
     materialize_corpus_lines,
     spec_from_field_map,
 )
+from .streaming import (  # noqa: F401
+    CHUNK_ROWS,
+    ColStat,
+    StreamingStats,
+    stream_stats,
+)
 
 __all__ = [
     "AmountStrategy",
@@ -55,4 +61,8 @@ __all__ = [
     "corpus_lines",
     "materialize_corpus_lines",
     "spec_from_field_map",
+    "CHUNK_ROWS",
+    "ColStat",
+    "StreamingStats",
+    "stream_stats",
 ]

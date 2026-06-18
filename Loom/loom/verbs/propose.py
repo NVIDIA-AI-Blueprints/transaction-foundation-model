@@ -235,20 +235,37 @@ def _propose(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
     ingest_report = extras.get("ingest_report") or {}
     eda_flags = ingest_report.get("eda_diagnostics") or []
 
-    # The ingested rows frame (the IngestDataset payload = rows.csv). The classifier
-    # enumerates the OBSERVED distinct values of every low-card categorical off this
-    # frame so the proposed `mapping` fields carry a REAL `values: [...]` list — the
-    # schema sniff alone carries only `n_unique` (a count), which would collapse every
-    # categorical value to the single default token at tokenize time. Best-effort: a
-    # missing/unreadable payload degrades to an n_values-only proposal (still valid;
-    # the human fills in the values), never a hard failure.
-    rows = _load_rows(obj)
+    # The proposer needs the COMPLETE distinct value LIST of every low-card
+    # categorical (the schema sniff carries only `n_unique`, a count, which would
+    # collapse every value to the single default token at tokenize time). Two
+    # sources, in priority order:
+    #   1. STREAMING: when ingest ran `--streaming on` it stored the bounded
+    #      per-column stats INLINE on `extras['col_stats']` — the complete vocab
+    #      learned in one constant-memory pass over EVERY row. We deserialize it to
+    #      a {col: ColStat} map and hand the classifier `col_stats=` (rows=None),
+    #      which kills the second full-frame read entirely (the rows.csv was
+    #      deliberately omitted on the streaming path).
+    #   2. IN-RAM: the IngestDataset rows payload (rows.csv) read whole, exactly as
+    #      before. Best-effort: a missing/unreadable payload degrades to an
+    #      n_values-only proposal (still valid), never a hard failure.
+    col_stats_raw = extras.get("col_stats")
+    if col_stats_raw:
+        from ..engine.streaming import StreamingStats
+
+        # {col: ColStat} — propose_spec reads `.values` / the ns_* counters off
+        # each finalized ColStat; rows=None so no frame is touched.
+        col_stats = StreamingStats.from_dict(col_stats_raw).columns
+        rows = None
+    else:
+        col_stats = None
+        rows = _load_rows(obj)
 
     # --- run the pure classifier (Task A) -------------------------------------
     # ``propose_spec`` is keyword-only and PURE: it sizes hash buckets / applies
     # the "earns a token" occupancy gate from ``schema["n_rows"]`` + per-column
-    # ``n_unique`` (the sniffed cardinalities), and reads the rows frame ONLY to
-    # enumerate the real categorical value lists (config-only, C2-clean).
+    # ``n_unique`` (the sniffed cardinalities), and reads the rows frame (or the
+    # streamed col_stats) ONLY to enumerate the real categorical value lists
+    # (config-only, C2-clean).
     try:
         proposal = engine_propose.propose_spec(
             schema=schema,
@@ -258,6 +275,7 @@ def _propose(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
             target=target,
             context_len=context_len,
             rows=rows,
+            col_stats=col_stats,
         )
     except Exception as exc:  # pragma: no cover - defensive; classifier is pure
         return _refused(

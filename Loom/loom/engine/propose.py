@@ -310,6 +310,7 @@ def propose_spec(
     target: Optional[str] = None,
     context_len: int = 4096,
     rows: Any = None,
+    col_stats: Optional[dict] = None,
 ) -> SpecDraft:
     """Propose a tokenizer field-map for an arbitrary schema (the BYO-schema flow).
 
@@ -330,6 +331,17 @@ def propose_spec(
     config-only (C2-clean: it is frozen into the spec, not fitted at materialize
     time). When ``rows`` is absent the field carries ``n_values`` only and the human
     must fill in the values before tokenize (the proposal is then advisory).
+
+    ``col_stats`` is the OPTIONAL streamed statistics map (``{col: ColStat}`` from
+    :func:`loom.engine.streaming.stream_stats`) supplied by the constant-memory
+    ingest path INSTEAD of ``rows`` for a corpus larger than RAM. When present it
+    feeds :func:`_observed_values` and :func:`_is_numeric_coercible_string` the
+    same per-column facts ``rows`` would (the complete distinct value list / the
+    numeric-string fractions) without the frame ever being resident. ``col_stats``
+    is ADVISORY to those two readers ONLY — every strategy choice, threshold, and
+    the emitted ``SpecDraft`` shape are unchanged. When ``col_stats is None`` (the
+    default — flag off, dataframe-injected, or small input) the code takes the
+    EXACT existing ``rows``-based branch, so the draft is byte-identical to today.
 
     Deterministic + pure: same inputs → identical draft (column order is the
     schema order; the enumerated values are sorted so the draft is stable).
@@ -451,7 +463,7 @@ def propose_spec(
         # by the id-name gate below and is NEVER coerced to continuous).
         is_numeric_string = False
         if not is_dt and not is_numeric and not name_hit:
-            is_numeric_string = _is_numeric_coercible_string(rows, col)
+            is_numeric_string = _is_numeric_coercible_string(rows, col, col_stats)
         # A near-unique numeric (no id-shaped name) is a continuous feature → bin it;
         # the same exemption covers a numeric-coercible string (a ``$``-amount), so the
         # near-unique gate below never strips a currency/numeric-string amount.
@@ -564,12 +576,14 @@ def propose_spec(
                 )
             else:
                 proposal = _categorical_proposal(
-                    col, n_unique, corpus_events, values=_observed_values(rows, col)
+                    col, n_unique, corpus_events,
+                    values=_observed_values(rows, col, col_stats),
                 )
         else:
             # string / object → categorical or free-text by cardinality.
             proposal = _categorical_proposal(
-                col, n_unique, corpus_events, values=_observed_values(rows, col)
+                col, n_unique, corpus_events,
+                values=_observed_values(rows, col, col_stats),
             )
 
         if proposal is None:
@@ -671,13 +685,31 @@ def _int_range(meta: dict[str, Any], n_unique: int) -> Optional[tuple[int, int]]
     return 0, n_unique - 1
 
 
-def _observed_values(rows: Any, col: str) -> Optional[list[str]]:
-    """The sorted distinct NON-null values of ``col`` in the rows frame, as strings.
+def _observed_values(
+    rows: Any, col: str, col_stats: Optional[dict] = None
+) -> Optional[list[str]]:
+    """The sorted distinct NON-null values of ``col``, as strings.
 
-    Returns ``None`` when no frame is available or the column is absent (the caller
-    then falls back to an ``n_values``-only mapping). Sorted so the proposal is
-    deterministic; stringified to match :class:`MappingPassthrough`'s string vocab.
+    Stats-first: when ``col_stats`` (the streamed :class:`~loom.engine.streaming.
+    ColStat` map) is supplied, return the column's complete distinct list straight
+    from the bounded collector — ``cs.values`` (already ``sorted(set(str(v)))``,
+    EXACTLY this function's in-RAM result) for an under-cap column, or ``None`` once
+    the column crossed ``LOW_CARD_MAX`` (the set was freed; the caller then routes
+    to Hash via the sentinel ``n_unique``, identical to the in-RAM Hash routing). A
+    streamed column always has a stat entry, so a missing key returns ``None``.
+
+    Otherwise (``col_stats is None`` — the back-compat path) read the rows frame:
+    ``sorted({str(v) for v in rows[col].dropna().unique()})``. Returns ``None`` when
+    no frame is available or the column is absent (the caller then falls back to an
+    ``n_values``-only mapping). Sorted so the proposal is deterministic; stringified
+    to match :class:`MappingPassthrough`'s string vocab.
     """
+    if col_stats is not None:
+        cs = col_stats.get(col)
+        if cs is None:
+            return None
+        vals = getattr(cs, "values", None)
+        return list(vals) if vals is not None else None
     if rows is None:
         return None
     try:
@@ -689,7 +721,9 @@ def _observed_values(rows: Any, col: str) -> Optional[list[str]]:
     return sorted({str(v) for v in series.unique()})
 
 
-def _is_numeric_coercible_string(rows: Any, col: str) -> bool:
+def _is_numeric_coercible_string(
+    rows: Any, col: str, col_stats: Optional[dict] = None
+) -> bool:
     """True iff ``col`` is a FORMATTED numeric STRING — a magnitude-bearing amount
     the schema sniff reports as a high-cardinality OBJECT string (e.g. "$12.50",
     "1,234.50", "3.2%") — that should bin like a float, NOT a bare integer-CODE
@@ -704,10 +738,29 @@ def _is_numeric_coercible_string(rows: Any, col: str) -> bool:
     decimal-looking code such as a postal/zip (``"91750.0"``) carries no ``$``/``%``
     and so stays on the categorical/hash path, never binned by magnitude.
 
+    Stats-first: when ``col_stats`` is supplied, the SAME two fractions are read
+    from the streamed counters (``ns_parse_ok``/``ns_non_null`` and
+    ``ns_currency_mark``/``ns_non_null``) — the collector applied the identical
+    strip→coerce→mark predicates per cell, so the decision is the same as the
+    in-RAM path's. An empty column (``ns_non_null == 0``) returns ``False``.
+
     Returns ``False`` when no frame is available / the column is absent / the column
     is empty (the caller then falls back to the categorical path — advisory, exactly
     the existing ``n_values``-only degradation). Pure pandas, no fitting — inspects
     only the cell text (config-time, C2-clean)."""
+    if col_stats is not None:
+        cs = col_stats.get(col)
+        if cs is None:
+            return False
+        n = int(getattr(cs, "ns_non_null", 0) or 0)
+        if n == 0:
+            return False
+        numeric_frac = float(getattr(cs, "ns_parse_ok", 0)) / n
+        formatted_frac = float(getattr(cs, "ns_currency_mark", 0)) / n
+        return (
+            numeric_frac >= NUMERIC_STRING_FRACTION
+            and formatted_frac >= NUMERIC_STRING_FRACTION
+        )
     if rows is None:
         return False
     try:
