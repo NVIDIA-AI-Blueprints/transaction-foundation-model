@@ -23,7 +23,11 @@ _log = logging.getLogger("loom.verbs")
 # (ARCHITECTURE §10 step 6). ``propose`` is the BYO-schema field→strategy proposer
 # that emits an editable tokenizer spec for `tokenize --spec` to compile (it
 # self-registers via @register, like ingest/baseline, so it lands by import here).
-_VERB_MODULES = ("prepare", "ingest", "baseline", "pretrain", "propose")
+# ``embed``/``evaluate`` are the LOCAL, ungated validate-before-train loop verbs
+# (PPMI-SVD embeddings + intrinsic/extrinsic scoring vs the baseline controls).
+# The guarded import loop above tolerates them being mid-build (not yet created):
+# a module that fails to import is logged and skipped, never crashing ``import loom``.
+_VERB_MODULES = ("prepare", "ingest", "baseline", "pretrain", "propose", "embed", "evaluate")
 
 for _name in _VERB_MODULES:
     try:

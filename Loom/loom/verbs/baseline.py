@@ -26,8 +26,14 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import numpy as np
-import pandas as pd
 
+from ..engine.holdout import (
+    build_leave_one_last_out,
+    coerce_amount,
+    infer_cols,
+    load_rows,
+    prec_at_k,
+)
 from ..registry import VerbContext, register
 from ..types import (
     CapabilityMode,
@@ -53,41 +59,9 @@ BASELINE_PARAMS: dict[str, Any] = {
     },
 }
 
-# Column-name candidates used to infer the entity / time / item / side / amount
-# columns when they aren't pinned on the ingested object's extras.
-_ENTITY_CANDS = ("wallet", "cust", "customer", "user", "account", "entity")
-_TIME_CANDS = ("timestamp", "datetime", "ts", "time", "date", "event_time")
-_ITEM_CANDS = ("item", "mcc", "merchant", "venue", "product", "token", "symbol")
-_SIDE_CANDS = ("side", "direction", "action")
-_AMOUNT_CANDS = ("size_usd", "amount", "amt", "size", "value", "notional")
-
-
-def _infer_col(df: pd.DataFrame, pinned: Optional[str], candidates: tuple[str, ...]) -> Optional[str]:
-    if pinned and pinned in df.columns:
-        return pinned
-    lower = {str(c).lower(): c for c in df.columns}
-    for cand in candidates:
-        if cand in lower:
-            return lower[cand]
-    return None
-
-
-def _load_rows(obj: Any, store: Any) -> Optional[pd.DataFrame]:
-    """Load the dataframe payload for an ingested object, if present.
-
-    ``ingest`` writes CSV (Phase-0 dep set has no parquet engine), so CSV is tried
-    first; parquet is a fallback for any object written by a future v0.2 path.
-    """
-    payload_path = getattr(obj, "payload_path", None)
-    if not payload_path:
-        return None
-    try:
-        return pd.read_csv(payload_path)
-    except Exception:  # noqa: BLE001 — fall back to parquet if that's the payload
-        try:
-            return pd.read_parquet(payload_path)
-        except Exception:  # noqa: BLE001
-            return None
+# Column inference, row loading, the leave-one-last-out split, Prec@K and amount
+# coercion are SHARED with ``evaluate`` via :mod:`loom.engine.holdout` — the eval
+# split the model must beat is computed exactly once, one way (no fork).
 
 
 def _refused(msg: str, fix: str, experiment: Optional[str]) -> VerbResult:
@@ -102,30 +76,6 @@ def _refused(msg: str, fix: str, experiment: Optional[str]) -> VerbResult:
         experiment=experiment,
         cost_plan=CostPlan(),
     )
-
-
-def _prec_at_k(predicted_topk: list[Any], actual: Any) -> float:
-    return 1.0 if actual in predicted_topk else 0.0
-
-
-def _coerce_amount(value: Any) -> Optional[float]:
-    """Best-effort numeric coercion for an amount/size cell.
-
-    Raw TabFormer amounts arrive as ``"$x"`` / ``"$1,234.50"`` strings; strip the
-    currency formatting and parse a float. Returns ``None`` for missing or
-    non-numeric values so the MAE baseline skips that pair rather than crashing
-    (the previous ``float("$22.00")`` raised ``ValueError`` mid-verb)."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    s = str(value).strip().replace("$", "").replace(",", "")
-    if s == "" or s.lower() in ("nan", "none"):
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
 
 
 @register(
@@ -161,7 +111,7 @@ def _baseline(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
             experiment,
         )
 
-    df = _load_rows(obj, ctx.store)
+    df = load_rows(obj)
     if df is None or len(df) == 0:
         return _refused(
             f"baseline found no rows on {in_spec} (no readable payload)",
@@ -170,11 +120,12 @@ def _baseline(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
         )
 
     extras = getattr(obj, "extras", {}) or {}
-    entity_col = _infer_col(df, extras.get("entity"), _ENTITY_CANDS)
-    time_col = _infer_col(df, None, _TIME_CANDS)
-    item_col = _infer_col(df, extras.get("event"), _ITEM_CANDS)
-    side_col = _infer_col(df, None, _SIDE_CANDS)
-    amount_col = _infer_col(df, None, _AMOUNT_CANDS)
+    cols = infer_cols(df, extras)
+    entity_col = cols["entity"]
+    time_col = cols["time"]
+    item_col = cols["item"]
+    side_col = cols["side"]
+    amount_col = cols["amount"]
 
     if entity_col is None or item_col is None:
         return _refused(
@@ -184,35 +135,11 @@ def _baseline(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
             experiment,
         )
 
-    work = df.copy()
-    # Deterministic per-entity ordering: by time when present, else stable index (C6).
-    if time_col is not None:
-        work[time_col] = pd.to_datetime(work[time_col], errors="coerce")
-        work = work.sort_values([entity_col, time_col], kind="mergesort")
-    else:
-        work = work.sort_values([entity_col], kind="mergesort")
-    work = work.reset_index(drop=True)
-
     # --- build leave-one-last-out eval targets (temporal hold-out, C6) --------
-    # For each entity with >=2 events: history = all but the last; target = last.
-    targets: list[dict[str, Any]] = []
-    for ent, grp in work.groupby(entity_col, sort=True):
-        if len(grp) < 2:
-            continue
-        last = grp.iloc[-1]
-        prev = grp.iloc[-2]
-        targets.append(
-            {
-                "entity": ent,
-                "actual_item": last[item_col],
-                "prev_item": prev[item_col],
-                "actual_side": last[side_col] if side_col else None,
-                "actual_amount": last[amount_col] if amount_col else None,
-                "prev_amount": prev[amount_col] if amount_col else None,
-            }
-        )
-
-    n_eval = len(targets)
+    # SHARED with ``evaluate`` (loom.engine.holdout) so the control the model must
+    # beat is computed exactly once: per-entity time/stable ordering, ≥2-event
+    # filter, target=last/prev=second-last, history drops each entity's last event.
+    targets, history, n_eval = build_leave_one_last_out(df, cols)
     if n_eval == 0:
         return _refused(
             f"baseline has no held-out targets on {in_spec}: every entity has <2 events",
@@ -222,8 +149,6 @@ def _baseline(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
 
     # Global popularity ranking is fit on the HISTORY only (exclude held-out last
     # events) to avoid leaking the target into the popularity control.
-    last_idx = work.groupby(entity_col, sort=False).tail(1).index
-    history = work.drop(index=last_idx)
     pop_counts = history[item_col].value_counts()
     pop_topk = list(pop_counts.head(k).index)
 
@@ -231,7 +156,7 @@ def _baseline(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
 
     # --- popularity: Prec@K of the global top-K -------------------------------
     if kind in ("popularity", "both"):
-        hits = sum(_prec_at_k(pop_topk, t["actual_item"]) for t in targets)
+        hits = sum(prec_at_k(pop_topk, t["actual_item"]) for t in targets)
         metrics["popularity"] = {
             "metric": f"prec@{k}",
             "value": round(hits / n_eval, 6),
@@ -262,8 +187,8 @@ def _baseline(args: dict[str, Any], ctx: VerbContext) -> VerbResult:
     if amount_col is not None:
         errs: list[float] = []
         for t in targets:
-            a = _coerce_amount(t["actual_amount"])
-            p = _coerce_amount(t["prev_amount"])
+            a = coerce_amount(t["actual_amount"])
+            p = coerce_amount(t["prev_amount"])
             if a is not None and p is not None:
                 errs.append(abs(a - p))
         if errs:

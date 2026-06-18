@@ -513,9 +513,22 @@ def _prepare_impl(
     # otherwise (INVARIANT #1). A bad/unresolvable spec flows into the SAME
     # C1/C2/C3 refusal as any preset spec (INVARIANT #2) — never silently shipped.
     spec_ref = args.get("spec")
+    resolved_fieldmap: Optional[dict[str, Any]] = None
     if spec_ref:
         args = dict(args)
         args["spec"] = _resolve_fieldmap_spec(spec_ref, ctx)
+        # When --spec resolved to a concrete field-map dict (the custom path),
+        # keep a reference so the written Corpus can carry it VERBATIM. That makes
+        # the custom Corpus self-describing for the validate loop's token-space ↔
+        # row-space bridge (``evaluate`` recompiles the SAME tokenizer to encode a
+        # raw item value → its token), exactly as a preset Corpus is self-describing
+        # via ``producer_args.preset``. A custom Corpus tokenized from a file (no
+        # propose-written TokenizerSpec in the store) would otherwise leave evaluate
+        # unable to reconstruct the encoder. Inert on the preset path (spec absent),
+        # so the byte-identical preset envelope is untouched (INVARIANT #1) — this
+        # only adds a key to the PERSISTED object, never to the returned envelope.
+        if isinstance(args["spec"], dict):
+            resolved_fieldmap = args["spec"]
 
     # --- compile the spec (data-free) via the PORT + collect its contract cards.
     spec = repr_.build_spec(dict(args))
@@ -622,6 +635,10 @@ def _prepare_impl(
         "n_lines": len(corpus_lines),
         "n_txns": n_txns,
         "corpus_lines": corpus_lines,
+        # The resolved field-map for a custom Corpus (None on the preset path) — the
+        # self-describing record the validate-loop bridge recompiles to encode raw
+        # values to tokens. Stored only; absent from the returned envelope.
+        "fieldmap": resolved_fieldmap,
     }
     obj = DataObject(
         ref=ref,
@@ -663,6 +680,9 @@ def _prepare_impl(
             "step_names": spec.step_names(),
             "n_lines": len(corpus_lines),
             "n_txns": n_txns,
+            # Self-describing field-map for the custom path (None on presets) — see
+            # the payload note above; read by evaluate's encoder reconstruction.
+            "fieldmap": resolved_fieldmap,
             "contract_report": {
                 "passed": compiled.report.passed,
                 "injective": compiled.report.injective,
