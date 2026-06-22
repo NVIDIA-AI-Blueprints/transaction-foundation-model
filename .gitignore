@@ -15,3 +15,4 @@ src/tokenizer/__pycache__/
 *.auto.tfvars.json
 .terraform/
 infra/**/.terraform/
+__marimo__/

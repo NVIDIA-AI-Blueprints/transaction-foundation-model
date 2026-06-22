@@ -52,6 +52,29 @@ scripts/gcp-sync-models.sh
 
 The full runbook is [`infra/gcp-notebook/README.md`](../../infra/gcp-notebook/README.md). It documents the Terraform resources, persistent disk layout, Conductor integration, and each helper script.
 
+## Validate notebooks locally (no GPU)
+
+Before you spend GPU time, you can confirm the notebooks are *structurally* sound right on your laptop — no GPU, no NeMo container, no heavy dependencies. marimo notebooks are plain `.py` files, so marimo can analyze them statically.
+
+```bash
+# Structure check: parses every cell, builds the dataflow graph, and flags
+# duplicate definitions, cycles, and malformed cells. No execution, no imports.
+uvx marimo@0.23.9 check 01_dataset_baseline.py 02_seq_preproc_tokenization.py \
+  03_foundation_model_training.py 04_inference_embedding_extraction.py \
+  05_xgboost_fraud_detection.py
+
+# Open one in the marimo editor to eyeball cell order, markdown, and structure.
+uvx marimo@0.23.9 edit 01_dataset_baseline.py
+```
+
+What this does and does **not** cover:
+
+- ✅ **`marimo check`** validates that each file is a well-formed marimo notebook — the single best signal that an edit or a Jupyter→marimo conversion didn't break the notebook. It exits cleanly when there are no issues.
+- ✅ **`marimo edit`** loads the notebook in the real marimo runtime. Cells that import GPU-only libraries (`cudf`, `cuml`, `torch` CUDA paths) will error, but markdown, configuration, and pure-Python cells still run, so you can verify layout and logic.
+- ❌ It does **not** run the GPU pipeline. RAPIDS (`cudf`/`cuml`) has no CPU build, so full execution always needs the remote GPU VM below.
+
+`uvx` fetches marimo into a throwaway environment, so this leaves no footprint on your system Python. If you already have marimo installed (`pip install marimo`), drop the `uvx ` prefix.
+
 ## Step 1 — Launch the NeMo container
 
 From your clone of this repo:
