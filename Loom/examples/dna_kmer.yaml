@@ -1,0 +1,15 @@
+# A DNA k-mer tokenizer field-map (loom-fieldmap/1) — the "any domain" example.
+# One sequence column over {A,C,G,T}, tokenized into overlapping 3-mers (codons).
+# Compiles to a 69-token vocab: 64 codons (4^3) + 5 special tokens.
+#   loom tokenize --in IngestDataset/<n> --spec examples/dna_kmer.yaml
+version: loom-fieldmap/1
+entity: seq_id
+event: read
+context_len: 4096
+fields:
+  - name: kmer
+    source: sequence
+    strategy: kmer
+    k: 3
+    stride: 1
+    alphabet: ACGT

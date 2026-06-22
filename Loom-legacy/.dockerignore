@@ -1,0 +1,21 @@
+# Build context = repo root (the gateway Dockerfile lives under deploy/gateway).
+# The gateway image only needs the loom + flows Python packages (+ pyproject /
+# README). Exclude everything heavy or irrelevant so the context stays small and
+# the build stays fast — most importantly the multi-GB venv and the Node CLI.
+.venv/
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+.git/
+.git
+# the Node CLI, the docs/website, and the example/tutorial beds are not part of
+# the gateway service image.
+cli/
+examples/
+tutorials/
+docs/
+deploy/gateway/.env
+.pytest_cache/
+.env.metaflow
+*.log
+.DS_Store

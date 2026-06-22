@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loom"
+version = "0.2.0"
+description = "An agentic CLI for the full data-science lifecycle, on a ports-and-adapters provider architecture."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "ZKAI Labs" }]
+keywords = ["automl", "agents", "mlops", "ports-and-adapters", "search"]
+
+# Runtime dependencies.
+#
+# AIDE is pinned by commit SHA (NOT a tag/branch) so the search "brain" is
+# reproducible: ExecutionResult field-parity and the agent/journal API Loom
+# drives are both anchored to this exact revision.
+dependencies = [
+    "aideml @ git+https://github.com/ZKAI-Network/aideml@40dcf28",
+    "metaflow",
+    "pandas",
+    "scikit-learn",
+    "omegaconf",
+    "python-dotenv",
+    # Interactive CLI UI (the `loom` REPL + the themed render layer). Both are
+    # pure-Python and light, and already present transitively via aideml; pinned
+    # in directly because loom.ui imports them. Imported LAZILY from loom.cli so
+    # a stripped environment still runs the one-shot subcommands.
+    "rich",
+    "prompt_toolkit",
+    # The migration advisor (loom/migrate.py) parses migrations/*.yaml and compares
+    # PEP 440 versions. Both are pure-Python and already present transitively (PyYAML
+    # via omegaconf, packaging via aideml's stack); pinned directly because
+    # loom.migrate imports them so the dependency is honest, not incidental.
+    "PyYAML",
+    "packaging",
+]
+
+# Optional extras.
+#
+# ``model-local`` is the opt-in torch GRU fidelity mode for the ``local``
+# model-builder adapter (design §3.8). It is NEVER a default dependency: the
+# default / conformance / CI path is torch-free (the numpy PPMI+TruncatedSVD
+# backbone), and ``torch`` only enters via this explicit extra + a guarded lazy
+# import that falls back to the numpy path on ``ImportError``. Keeping it out of
+# the core ``dependencies`` is load-bearing — the conformance suite shape-locks
+# both backends and runs on the torch-free default so dev (torch present
+# transitively via aideml) and CI (torch absent) cannot silently diverge.
+[project.optional-dependencies]
+model-local = ["torch>=2.0"]
+# ``gateway`` is the Loom proxy server stack (the moat-capture seam, run via
+# ``loom proxy serve`` / the deploy/gateway container). These are the ONLY deps
+# the gateway path needs beyond loom + its light config deps — `import loom.cli`
+# /`loom.proxy` pull none of the heavy ML core — so the gateway image installs
+# `loom --no-deps` + these (+ omegaconf/python-dotenv) and stays slim.
+gateway = ["starlette>=0.37", "uvicorn>=0.30", "httpx>=0.27"]
+
+[project.scripts]
+loom = "loom.cli:main"
+
+[tool.setuptools.packages.find]
+# Ship both the engine package and the static Metaflow flow package: the
+# metaflow execution provider imports ``flows`` at run time
+# (``from flows import EVAL_CANDIDATE_FLOW_PATH``), so a non-editable wheel must
+# include it too, not only ``loom*``.
+include = ["loom*", "flows*"]

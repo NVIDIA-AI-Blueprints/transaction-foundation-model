@@ -1,0 +1,9 @@
+# Loom v0.1 — local build/runtime artifacts (never commit)
+.venv/
+# .loom/ is the local content-addressed object store / workspace
+.loom/
+*.egg-info/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/

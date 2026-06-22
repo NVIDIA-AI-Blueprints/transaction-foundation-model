@@ -1,0 +1,101 @@
+# loom-gateway — the hosted Loom proxy gateway (the moat capture seam).
+#
+# A thin Anthropic-passthrough: it authenticates callers by a Loom-issued key
+# (the LOOM_API_KEYS allowlist), injects Loom's system prompt, forwards to the
+# real Anthropic API with a SERVER-SIDE vendor key the caller never sees, and
+# logs every call centrally (the moat corpus). Clients point LOOM_API_BASE at
+# this Service; once hosted, `loom-proxy` becomes the default provider.
+#
+# Secrets are NOT inline. The real vendor key + the caller allowlist come from a
+# referenced Secret you create out-of-band (so no key material lands in this
+# manifest or in git). Create it once, in the `loom` namespace:
+#
+#   kubectl create secret generic loom-gateway-secrets \
+#     --namespace loom \
+#     --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
+#     --from-literal=LOOM_API_KEYS=loom-key-1,loom-key-2
+#
+# Build + push the image first (build context is the repo root):
+#   docker build -f deploy/gateway/Dockerfile -t <registry>/loom-gateway:latest .
+#   docker push <registry>/loom-gateway:latest
+# then set that image reference below.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loom
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-gateway
+  namespace: loom
+  labels:
+    app: loom-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loom-gateway
+  template:
+    metadata:
+      labels:
+        app: loom-gateway
+    spec:
+      containers:
+        - name: loom-gateway
+          # Replace with your pushed image reference.
+          image: loom-gateway:latest
+          args: ["loom", "proxy", "serve", "--host", "0.0.0.0", "--port", "8088"]
+          env:
+            # Where the gateway appends the JSONL moat corpus (the mounted volume
+            # below, so it survives pod restarts).
+            - name: LOOM_PROXY_LOG_PATH
+              value: "/data/proxy_calls.jsonl"
+          # The REAL vendor key + the caller allowlist, sourced from the Secret
+          # created out-of-band (see the kubectl line in the header comment).
+          # Never inline these values in the manifest.
+          envFrom:
+            - secretRef:
+                name: loom-gateway-secrets
+          ports:
+            - containerPort: 8088
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8088
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8088
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: corpus
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"
+      volumes:
+        # emptyDir is ephemeral (fine for a dev cluster); swap for a PVC to keep
+        # the moat corpus across pod restarts/reschedules in a real deployment.
+        - name: corpus
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-gateway
+  namespace: loom
+spec:
+  selector:
+    app: loom-gateway
+  ports:
+    - name: http
+      port: 8088
+      targetPort: 8088

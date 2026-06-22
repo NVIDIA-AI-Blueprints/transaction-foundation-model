@@ -1,0 +1,474 @@
+"""Configuration for Loom.
+
+:class:`LoomConfig` is the single source of truth for which providers to use and
+how to route models and budget a search. It is loaded from (in increasing order
+of precedence): an optional YAML file, a ``.env`` file / process environment.
+
+Secrets are NEVER hardcoded or stored on the config object. API keys and
+endpoints (``NVIDIA_API_KEY``, ``OPENAI_BASE_URL``, ``ANTHROPIC_API_KEY``,
+``METAFLOW_*``) are read from the environment at the point of use; this module
+only records *which* environment-derived values (like the model names and the
+NIM base URL) influence routing, never the key material itself.
+
+Dependency-light: ``python-dotenv`` and ``omegaconf``/``PyYAML`` are imported
+lazily inside :meth:`LoomConfig.load`, so importing this module never requires
+those optional packages.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field, replace
+from typing import Any, Mapping
+
+# Default model routing. Model *names* are safe to default; endpoints/keys are
+# always taken from the environment and never baked in here.
+_DEFAULT_CODE_MODEL = "claude-sonnet-4-5"
+_DEFAULT_FEEDBACK_MODEL = "claude-sonnet-4-5"
+
+# The native-Claude default model provider, used when no hosted gateway is
+# detected and the user did not explicitly choose a provider.
+_DEFAULT_MODEL_PROVIDER = "anthropic-api"
+# The gateway (moat) model provider, made the default once a HOSTED gateway is
+# detected (see :meth:`LoomConfig._resolve_default_providers`).
+_PROXY_MODEL_PROVIDER = "loom-proxy"
+# The loopback gateway base the ``loom-proxy`` provider points at by default.
+# A ``LOOM_API_BASE`` left at (or set to) this loopback value is NOT a hosted
+# gateway, so it must NOT flip the provider default.
+_DEFAULT_LOOM_API_BASE = "http://127.0.0.1:8088"
+
+
+def _is_truthy(value: str | None) -> bool:
+    """Return ``True`` for the usual truthy env spellings (``1``/``true``/...)."""
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_hosted_base(base: str | None) -> bool:
+    """Return ``True`` if ``base`` looks like a HOSTED (non-loopback) gateway.
+
+    A hosted gateway is one a client points at over the network: a non-empty
+    ``LOOM_API_BASE`` that is neither the loopback default nor any other
+    localhost/loopback address. Local dev (``127.0.0.1`` / ``localhost`` /
+    ``::1`` / ``0.0.0.0``) is explicitly NOT hosting, so running a gateway on the
+    same box does not silently flip the moat path on.
+    """
+    if not base:
+        return False
+    base = base.strip()
+    if not base or base == _DEFAULT_LOOM_API_BASE:
+        return False
+    lowered = base.lower()
+    loopback_markers = ("127.0.0.1", "localhost", "[::1]", "://::1", "0.0.0.0")
+    return not any(marker in lowered for marker in loopback_markers)
+
+
+@dataclass
+class BudgetConfig:
+    """Search budget knobs passed through to the search provider.
+
+    Attributes:
+        steps: Number of search steps (agent iterations) to run.
+        num_drafts: Number of initial draft solutions before improving.
+        debug_prob: Probability of choosing to debug a buggy node.
+        max_debug_depth: Maximum depth of consecutive debug attempts.
+    """
+
+    steps: int = 10
+    num_drafts: int = 3
+    debug_prob: float = 0.5
+    max_debug_depth: int = 3
+
+
+@dataclass
+class LoomConfig:
+    """Top-level Loom configuration.
+
+    Attributes:
+        search_provider: Name of the search ("brain") provider. Default
+            ``"aide"``.
+        mlops_provider: Name of the execution ("muscle") provider. Default
+            ``"metaflow"`` (use ``"local"`` for a Metaflow-free dev path).
+        metaflow_profile: Metaflow profile name (env ``METAFLOW_PROFILE``);
+            ``None`` uses Metaflow's default profile. Lets a tenant point Loom
+            at their own Metaflow endpoint (BYO perimeter).
+        model_builder_provider: Name of the model-builder ("training/serving")
+            provider — the fourth Loom port. Default ``"nemo"`` (the spec mandates
+            NeMo as the default adapter); use ``"local"`` for the torch-free CPU
+            stand-in (the conformance/CI default path).
+        gpu_target: Routing string naming a GPU cluster/target the heavy
+            launch-and-track path uses, or ``None``. ``None`` => no GPU target =>
+            the launch-and-track path REFUSES up front (constraint 4). Parallels
+            ``metaflow_profile`` as a BYO-perimeter field; the matching cluster
+            credentials stay in the environment, never on this object.
+        model_builder_base_url: Base URL for a hosted/managed model-builder
+            adapter or NIM serving endpoint (env ``LOOM_MODEL_BUILDER_BASE_URL``).
+            Mirrors ``nim_base_url``/``model_base_url``: the matching API key is
+            read from the environment at call time, never stored here.
+        code_model: Model used to generate solution code.
+        feedback_model: Model used to review/score executed solutions.
+        code_provider: Name of the model ("LLM backend") provider for the code
+            role -- which model and how it is authenticated. Default
+            ``"anthropic-api"`` (native Claude), preserving historical behavior.
+            DEFAULT-ONCE-HOSTED: when a HOSTED gateway is detected at
+            :meth:`load` time (``LOOM_API_BASE`` set to a non-loopback URL, or
+            ``LOOM_PROXY_DEFAULT`` truthy) and the user did NOT explicitly choose
+            a provider, this defaults to ``"loom-proxy"`` instead — so a hosted
+            deployment captures the moat corpus by default. An explicit choice
+            (``--code/feedback/model-provider`` or ``LOOM_CODE/FEEDBACK_PROVIDER``)
+            ALWAYS wins; see :meth:`_resolve_default_providers`.
+        feedback_provider: Name of the model provider for the feedback/judge
+            role. Default ``"anthropic-api"``. The judge always uses tool calling,
+            so this provider's resolved route must be judge-capable. Follows the
+            same DEFAULT-ONCE-HOSTED rule as ``code_provider``.
+        nim_base_url: OpenAI-compatible base URL for model routing (env
+            ``OPENAI_BASE_URL``; e.g. an NVIDIA NIM endpoint). The matching API
+            key is read from the environment at call time, never stored here.
+        model_base_url: OpenAI-compatible base URL for the generic
+            ``openai-compat`` model provider (env ``LOOM_MODEL_BASE_URL``; e.g. a
+            LiteLLM/vLLM/Ollama endpoint). The matching API key is read from the
+            environment at call time, never stored here.
+        loom_api_base: Base URL of the Loom proxy gateway used by the
+            ``loom-proxy`` model provider (env ``LOOM_API_BASE``; default
+            ``http://127.0.0.1:8088``). The ``loom-proxy`` route points AIDE's
+            Anthropic backend at this URL so calls flow through Loom's gateway
+            (which injects Loom's prompts and logs every call for the moat). The
+            authenticating key (``LOOM_API_KEY``) is read from the environment at
+            the point of use, never stored here.
+        proxy_log_path: Path to the JSONL central call log the Loom proxy
+            gateway appends one row to per LLM call (env ``LOOM_PROXY_LOG_PATH``;
+            default ``learnings/proxy_calls.jsonl``). This is the central moat
+            corpus the gateway writes server-side; anchored absolute at load time
+            (like ``corpus_path``/``learnings_path``) so it survives a provider
+            ``chdir`` into an ephemeral workspace.
+        telemetry_path: Path to the JSONL telemetry event log
+            (:mod:`loom.telemetry`) -- one row per emitted telemetry event
+            (``trajectory.start``/``llm_request``/``trajectory.end`` ...), each
+            stamped with a monotonic ``event.sequence`` and a ``trajectory_id`` so
+            the distillation layer can stitch a full agent trajectory. Env
+            ``LOOM_TELEMETRY_PATH``; default ``telemetry/events.jsonl``. Anchored
+            absolute at load time exactly like ``learnings_path``/``proxy_log_path``
+            so events written after a provider ``chdir`` land in one stable file,
+            not a doomed ephemeral workspace. The capture is COMPLETE -- every
+            event in full, NO sampling/batch-drop/TTL/aggregation (it is a training
+            corpus modeled on a transcript, not an observability feed). Telemetry
+            is OFF unless ``LOOM_TELEMETRY`` is set (read at the point of use);
+            content (prompts/outputs) is REDACTED BY DEFAULT unless
+            ``LOOM_LOG_CONTENT`` is set. ``LOOM_TELEMETRY_OTEL_OPS`` (default
+            **off**, read at the point of use in
+            :func:`loom.telemetry.bootstrap_ops_telemetry`) is a SEPARATE opt-in
+            that, together with an ``OTEL_*_EXPORTER``, mirrors signals to an
+            OpenTelemetry OPS-monitoring backend. ⚠ That mirror is **ops-only and
+            NOT the training corpus** (observability backends sample + aggregate +
+            expire); enabling ``LOOM_TELEMETRY`` capture does NOT enable it, so the
+            complete corpus never flows through a sampling endpoint.
+        trajectories_path: Path to the JSONL assembled-trajectory store
+            (:mod:`loom.telemetry`) -- one row per assembled
+            :class:`~loom.telemetry.TrajectoryRecord`, the interaction-root join of
+            telemetry events + proxy LLM calls + the rollout outcome that the
+            LOOM-DS-1 distillation export consumes. Env ``LOOM_TRAJECTORIES_PATH``;
+            default ``telemetry/trajectories.jsonl``. Anchored absolute at load time
+            like the other capture paths.
+        budget: Search budget knobs (see :class:`BudgetConfig`).
+        corpus_path: Path to the JSONL corpus the controller appends node
+            records to.
+        learnings_path: Path to the JSONL learnings flywheel the controller
+            appends one command-level rollout record to per run. This is the
+            command-level rollup (one row per ``run_loom`` call) that sits above
+            the per-node ``corpus_path`` capture; both are anchored absolute at
+            load time so they survive a provider ``chdir`` into an ephemeral
+            workspace.
+        tenant: Logical tenant this config runs under.
+        owned_by: IP owner tag applied to corpus records. ``"general"`` marks
+            records as usable by a cross-tenant moat model; any other value
+            tags them as tenant-owned and excludes them from the general set.
+    """
+
+    search_provider: str = "aide"
+    mlops_provider: str = "metaflow"
+    metaflow_profile: str | None = None
+    model_builder_provider: str = "nemo"
+    gpu_target: str | None = None
+    model_builder_base_url: str | None = None
+    code_model: str = _DEFAULT_CODE_MODEL
+    feedback_model: str = _DEFAULT_FEEDBACK_MODEL
+    code_provider: str = _DEFAULT_MODEL_PROVIDER
+    feedback_provider: str = _DEFAULT_MODEL_PROVIDER
+    nim_base_url: str | None = None
+    model_base_url: str | None = None
+    loom_api_base: str = _DEFAULT_LOOM_API_BASE
+    proxy_log_path: str = "learnings/proxy_calls.jsonl"
+    telemetry_path: str = "telemetry/events.jsonl"
+    trajectories_path: str = "telemetry/trajectories.jsonl"
+    budget: BudgetConfig = field(default_factory=BudgetConfig)
+    corpus_path: str = "corpus/nodes.jsonl"
+    learnings_path: str = "learnings/rollouts.jsonl"
+    tenant: str = "default"
+    owned_by: str = "general"
+
+    @classmethod
+    def load(
+        cls,
+        yaml_path: str | None = None,
+        env: Mapping[str, str] | None = None,
+        overrides: Mapping[str, Any] | None = None,
+    ) -> "LoomConfig":
+        """Build a :class:`LoomConfig` from YAML, ``.env``/env, and overrides.
+
+        Precedence (lowest to highest): dataclass defaults < YAML file < the
+        process environment (with ``.env`` loaded into it if present) <
+        explicit ``overrides``.
+
+        Args:
+            yaml_path: Optional path to a YAML config file. Ignored if the file
+                does not exist. Requires ``omegaconf`` or ``PyYAML`` (imported
+                lazily) only when a readable file is supplied.
+            env: Environment mapping to read from. Defaults to ``os.environ``.
+                A ``.env`` file in the current directory is loaded into the
+                process environment first (best-effort, via ``python-dotenv``).
+            overrides: Explicit field overrides applied last.
+
+        Returns:
+            A fully populated :class:`LoomConfig`. No secret material is read
+            onto the returned object.
+        """
+        # Best-effort: load a local .env into the process environment so that
+        # env-driven settings below pick it up. Never fails the import path.
+        if env is None:
+            try:
+                from dotenv import load_dotenv
+
+                load_dotenv()
+            except Exception:
+                pass
+            env = os.environ
+
+        cfg = cls()
+
+        # Track which keys were set EXPLICITLY (by YAML, env, or overrides) so the
+        # post-merge provider resolution can tell a deliberate provider choice
+        # apart from the dataclass default — a value that merely equals the default
+        # is not "explicit". This drives DEFAULT-ONCE-HOSTED below.
+        explicit: set[str] = set()
+
+        # 1) YAML file (optional, lowest precedence above defaults).
+        if yaml_path and os.path.isfile(yaml_path):
+            yaml_data = cls._read_yaml(yaml_path)
+            explicit.update(yaml_data)
+            cfg = cls._apply_mapping(cfg, yaml_data)
+
+        # 2) Environment / .env.
+        env_data = cls._from_env(env)
+        explicit.update(env_data)
+        cfg = cls._apply_mapping(cfg, env_data)
+
+        # 3) Explicit overrides (highest precedence).
+        if overrides:
+            explicit.update(overrides)
+            cfg = cls._apply_mapping(cfg, overrides)
+
+        # DEFAULT-ONCE-HOSTED: flip code/feedback providers to the gateway
+        # (``loom-proxy``) when a HOSTED gateway is detected and the user did not
+        # explicitly choose a provider. Done AFTER the full merge so it sees the
+        # final ``loom_api_base`` and only fills in the providers left at default.
+        cfg = cls._resolve_default_providers(cfg, env, explicit)
+
+        # Anchor the corpus path to an ABSOLUTE location at load time (the launch
+        # cwd), BEFORE any execution provider chdir's into an ephemeral workspace.
+        # Otherwise a relative corpus_path resolves against that workspace at
+        # write time and the node records are written into — and deleted with —
+        # the workspace, and the post-run leaderboard read finds nothing.
+        if cfg.corpus_path and not os.path.isabs(cfg.corpus_path):
+            cfg = replace(cfg, corpus_path=os.path.abspath(cfg.corpus_path))
+
+        # Anchor the learnings path absolute for the same reason as corpus_path:
+        # the controller appends the command-level rollout AFTER the execution
+        # provider has chdir'd into (and will tear down) its ephemeral workspace,
+        # so a relative path would write the moat fuel into the doomed workspace.
+        if cfg.learnings_path and not os.path.isabs(cfg.learnings_path):
+            cfg = replace(cfg, learnings_path=os.path.abspath(cfg.learnings_path))
+
+        # Anchor the proxy call-log path absolute for the same reason as
+        # corpus_path/learnings_path: the gateway appends each call row from the
+        # launch cwd, but a model/execution provider may have chdir'd into an
+        # ephemeral workspace by write time, so a relative path would scatter the
+        # central moat corpus into doomed workspaces instead of one stable file.
+        if cfg.proxy_log_path and not os.path.isabs(cfg.proxy_log_path):
+            cfg = replace(cfg, proxy_log_path=os.path.abspath(cfg.proxy_log_path))
+
+        # Anchor the telemetry paths absolute for the same reason as
+        # corpus_path/learnings_path/proxy_log_path: the telemetry layer emits
+        # events + assembled trajectories from the launch cwd, but a provider may
+        # have chdir'd into an ephemeral workspace by write time, so a relative
+        # path would scatter the trajectory corpus into doomed workspaces instead
+        # of one stable file the distillation export can read.
+        if cfg.telemetry_path and not os.path.isabs(cfg.telemetry_path):
+            cfg = replace(cfg, telemetry_path=os.path.abspath(cfg.telemetry_path))
+        if cfg.trajectories_path and not os.path.isabs(cfg.trajectories_path):
+            cfg = replace(
+                cfg, trajectories_path=os.path.abspath(cfg.trajectories_path)
+            )
+
+        return cfg
+
+    @staticmethod
+    def _resolve_default_providers(
+        cfg: "LoomConfig",
+        env: Mapping[str, str],
+        explicit: set[str],
+    ) -> "LoomConfig":
+        """Apply the DEFAULT-ONCE-HOSTED rule to the model providers.
+
+        Precedence (highest first):
+
+        1. An EXPLICIT provider choice always wins. That is any of
+           ``--code-provider`` / ``--feedback-provider`` / ``--model-provider``
+           (which the CLI passes through as ``overrides``) or the
+           ``LOOM_CODE_PROVIDER`` / ``LOOM_FEEDBACK_PROVIDER`` env vars — anything
+           that put ``code_provider`` / ``feedback_provider`` in ``explicit``.
+        2. Else, if a HOSTED gateway is detected — ``LOOM_API_BASE`` set to a
+           non-loopback URL, OR ``LOOM_PROXY_DEFAULT`` truthy — the role defaults
+           to ``loom-proxy`` (the moat capture path).
+        3. Else the role keeps the historical ``anthropic-api`` default.
+
+        Only roles left at the dataclass default are touched; an explicitly set
+        role is returned unchanged (even if it equals the default), so opting
+        back into ``anthropic-api`` on a hosted box is always honored. No secret
+        material is read; only the non-secret hosting *signal* is inspected.
+
+        Args:
+            cfg: The fully merged config (post YAML/env/overrides).
+            env: The environment mapping (for ``LOOM_PROXY_DEFAULT``).
+            explicit: The set of config keys that were set explicitly by any
+                source (YAML, env, or overrides).
+
+        Returns:
+            ``cfg`` with the gateway provider filled into any role left at the
+            native default when hosting is detected; otherwise ``cfg`` unchanged.
+        """
+        hosted = _is_hosted_base(cfg.loom_api_base) or _is_truthy(
+            env.get("LOOM_PROXY_DEFAULT")
+        )
+        if not hosted:
+            return cfg
+
+        updates: dict[str, Any] = {}
+        if "code_provider" not in explicit:
+            updates["code_provider"] = _PROXY_MODEL_PROVIDER
+        if "feedback_provider" not in explicit:
+            updates["feedback_provider"] = _PROXY_MODEL_PROVIDER
+        if not updates:
+            return cfg
+        return replace(cfg, **updates)
+
+    @staticmethod
+    def _read_yaml(yaml_path: str) -> dict[str, Any]:
+        """Read a YAML config file into a plain dict (lazy YAML import)."""
+        try:
+            from omegaconf import OmegaConf
+
+            return dict(OmegaConf.to_container(OmegaConf.load(yaml_path), resolve=True))  # type: ignore[arg-type]
+        except Exception:
+            import yaml  # PyYAML fallback
+
+            with open(yaml_path, "r", encoding="utf-8") as fh:
+                return dict(yaml.safe_load(fh) or {})
+
+    @staticmethod
+    def _from_env(env: Mapping[str, str]) -> dict[str, Any]:
+        """Extract recognized settings from an environment mapping.
+
+        Only non-secret routing/selection values are pulled. API key material
+        (``NVIDIA_API_KEY``, ``ANTHROPIC_API_KEY``, ...) is intentionally NOT
+        read here; it is consumed directly from the environment by the adapters
+        that need it.
+        """
+        out: dict[str, Any] = {}
+        budget: dict[str, Any] = {}
+
+        if (v := env.get("LOOM_SEARCH_PROVIDER")) is not None:
+            out["search_provider"] = v
+        if (v := env.get("LOOM_MLOPS_PROVIDER")) is not None:
+            out["mlops_provider"] = v
+        if (v := env.get("METAFLOW_PROFILE")) is not None:
+            out["metaflow_profile"] = v
+        if (v := env.get("LOOM_MODEL_BUILDER_PROVIDER")) is not None:
+            out["model_builder_provider"] = v
+        if (v := env.get("LOOM_GPU_TARGET")) is not None:
+            out["gpu_target"] = v
+        if (v := env.get("LOOM_MODEL_BUILDER_BASE_URL")) is not None:
+            out["model_builder_base_url"] = v
+        if (v := env.get("LOOM_CODE_MODEL")) is not None:
+            out["code_model"] = v
+        if (v := env.get("LOOM_FEEDBACK_MODEL")) is not None:
+            out["feedback_model"] = v
+        if (v := env.get("LOOM_CODE_PROVIDER")) is not None:
+            out["code_provider"] = v
+        if (v := env.get("LOOM_FEEDBACK_PROVIDER")) is not None:
+            out["feedback_provider"] = v
+        if (v := env.get("OPENAI_BASE_URL")) is not None:
+            out["nim_base_url"] = v
+        if (v := env.get("LOOM_MODEL_BASE_URL")) is not None:
+            out["model_base_url"] = v
+        if (v := env.get("LOOM_API_BASE")) is not None:
+            out["loom_api_base"] = v
+        if (v := env.get("LOOM_PROXY_LOG_PATH")) is not None:
+            out["proxy_log_path"] = v
+        if (v := env.get("LOOM_TELEMETRY_PATH")) is not None:
+            out["telemetry_path"] = v
+        if (v := env.get("LOOM_TRAJECTORIES_PATH")) is not None:
+            out["trajectories_path"] = v
+        if (v := env.get("LOOM_CORPUS_PATH")) is not None:
+            out["corpus_path"] = v
+        if (v := env.get("LOOM_LEARNINGS_PATH")) is not None:
+            out["learnings_path"] = v
+        if (v := env.get("LOOM_TENANT")) is not None:
+            out["tenant"] = v
+        if (v := env.get("LOOM_OWNED_BY")) is not None:
+            out["owned_by"] = v
+
+        if (v := env.get("LOOM_BUDGET_STEPS")) is not None:
+            budget["steps"] = int(v)
+        if (v := env.get("LOOM_BUDGET_NUM_DRAFTS")) is not None:
+            budget["num_drafts"] = int(v)
+        if (v := env.get("LOOM_BUDGET_DEBUG_PROB")) is not None:
+            budget["debug_prob"] = float(v)
+        if (v := env.get("LOOM_BUDGET_MAX_DEBUG_DEPTH")) is not None:
+            budget["max_debug_depth"] = int(v)
+
+        if budget:
+            out["budget"] = budget
+        return out
+
+    @staticmethod
+    def _apply_mapping(cfg: "LoomConfig", data: Mapping[str, Any]) -> "LoomConfig":
+        """Return a copy of ``cfg`` updated with values from ``data``.
+
+        Unknown keys are ignored. The ``budget`` key may be a mapping that is
+        merged field-wise into the existing :class:`BudgetConfig`.
+        """
+        if not data:
+            return cfg
+
+        field_names = {f.name for f in cfg.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        updates: dict[str, Any] = {}
+
+        for key, value in data.items():
+            if key not in field_names:
+                continue
+            if key == "budget" and isinstance(value, Mapping):
+                budget_fields = {
+                    f.name for f in cfg.budget.__dataclass_fields__.values()  # type: ignore[attr-defined]
+                }
+                budget_updates = {
+                    k: v for k, v in value.items() if k in budget_fields
+                }
+                updates["budget"] = replace(cfg.budget, **budget_updates)
+            else:
+                updates[key] = value
+
+        return replace(cfg, **updates)
+
+
+__all__ = ["LoomConfig", "BudgetConfig"]

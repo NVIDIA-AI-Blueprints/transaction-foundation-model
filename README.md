@@ -30,17 +30,25 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
 - **seaborn** — Statistical plotting for dataset exploration
 - **plotly** — Interactive 3D embedding visualization
 - **tqdm** — Progress bars in notebook inference workflows
-- **ipywidgets** — Notebook widget support
+- **marimo** — Open-source reactive Python notebooks, stored as executable `.py` files
 - **torchdata** — Stateful data loading for model training
 
 > **Third-Party Software Notice**
 > This project will download and install additional third-party open source software projects.
 > Please review the license terms of these open source projects before use.
 
+> 📚 **New to foundation models?** Start with the **[documentation](docs/README.md)** — a didactic, level-based learning path (100 → 400) for data scientists, plus guides on adding new datasets (including public blockchain data via BigQuery), a research literature review with improvement ideas, and our experimentation workflow.
+
+> **Primary development workflow:** this repo is set up for humans supervising local [Conductor](https://conductor.build/) coding agents from macOS while notebooks run on a remote GCP NVIDIA GPU VM. Use Conductor for repo edits and agent work; use marimo for GPU execution.
+
 ## Table of Contents
 
+- [Documentation](docs/README.md)
+- [Developing with Loom (internal)](#developing-with-loom-internal)
 - [Quickstart](#quickstart)
+  - [Primary Workflow: Conductor + GCP GPU](#primary-workflow-conductor--gcp-gpu)
   - [Notebooks](#notebooks)
+  - [Direct Linux GPU Host](#direct-linux-gpu-host)
 - [Deployment](#deployment)
   - [Prerequisites](#prerequisites)
   - [Steps](#steps)
@@ -51,44 +59,113 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
 
 ---
 
+### Developing with Loom (internal)
+
+> Internal to ZKAI Labs. This repo is the development home and first pilot for **Loom** — our
+> agentic tool for training a SOTA foundation model — which lives in-tree under [`Loom/`](Loom/).
+>
+> **Loom is being rebuilt from scratch** (2026-06-15), narrowed from a generic data-science CLI to a
+> tool focused solely on training a SOTA foundation model, with this repo's TFM as the first use
+> case. See [`Loom/DESIGN.md`](Loom/DESIGN.md) for the current design proposal. The previous
+> generic-DS engine is archived under [`Loom-legacy/`](Loom-legacy/) for reference (installable via
+> `pip install -e ./Loom-legacy`). Loom's standalone repo `ZKAI-Network/Loom` is frozen; its full
+> history was carried in via `git subtree`.
+
+Loom dependencies stay in `requirements-loom.txt` (not `requirements.txt`), so the NeMo GPU notebook
+runtime stays Loom-free.
+
+---
+
 ### Quickstart
+
+#### Primary Workflow: Conductor + GCP GPU
+
+This is the recommended workflow for local machines, especially macOS laptops. Your Mac runs Conductor, agents, Git, Terraform, and the browser. GCP runs the NVIDIA GPU VM and the NeMo marimo container.
+
+From a Conductor workspace:
+
+```bash
+gcloud auth login
+gcloud auth application-default login
+scripts/gcp-gpu-up.sh
+scripts/gcp-sync-workspace.sh
+scripts/gcp-marimo.sh
+```
+
+Open the URL printed by `scripts/gcp-marimo.sh`, then run `01_dataset_baseline.py`.
+
+The first time you need notebooks 04/05, install Git LFS locally and pull the shipped checkpoint before syncing:
+
+```bash
+brew install git-lfs
+git lfs install
+git lfs pull --include='models/decoder-foundation-model/**' --exclude=''
+scripts/gcp-sync-models.sh
+```
+
+For normal development:
+
+1. Edit code, configs, docs, and notebooks locally in Conductor.
+2. Ask agents to make repo changes in the Conductor workspace.
+3. Sync local changes to the GPU VM:
+   ```bash
+   scripts/gcp-sync-workspace.sh
+   ```
+4. Rerun the affected cells in marimo.
+5. Keep generated outputs under `/workspace/data`, `/workspace/models`, and `/workspace/artifacts`.
+
+Do **not** pull or run the NeMo container directly on macOS. Docker Desktop on macOS does not expose an NVIDIA CUDA GPU to `docker run --gpus all`. The GCP runbook documents the full environment, script behavior, and day-to-day dev loop: [`infra/gcp-notebook/README.md`](infra/gcp-notebook/README.md).
+
+Stop the GPU VM when you are done:
+
+```bash
+scripts/gcp-gpu-down.sh
+```
 
 #### Notebooks
 
 | # | Notebook | Description |
 |---|----------|-------------|
-| 1 | `01_dataset_baseline.ipynb` | Load the TabFormer financial transaction dataset, create temporal train/val/test splits, and train a GPU-accelerated XGBoost baseline for fraud detection. |
-| 2 | `02_seq_preproc_tokenization.ipynb` | Build a custom GPU-accelerated tokenizer pipeline that converts transaction records into domain-specific token sequences. |
-| 3 | `03_foundation_model_training.ipynb` | Pretrain a decoder-only foundation model (\~29M parameters) on tokenized transaction sequences using NeMo AutoModel with causal language modeling. |
-| 4 | `04_inference_embedding_extraction.ipynb` | Load the pretrained model, run GPU inference, extract 512-dimensional embeddings via last-token pooling, and visualize with UMAP. |
-| 5 | `05_xgboost_fraud_detection.ipynb` | Compare XGBoost fraud detection using raw features, foundation model embeddings, and combined features. |
+| 1 | `01_dataset_baseline.py` | Load the TabFormer financial transaction dataset, create temporal train/val/test splits, and train a GPU-accelerated XGBoost baseline for fraud detection. |
+| 2 | `02_seq_preproc_tokenization.py` | Build a custom GPU-accelerated tokenizer pipeline that converts transaction records into domain-specific token sequences. |
+| 3 | `03_foundation_model_training.py` | Pretrain a decoder-only foundation model (\~29M parameters) on tokenized transaction sequences using NeMo AutoModel with causal language modeling. |
+| 4 | `04_inference_embedding_extraction.py` | Load the pretrained model, run GPU inference, extract 512-dimensional embeddings via last-token pooling, and visualize with UMAP. |
+| 5 | `05_xgboost_fraud_detection.py` | Compare XGBoost fraud detection using raw features, foundation model embeddings, and combined features. |
+
+Run the notebooks sequentially. Notebooks 04 and 05 require the pretrained checkpoint from Git LFS. In the primary Conductor + GCP workflow, `scripts/gcp-sync-workspace.sh` also runs `scripts/gcp-sync-models.sh` to copy the resolved checkpoint into the VM's durable model mount.
+
+#### Direct Linux GPU Host
+
+Use this path only if you are already on a Linux host with an NVIDIA GPU, Docker, and NVIDIA Container Toolkit. It is not the recommended path for macOS + Conductor.
 
 1. Pull and launch the [NeMo Framework container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo) (25.09.01+) with GPU access and port mapping:
    ```bash
    docker run --gpus all --rm -it \
      -v $(pwd):/workspace \
      --shm-size=8g \
-     -p 8888:8888 \
+     -p 8080:8080 \
      --ulimit memlock=-1 \
      nvcr.io/nvidia/nemo:25.09.01
    ```
    - `--shm-size=8g` — increases shared memory to prevent DataLoader crashes under PyTorch multi-process loading
-   - `-p 8888:8888` — publishes the Jupyter port to the host browser
+   - `-p 8080:8080` — publishes the marimo port to the host browser
    - `--ulimit memlock=-1` — removes the locked-memory limit required by some CUDA operations
-2. Inside the container, install Git LFS, fetch the checkpoint artifacts, and start Jupyter:
+2. Inside the container, install Git LFS, fetch the checkpoint artifacts, install notebook dependencies, and start marimo:
    ```bash
+   cd /workspace
    git config --global --add safe.directory /workspace
    apt-get update && apt-get install -y git-lfs
    git lfs install
    git lfs pull
-   jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   export PATH="$HOME/.local/bin:$PATH"
+   uv pip install --python "$(which python)" -r requirements.txt
+   marimo edit --headless --host 0.0.0.0 --port 8080
    ```
    > **Note:** The `safe.directory` line is required because the repository is bind-mounted from the host, which causes a Git ownership mismatch inside the container. Without it, `git lfs pull` will fail.
 
-   Each notebook installs its own dependencies (e.g. `%pip install xgboost ...`) so a separate `requirements.txt` is not needed.
-
-   Open `http://localhost:8888/?token=...` in your browser.
-3. Run `01_dataset_baseline.ipynb` to download the dataset and establish an XGBoost baseline.
+   Open the printed marimo URL in your browser, or use `http://localhost:8080`.
+3. Run `01_dataset_baseline.py` to download the dataset and establish an XGBoost baseline.
 4. Continue through notebooks 02\–05 sequentially.
 
 **Pre-trained Model Checkpoint (required for notebooks 04\–05)**
@@ -114,22 +191,27 @@ Notebook 03 runs a short 30-step demo to illustrate the training pipeline; its o
 
 #### Steps
 
+For the primary Conductor + GCP workflow, use [`infra/gcp-notebook/README.md`](infra/gcp-notebook/README.md). It provisions the VM, persistent disk, bucket, service account, NVIDIA driver, Docker runtime, Ops Agent monitoring, workspace sync, and marimo tunnel.
+
+For a direct Linux NVIDIA host:
+
 1. Pull the NeMo container:
    ```bash
    docker pull nvcr.io/nvidia/nemo:25.09.01
    ```
-2. Launch with GPU access, mount this repository, and publish the Jupyter port:
+2. Launch with GPU access, mount this repository, and publish the marimo port:
    ```bash
    docker run --gpus all --rm -it \
      -v $(pwd):/workspace \
      --shm-size=8g \
-     -p 8888:8888 \
+     -p 8080:8080 \
      --ulimit memlock=-1 \
      nvcr.io/nvidia/nemo:25.09.01
    ```
-   > **Remote host**: If running on a remote machine, add SSH port forwarding (`ssh -L 8888:localhost:8888 user@host`) so Jupyter is reachable from your local browser.
+   > **Remote host**: If running on a remote machine, add SSH port forwarding (`ssh -L 8080:localhost:8080 user@host`) so marimo is reachable from your local browser.
 3. Install Git LFS and pull the pre-trained checkpoint:
    ```bash
+   cd /workspace
    git config --global --add safe.directory /workspace
    apt-get update && apt-get install -y git-lfs
    git lfs install
@@ -137,12 +219,14 @@ Notebook 03 runs a short 30-step demo to illustrate the training pipeline; its o
    ```
    > **Note:** The `safe.directory` line is needed because bind-mounting the repo causes a Git ownership mismatch inside the container.
 
-   Each notebook installs its own dependencies inline, so no separate `requirements.txt` is needed.
-4. Start Jupyter inside the container:
+4. Install dependencies and start marimo inside the container:
    ```bash
-   jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   export PATH="$HOME/.local/bin:$PATH"
+   uv pip install --python "$(which python)" -r requirements.txt
+   marimo edit --headless --host 0.0.0.0 --port 8080
    ```
-   Open the URL printed in the terminal (e.g. `http://localhost:8888/?token=...`) in your browser.
+   Open the URL printed in the terminal, or use `http://localhost:8080`.
 5. Run notebooks 01\–05 sequentially. Notebooks 04 and 05 require the pre-trained checkpoint downloaded by `git lfs pull` in step 3 (see [Pre-trained Model Checkpoint](#quickstart) above).
 
 ---

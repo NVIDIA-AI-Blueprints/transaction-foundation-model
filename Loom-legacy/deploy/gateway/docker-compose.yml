@@ -1,0 +1,49 @@
+# Loom gateway — single-service Compose for hosting the moat capture seam.
+#
+# Build the image from the repo root (the build context is `..`/.. so the
+# Dockerfile's `COPY . /app` sees the whole repo), then run env-file driven:
+#
+#   cp deploy/gateway/.env.example deploy/gateway/.env   # then fill in real keys
+#   docker compose -f deploy/gateway/docker-compose.yml up --build
+#
+# Secrets live ONLY in the env file (gitignored) / the shell, never in this YAML
+# or the image. The gateway holds the REAL vendor key (ANTHROPIC_API_KEY) and the
+# caller allowlist (LOOM_API_KEYS) at runtime; callers present only a Loom key.
+services:
+  loom-gateway:
+    build:
+      # Repo root is the build context so the whole package (+ the static
+      # `flows` package) installs; the Dockerfile lives under deploy/gateway.
+      context: ../..
+      dockerfile: deploy/gateway/Dockerfile
+    image: loom-gateway:latest
+    # Real keys + the allowlist come from this env file (NOT committed).
+    # See .env.example for the keys to set: ANTHROPIC_API_KEY, LOOM_API_KEYS,
+    # and optionally LOOM_PROXY_LOG_PATH / LOOM_PROXY_UPSTREAM_URL.
+    env_file:
+      - .env
+    ports:
+      # host:container — point clients at LOOM_API_BASE=http://<host>:8088
+      - "8088:8088"
+    # Persist the JSONL moat corpus outside the container so it survives a
+    # restart. The path here must match LOOM_PROXY_LOG_PATH in the env file
+    # (default below assumes /data/proxy_calls.jsonl on the container side).
+    volumes:
+      - loom-corpus:/data
+    healthcheck:
+      # Mirror the Dockerfile probe; Compose surfaces health in `docker ps`.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8088/healthz', timeout=4).status==200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  loom-corpus:

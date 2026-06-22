@@ -1,0 +1,14 @@
+project_id   = "level-mark-437714-b1"
+region       = "us-central1"
+zone         = "us-central1-f"
+name         = "tfm-gpu-notebook"
+machine_type = "a2-highgpu-1g"
+bucket_name  = "level-mark-437714-b1-tfm-gpu-artifacts"
+
+# Set false later if you want IAP-only SSH and the project/network is ready for it.
+enable_external_ip = true
+
+# Keep standard VMs for interactive notebooks unless interruptions are acceptable.
+use_spot = false
+
+notebook_image = "nvcr.io/nvidia/nemo:25.09.01"

@@ -1,0 +1,77 @@
+# minio — an S3-compatible object store that backs the Metaflow datastore.
+# This is the "data objects via S3 protocol" substrate: Metaflow artifacts and
+# datasets live here, and metaflow.S3 reads/writes them with the S3 API.
+#
+# Local-dev credentials only (minioadmin/minioadmin123) — NOT secrets; they exist
+# solely inside this minikube cluster. Data is on an emptyDir (ephemeral, fine for
+# a laptop dev cluster); swap for a PVC if you want it to survive pod restarts.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loom
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: loom
+  labels:
+    app: minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:latest
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              value: "minioadmin"
+            - name: MINIO_ROOT_PASSWORD
+              value: "minioadmin123"
+          ports:
+            - containerPort: 9000
+              name: api
+            - containerPort: 9001
+              name: console
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              memory: "1Gi"
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: loom
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
