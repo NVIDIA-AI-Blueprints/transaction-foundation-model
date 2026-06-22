@@ -1,13 +1,10 @@
 # Loom — the agentic tool for training this foundation model, developed in-tree under Loom/.
-#
-# STATUS (2026-06-15): Loom is being rebuilt from scratch (see Loom/DESIGN.md). The new package
-# does not exist yet, so there is no editable install to wire here yet. The previous engine is
-# archived under Loom-legacy/ and can be installed for reference:
-#
-#     pip install -e ./Loom-legacy
-#
-# Once the new Loom/ has packaging, this file will point at it:
-#     # -e ./Loom
+# Editable install of the v0.1 engine (Phase-0 slice: tokenize/ingest/baseline, CPU, zero GPU).
+# Install from the repo root with:  pip install -e ./Loom
 #
 # Kept SEPARATE from requirements.txt on purpose: that file is consumed by the NeMo GPU notebook
 # runtime and must stay Loom-free.
+#
+# The previous generic-DS engine is archived under Loom-legacy/ (reference only):
+#   pip install -e ./Loom-legacy
+-e ./Loom

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loom"
+version = "0.1.0"
+description = "Loom — an agent harness for training SOTA foundation models. A small set of sharp, typed verbs you compile before you spend, driven identically by a human at a terminal and a Claude/Codex agent."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ZKAI Labs" }]
+keywords = ["foundation-model", "tokenizer", "agent", "transaction-foundation-model", "tfm"]
+
+dependencies = [
+    "numpy>=1.23",
+    "pandas>=1.5",
+    "PyYAML>=6.0",
+    "packaging>=21.0",
+    "scikit-learn>=1.1",
+    "safetensors>=0.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+loom = "loom.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["loom*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

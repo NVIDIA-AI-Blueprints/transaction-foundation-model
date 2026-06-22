@@ -1,0 +1,22 @@
+# A DELIBERATELY BROKEN TabFormer field-map — the contract-safety beat of the demo.
+# Two fields are given the SAME explicit token prefix `DUP`, so their default token
+# `DUP_UNK` would be assigned to two different ids. The C1 (injectivity) contract
+# catches it and REFUSES — no Corpus is written, with a named diff and a fix.
+#   loom tokenize --in IngestDataset/<n> --spec examples/tabformer_collision.yaml
+version: loom-fieldmap/1
+entity: User
+event: txn
+context_len: 4096
+fields:
+  - name: use_chip
+    source: Use Chip
+    strategy: mapping
+    prefix: DUP
+    values: [Swipe Transaction, Chip Transaction]
+    default: UNK
+  - name: city
+    source: Merchant City
+    strategy: mapping
+    prefix: DUP
+    values: [Houston, Brooklyn]
+    default: UNK

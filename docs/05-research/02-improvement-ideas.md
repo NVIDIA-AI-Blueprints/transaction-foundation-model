@@ -6,6 +6,8 @@ Run anything here as a tracked experiment via [Loom](../06-experimentation/01-lo
 
 **Suggested first wave** (high value-per-effort, in order): E2 → T1 → T2 → E1 → **D5 (customer-driven)** → O1 → A1 → D1 → G1.
 
+> These ideas sequenced into a gated build (with the data forks decided and customer milestones) live in the [Dataset & Training Roadmap](03-dataset-and-training-roadmap.md); the step-by-step Phase 0 / Phase 1 execution specs are in [`docs/backlog/`](../backlog/README.md).
+
 ---
 
 ## T — Tokenization & input representation
