@@ -72,7 +72,7 @@ This developer example shows how to build such a model end-to-end on NVIDIA GPUs
 > history was carried in via `git subtree`.
 
 Loom dependencies stay in `requirements-loom.txt` (not `requirements.txt`), so the NeMo GPU notebook
-pipeline in `.github/workflows/ci.yml` stays Loom-free.
+runtime stays Loom-free.
 
 ---
 

@@ -10,4 +10,4 @@
 #     # -e ./Loom
 #
 # Kept SEPARATE from requirements.txt on purpose: that file is consumed by the NeMo GPU notebook
-# CI (.github/workflows/ci.yml) and must stay Loom-free.
+# runtime and must stay Loom-free.
