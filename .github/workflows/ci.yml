@@ -26,6 +26,14 @@ concurrency:
 env:
   CONTAINER_NAME: tfm-nemo-backend
   NEMO_IMAGE: nvcr.io/nvidia/nemo:25.09.01
+  # NeMo-AutoModel git ref installed into /opt/venv and used by notebook 03 training.
+  # MUST stay pinned. Upstream main tracks torch APIs newer than this image ships
+  # (torch 2.8.0a0+5228986c39.nv25.06): it needs torch >= 2.9 since 4ab0887a
+  # (2026-06-25, init_device_mesh(backend_override=...)) and >= 2.10 since d3f3b2b6
+  # (2026-07-28, BlockMask in torch.distributed.pipelining.microbatch). 467ab514 is
+  # the last commit that still imports cleanly on torch 2.8. Bump this together with
+  # NEMO_IMAGE -- never back to @main, or notebook 03 silently stops training again.
+  NEMO_AUTOMODEL_REF: "467ab514d2aad66540776ae2bea7fb32d499abdd"
   # Space-separated paths relative to repo root (under /notebooks in the container). Order matters.
   PAPERMILL_NOTEBOOKS: 01_dataset_baseline.ipynb 02_seq_preproc_tokenization.ipynb 03_foundation_model_training.ipynb 04_inference_embedding_extraction.ipynb 05_xgboost_fraud_detection.ipynb
   # Prebuilt image with blueprint-github-test test suite (pytest inside /app).
@@ -341,16 +349,17 @@ jobs:
           fi
 
           # Notebook 03 uses /opt/venv/bin/python. PyPI nemo-automodel 0.3.x can lag NeMo 26 image transformers
-          # (TypeError: check_model_inputs() missing ...). Install from upstream main (see get_check_model_inputs_decorator).
+          # (TypeError: check_model_inputs() missing ...), so install from git -- but at the pinned
+          # NEMO_AUTOMODEL_REF, not @main. See the env block for why an unpinned main breaks training here.
           if ! command -v git >/dev/null 2>&1; then
             apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git
           fi
           if [ -x /opt/venv/bin/python ]; then
             /opt/venv/bin/python -m pip install -q "pip>=24" setuptools wheel
-            /opt/venv/bin/python -m pip install -q "git+https://github.com/NVIDIA/NeMo-AutoModel.git@main"
+            /opt/venv/bin/python -m pip install -q "git+https://github.com/NVIDIA/NeMo-AutoModel.git@${{ env.NEMO_AUTOMODEL_REF }}"
           else
             "$(command -v python)" -m pip install -q "pip>=24" setuptools wheel
-            "$(command -v python)" -m pip install -q "git+https://github.com/NVIDIA/NeMo-AutoModel.git@main"
+            "$(command -v python)" -m pip install -q "git+https://github.com/NVIDIA/NeMo-AutoModel.git@${{ env.NEMO_AUTOMODEL_REF }}"
           fi
 
           cat >/tmp/tfm-cuda-ldpath.sh <<'LDPATH'
