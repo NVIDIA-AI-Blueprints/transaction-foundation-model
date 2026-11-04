@@ -362,6 +362,19 @@ jobs:
             "$(command -v python)" -m pip install -q "git+https://github.com/NVIDIA/NeMo-AutoModel.git@${{ env.NEMO_AUTOMODEL_REF }}"
           fi
 
+          # NeMo-AutoModel pulls the latest pyarrow (needs NumPy 2), but the venv keeps NumPy 1.26
+          # and cudf-cu12 25.06 requires pyarrow<20. Re-pin so notebook 01 can import pyarrow/cudf.
+          PIN_PY=/opt/venv/bin/python; [ -x "$PIN_PY" ] || PIN_PY="$(command -v python)"
+          "$PIN_PY" -m pip install -q "pyarrow>=14.0.0,<20.0.0a0"
+          "$PIN_PY" -c "import numpy, pyarrow; print('numpy', numpy.__version__, 'pyarrow', pyarrow.__version__)"
+
+          # Backport NVIDIA-NeMo/Automodel d7ada67a (#4544): the pinned ref autotunes lora_db_kernel on
+          # key "S", which is not a kernel argument; newer Triton rejects it at import time.
+          LORA_KERNEL="$("$PIN_PY" -c 'import importlib.util as u; print(u.find_spec("nemo_automodel").submodule_search_locations[0])')/components/_peft/lora_kernel.py"
+          sed -i 's/key=\["S", "M", "K"\]/key=["M", "K"]/' "$LORA_KERNEL"
+          grep -n 'key=\["M", "K"\]' "$LORA_KERNEL"
+          "$PIN_PY" -c "import triton; print('triton', triton.__version__)" || true
+
           cat >/tmp/tfm-cuda-ldpath.sh <<'LDPATH'
           _site="$(python -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null)" || _site=""
           export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
