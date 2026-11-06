@@ -97,6 +97,8 @@ Notebooks 04 and 05 load the pre-trained checkpoint from `models/decoder-foundat
 
 Notebook 03 runs a short 30-step demo to illustrate the training pipeline; its output is saved to a separate directory (`models/decoder-demo/`) and is **not** used by notebooks 04\–05. Whether you run notebook 03 or skip it, the pre-trained checkpoint from Git LFS is what notebooks 04 and 05 expect.
 
+> **Note:** The shipped `models/decoder-foundation-model/` checkpoint, and the embeddings and results saved in notebooks 04 and 05, were produced with an earlier version of `src/clm_data.py` whose labels were not shifted, so that model was trained to reproduce its current input token (with `<pad>` positions scored) rather than to predict the next token. The current `src/clm_data.py` trains true next-token prediction. Those checkpoint-based numbers do not reflect it until the model is re-pretrained at full length (notebook 03 only runs a 30-step demo into `models/decoder-demo/`) and notebooks 04 and 05 are re-run on the new checkpoint.
+
 ---
 
 ### Deployment
