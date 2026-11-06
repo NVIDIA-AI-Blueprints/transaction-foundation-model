@@ -25,11 +25,17 @@ Corpus line format:
 
 For causal LM:
     input_ids = full token sequence
-    labels    = same as input_ids, with <pad> positions set to -100
-                (HuggingFace convention: -100 = ignore in loss)
+    labels    = input_ids shifted left by one: labels[i] = input_ids[i + 1]
+                The final position has no next token and is set to -100.
+                Any label that would be <pad> is also set to -100
+                (HuggingFace convention: -100 = ignore in loss), so padding is
+                neither scored nor counted in the loss denominator.
 
-The model's forward pass handles the internal shift: it predicts
-position i+1 from position i.
+The shift has to happen here. NeMo AutoModel's ``MaskedCrossEntropy`` (the
+``loss_fn`` in configs/pretrain_financial_decoder.yaml) and the train recipe
+do not shift: they score ``logits[i]`` against ``labels[i]`` directly. With
+unshifted labels the model is trained to copy its own input instead of
+predicting the next token.
 
 NeMo AutoModel Integration
 --------------------------
@@ -66,6 +72,8 @@ class FinancialCLMDataset(Dataset):
     Compatible with NeMo AutoModel's ``StatefulDataLoader`` — returns dicts
     with ``input_ids`` and ``labels`` tensors, matching the interface expected
     by ``MaskedCrossEntropy`` loss and HuggingFace causal LM forward().
+    ``labels`` are already shifted for next-token prediction (see module
+    docstring); neither the loss nor the recipe shifts them again.
     """
 
     def __init__(
@@ -90,8 +98,16 @@ class FinancialCLMDataset(Dataset):
         input_ids = np.full(self.seq_length, self.pad_token_id, dtype=np.int64)
         input_ids[: len(tokens)] = tokens
 
+        # Next-token prediction: logits[i] is scored against input_ids[i + 1].
+        # NeMo's MaskedCrossEntropy does not shift internally, so shift here.
+        # The last position has no target and stays -100.
         labels = np.full(self.seq_length, -100, dtype=np.int64)
-        labels[: len(tokens)] = tokens
+        n = len(tokens)
+        if n > 1:
+            labels[: n - 1] = tokens[1:]
+        # load_corpus_and_tokenize pads lines to seq_length with <pad> via
+        # tokenizer.encode(), so <pad> can appear in ``tokens``. Never score it.
+        labels[labels == self.pad_token_id] = -100
 
         return {
             "input_ids": torch.from_numpy(input_ids),
