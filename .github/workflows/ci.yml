@@ -370,6 +370,16 @@ jobs:
             "${PIN_PY}" -c "import numpy, pyarrow; print('${PIN_PY}', 'numpy', numpy.__version__, 'pyarrow', pyarrow.__version__)"
           done
 
+          # Backport NVIDIA-NeMo/Automodel d7ada67a (#4544): the pinned ref autotunes lora_db_kernel on key "S",
+          # which is not a kernel argument; newer Triton rejects it at import time (notebook 03).
+          for PATCH_PY in "$(command -v python)" /opt/venv/bin/python; do
+            [ -x "${PATCH_PY}" ] || continue
+            NA_DIR="$("${PATCH_PY}" -c 'import importlib.util as u; s = u.find_spec("nemo_automodel"); print(s.submodule_search_locations[0] if s else "")' 2>/dev/null)" || NA_DIR=""
+            [ -n "${NA_DIR}" ] || continue
+            sed -i 's/key=\["S", "M", "K"\]/key=["M", "K"]/' "${NA_DIR}/components/_peft/lora_kernel.py"
+            grep -n 'key=\["M", "K"\]' "${NA_DIR}/components/_peft/lora_kernel.py"
+          done
+
           cat >/tmp/tfm-cuda-ldpath.sh <<'LDPATH'
           _site="$(python -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null)" || _site=""
           export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
