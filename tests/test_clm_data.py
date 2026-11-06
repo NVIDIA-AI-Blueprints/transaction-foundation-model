@@ -20,6 +20,7 @@ NeMo AutoModel's ``MaskedCrossEntropy`` scores ``logits[i]`` against
 ``labels[i] = input_ids[i + 1]``. ``<pad>`` must never be a label target.
 """
 
+import re
 import sys
 import types
 from pathlib import Path
@@ -78,11 +79,19 @@ def test_degenerate_sequences_have_no_targets(tokens):
     assert (ex["labels"] == -100).all()
 
 
-def test_unshifted_loss_is_what_nemo_would_score():
-    """MaskedCrossEntropy-style scoring (no internal shift) rewards next-token logits.
+def test_labels_align_with_next_token_under_unshifted_ce():
+    """Label alignment check under an unshifted cross-entropy.
 
-    Logits that put all mass on input_ids[i + 1] must give ~0 loss with the
-    dataset's labels; logits that copy input_ids[i] must not.
+    This does NOT import or run NeMo's ``MaskedCrossEntropy``. It reimplements
+    the one property this dataset relies on, read from the pinned source
+    (``NEMO_AUTOMODEL_REF``, see ``test_pinned_nemo_automodel_ref_is_the_one_checked``):
+    the loss is ``F.cross_entropy(logits.view(-1, V), labels.view(-1),
+    reduction="sum")`` / ``num_label_tokens`` with no shift, i.e.
+    ``logits[i]`` is scored against ``labels[i]``. See
+    https://github.com/NVIDIA/NeMo-AutoModel/blob/467ab514d2aad66540776ae2bea7fb32d499abdd/nemo_automodel/components/loss/masked_ce.py#L84
+
+    Under that scoring, logits that put all mass on input_ids[i + 1] must give
+    ~0 loss with the dataset's labels; logits that copy input_ids[i] must not.
     """
     vocab = 16
     tokens = [BOS, 10, 11, 12, EOS] + [PAD] * 3
@@ -100,6 +109,29 @@ def test_unshifted_loss_is_what_nemo_would_score():
     copy_loss = F.cross_entropy(copy_logits, labels, reduction="sum") / n
     assert next_loss < 1e-3
     assert copy_loss > 10
+
+
+# NeMo-AutoModel commit whose MaskedCrossEntropy (no shift) and train_ft recipe
+# (pops ``labels`` before ``model(**batch)``, passes them to the loss unchanged)
+# the shifted labels were checked against.
+CHECKED_NEMO_AUTOMODEL_REF = "467ab514d2aad66540776ae2bea7fb32d499abdd"
+
+
+def test_pinned_nemo_automodel_ref_is_the_one_checked():
+    """Guard: fail if CI's NeMo-AutoModel pin moves without re-checking the loss.
+
+    The dataset pre-shifts labels only because the pinned loss/recipe do not
+    shift. If ``NEMO_AUTOMODEL_REF`` in .github/workflows/ci.yml changes,
+    re-read ``nemo_automodel/components/loss/masked_ce.py`` and
+    ``nemo_automodel/recipes/llm/train_ft.py`` at the new ref, confirm neither
+    shifts labels, then update ``CHECKED_NEMO_AUTOMODEL_REF``.
+    """
+    ci = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+    if not ci.exists():
+        pytest.skip("CI workflow not present")
+    m = re.search(r'^\s*NEMO_AUTOMODEL_REF:\s*"?([0-9a-f]{40})"?', ci.read_text(), re.M)
+    assert m, "NEMO_AUTOMODEL_REF (full commit SHA) not found in ci.yml"
+    assert m.group(1) == CHECKED_NEMO_AUTOMODEL_REF
 
 
 def test_load_corpus_and_tokenize_does_not_label_padding(tmp_path, monkeypatch):
