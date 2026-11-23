@@ -362,6 +362,20 @@ jobs:
             "$(command -v python)" -m pip install -q "git+https://github.com/NVIDIA/NeMo-AutoModel.git@${{ env.NEMO_AUTOMODEL_REF }}"
           fi
 
+          # Triton in this env rejects an autotune key that is not a kernel argument, so importing the pinned
+          # NeMo-AutoModel fails (lora_kernel.py: key contains names that are not kernel arguments: S).
+          # Backport upstream Automodel d7ada67a: drop "S" from lora_db_kernel's autotune key.
+          AM_PY=/opt/venv/bin/python
+          [ -x "${AM_PY}" ] || AM_PY="$(command -v python)"
+          AM_DIR="$("${AM_PY}" -c 'import importlib.util, os; print(os.path.dirname(importlib.util.find_spec("nemo_automodel").origin))')"
+          LORA_KERNEL="${AM_DIR}/components/_peft/lora_kernel.py"
+          sed -i 's/key=\["S", "M", "K"\]/key=["M", "K"]/' "${LORA_KERNEL}"
+          if grep -q 'key=\["S", "M", "K"\]' "${LORA_KERNEL}"; then
+            echo "ERROR: lora_kernel.py autotune key backport not applied: ${LORA_KERNEL}"
+            exit 1
+          fi
+          grep -n 'key=\["M", "K"\]' "${LORA_KERNEL}"
+
           # The NeMo-AutoModel install above upgrades pyarrow to a release that needs NumPy 2, while the env keeps
           # NumPy 1.26 (cudf-cu12 25.06 needs pyarrow<20). Re-pin pyarrow in every interpreter the notebooks use.
           for PIN_PY in "$(command -v python)" /opt/venv/bin/python; do
